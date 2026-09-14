@@ -21,6 +21,6 @@ sending:
   - Sales2
   - Sales3
   - Sales4
-  per_account_daily_limit: 13
+  per_account_daily_limit: 12
 tracker_sync:
   enabled: true
