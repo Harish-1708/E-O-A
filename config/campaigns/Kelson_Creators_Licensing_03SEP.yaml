@@ -1,4 +1,4 @@
-status: active
+status: paused
 asana:
   enabled: true
   project_name: Creator Outreach
@@ -10,12 +10,13 @@ schedule:
   - mon
   - tue
 sending:
-  daily_limit: 30
+  daily_limit: 50
   sender_rotation: true
   rotation_accounts:
   - Sales2
   - Sales3
   - Sales4
-  per_account_daily_limit: 10
+  - sales1
+  per_account_daily_limit: 13
 tracker_sync:
   enabled: true
