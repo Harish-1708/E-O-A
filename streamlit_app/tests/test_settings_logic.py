@@ -4,6 +4,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from settings_logic import (
+    load_raw_override_live,
     load_raw_override, validate_settings, build_updated_override,
     override_to_yaml_bytes, override_file_path, build_asana_settings_override,
     build_tracker_sync_settings_override,
@@ -191,3 +192,60 @@ def test_build_tracker_sync_settings_override_never_mutates_input():
 def test_build_tracker_sync_settings_override_disabled():
     updated = build_tracker_sync_settings_override({}, enabled=False)
     assert updated["tracker_sync"]["enabled"] is False
+
+
+# ---------- live override reads (settings not reflecting after save) ----------
+
+class _FakeGitHubClient:
+    def __init__(self, content=None, error=None):
+        self._content = content
+        self._error = error
+        self.calls = []
+
+    def get_file_content(self, path, ref="main"):
+        self.calls.append((path, ref))
+        if self._error:
+            raise Exception(self._error)
+        return self._content
+
+
+def test_load_raw_override_live_prefers_github_over_stale_disk(tmp_path):
+    """The actual reported bug: writes commit to GitHub but reads came
+    from the LOCAL checkout, which on Streamlit Cloud only changes on
+    redeploy. A saved change was visibly committed on GitHub yet never
+    appeared in the UI — surviving refresh, cache expiry and even a full
+    logout/login, because none of those re-read the repository."""
+    (tmp_path / "X.yaml").write_text("status: active\n")   # stale local copy
+    client = _FakeGitHubClient(content=b"status: paused\n")  # live truth
+
+    result = load_raw_override_live("X", client, str(tmp_path))
+
+    assert result == {"status": "paused"}
+    assert client.calls == [("config/campaigns/X.yaml", "main")]
+
+
+def test_load_raw_override_live_404_returns_empty_not_stale_disk(tmp_path):
+    """A 404 is a definitive answer, not a failure — the file genuinely
+    isn't on the branch. Falling back to disk here would resurrect a
+    local copy of a deliberately deleted override."""
+    (tmp_path / "X.yaml").write_text("status: active\n")
+    client = _FakeGitHubClient(error="Failed to read: 404 Not Found")
+    assert load_raw_override_live("X", client, str(tmp_path)) == {}
+
+
+def test_load_raw_override_live_falls_back_to_disk_on_api_failure(tmp_path):
+    """A real read failure (network, auth, rate limit) must degrade to
+    the previous behaviour rather than erroring or showing empty config."""
+    (tmp_path / "X.yaml").write_text("status: active\n")
+    client = _FakeGitHubClient(error="500 server error")
+    assert load_raw_override_live("X", client, str(tmp_path)) == {"status": "active"}
+
+
+def test_load_raw_override_live_falls_back_when_no_client(tmp_path):
+    (tmp_path / "X.yaml").write_text("status: active\n")
+    assert load_raw_override_live("X", None, str(tmp_path)) == {"status": "active"}
+
+
+def test_load_raw_override_live_missing_everywhere_is_empty(tmp_path):
+    client = _FakeGitHubClient(error="404")
+    assert load_raw_override_live("NoSuch", client, str(tmp_path)) == {}
