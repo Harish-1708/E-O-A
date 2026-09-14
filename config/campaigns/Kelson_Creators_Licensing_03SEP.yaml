@@ -9,16 +9,14 @@ schedule:
   send_days:
   - mon
   - tue
-  - wed
-  - thu
-  - fri
 sending:
-  daily_limit: 30
+  daily_limit: 50
   sender_rotation: true
   rotation_accounts:
   - Sales2
   - Sales3
   - Sales4
-  per_account_daily_limit: 10
+  - sales1
+  per_account_daily_limit: 12
 tracker_sync:
   enabled: true
