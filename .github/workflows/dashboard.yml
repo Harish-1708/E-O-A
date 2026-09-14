@@ -16,7 +16,18 @@ on:
     # Every 6 hours, as a backstop — dashboards also refresh automatically
     # right after every Send Batch and Check Replies run, so this mainly
     # covers periods with no activity plus keeps error-count summaries current.
-    - cron: "0 */6 * * *"
+    - cron: "25 */6 * * *"
+
+# Shared across every scheduled workflow that touches Google Sheets.
+# Google's "read requests per minute" quota is per SERVICE ACCOUNT, not per
+# workflow, so these all draw on ONE budget. The previous per-workflow groups
+# only stopped a workflow overlapping ITSELF — two DIFFERENT workflows could
+# still hit Sheets simultaneously and blow the quota, which is what produced
+# the intermittent 429s. A shared group serialises them instead.
+# cancel-in-progress: false so a queued run still happens, just not at once.
+concurrency:
+  group: google-sheets-api
+  cancel-in-progress: false
 
 jobs:
   dashboard:
