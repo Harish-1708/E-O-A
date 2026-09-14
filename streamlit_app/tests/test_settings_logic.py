@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from settings_logic import (
-    load_raw_override_live,
+    load_raw_override_live, merge_live_override_into_cfg,
     load_raw_override, validate_settings, build_updated_override,
     override_to_yaml_bytes, override_file_path, build_asana_settings_override,
     build_tracker_sync_settings_override,
@@ -249,3 +249,46 @@ def test_load_raw_override_live_falls_back_when_no_client(tmp_path):
 def test_load_raw_override_live_missing_everywhere_is_empty(tmp_path):
     client = _FakeGitHubClient(error="404")
     assert load_raw_override_live("NoSuch", client, str(tmp_path)) == {}
+
+
+# ---------- live overlay on the DISPLAY path ----------
+
+def test_merge_live_override_shows_newly_added_schedule_days():
+    """The exact reported symptom: extra days added and saved, committed
+    fine on GitHub, but the Schedule tab kept showing the old days —
+    because the tab DISPLAYS from campaign_cfg, built from the local
+    checkout, which is frozen until redeploy."""
+    base = {"_campaign_name": "X", "schedule": {"timezone": "UTC", "send_days": ["mon"]}}
+    merged = merge_live_override_into_cfg(base, {"schedule": {"send_days": ["mon", "tue", "wed"]}})
+    assert merged["schedule"]["send_days"] == ["mon", "tue", "wed"]
+    assert merged["schedule"]["timezone"] == "UTC"  # untouched default preserved
+
+
+def test_merge_live_override_shows_newly_added_sender_accounts():
+    base = {"_campaign_name": "X",
+            "sending": {"daily_limit": 100, "sender_rotation": False, "rotation_accounts": ["a"]}}
+    merged = merge_live_override_into_cfg(base, {"sending": {"rotation_accounts": ["a", "b", "c"]}})
+    assert merged["sending"]["rotation_accounts"] == ["a", "b", "c"]
+    # Keys the override didn't mention must survive — a partial override
+    # must never silently drop the rest of the merged config.
+    assert merged["sending"]["daily_limit"] == 100
+    assert merged["sending"]["sender_rotation"] is False
+
+
+def test_merge_live_override_never_mutates_the_cached_input():
+    """campaign_cfg comes from an st.cache_data-backed call, so the same
+    dict object can be shared across reruns — mutating it would corrupt
+    every later render."""
+    base = {"_campaign_name": "X", "sending": {"rotation_accounts": ["a"]}}
+    merge_live_override_into_cfg(base, {"sending": {"rotation_accounts": ["a", "b"]}})
+    assert base["sending"]["rotation_accounts"] == ["a"]
+
+
+def test_merge_live_override_empty_is_a_noop():
+    base = {"_campaign_name": "X", "sending": {"daily_limit": 5}}
+    assert merge_live_override_into_cfg(base, {}) is base
+
+
+def test_merge_live_override_carries_status_through():
+    base = {"_campaign_name": "X", "status": "active"}
+    assert merge_live_override_into_cfg(base, {"status": "paused"})["status"] == "paused"
