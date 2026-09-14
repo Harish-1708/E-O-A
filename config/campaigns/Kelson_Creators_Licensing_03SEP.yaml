@@ -12,6 +12,7 @@ schedule:
   - wed
   - thu
   - fri
+  - sat
 sending:
   daily_limit: 50
   sender_rotation: true
