@@ -43,8 +43,9 @@ from campaign_builder import (  # noqa: E402
     validate_campaign_name, commit_message_for_campaign, confirmation_matches_campaign_name,
     list_campaign_files_to_delete, build_campaign_duplication_files,
 )
-from settings_logic import (  # noqa: E402
-    load_raw_override, validate_settings, build_updated_override, override_to_yaml_bytes, override_file_path,
+from settings_logic import (
+    load_raw_override_live,  # noqa: E402
+    validate_settings, build_updated_override, override_to_yaml_bytes, override_file_path,
     build_asana_settings_override, build_tracker_sync_settings_override,
 )
 from schedule_logic import (  # noqa: E402
@@ -92,6 +93,18 @@ def _fetch_sheet_data(campaign_cfg):
     responses = connector.get_all_responses(campaign_cfg["responses_tab"])
     send_log = connector.get_all_send_log(campaign_cfg["send_log_tab"])
     return leads, responses, send_log
+
+
+
+def _safe_github_client():
+    """The GitHub client, or None if it can't be built (no token, bad
+    config). Returning None rather than raising lets every settings READ
+    degrade to the local checkout instead of breaking the whole page —
+    reads must never be harder to do than they were before going live."""
+    try:
+        return _get_github_client()
+    except Exception:  # noqa: BLE001 - missing/invalid token, etc.
+        return None
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -1043,7 +1056,7 @@ def _render_settings_tab(campaign_cfg, leads):
                 st.error(e)
         else:
             try:
-                raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
+                raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
                 updated = build_updated_override(raw_override, daily_limit, per_account_daily_limit,
                                                   sender_rotation, rotation_accounts)
                 client = _get_github_client()
@@ -1160,7 +1173,7 @@ def _render_schedule_tab(campaign_cfg):
                 st.error(e)
         else:
             try:
-                raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
+                raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
                 updated = build_updated_schedule_override(raw_override, selected_timezone, window_start,
                                                             window_end, send_days)
                 client = _get_github_client()
@@ -1266,7 +1279,7 @@ def _update_campaign_status(campaign_name: str, new_status: str) -> bool:
     passed — same "may take a minute" caveat as every other config write
     in this app."""
     try:
-        raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
+        raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
         updated = build_status_override(raw_override, new_status)
         client = _get_github_client()
         client.create_file(
@@ -1285,7 +1298,7 @@ def _temporarily_remove_campaign(campaign_name: str, current_status: str) -> boo
     the campaign back exactly as it was — see
     launch_logic.build_delete_override's docstring."""
     try:
-        raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
+        raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
         updated = build_delete_override(raw_override, current_status)
         client = _get_github_client()
         client.create_file(
@@ -1303,7 +1316,7 @@ def _restore_campaign(campaign_name: str) -> bool:
     """Restores whatever status was recorded at Temporarily Remove time —
     see launch_logic.build_restore_override's docstring."""
     try:
-        raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
+        raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
         updated = build_restore_override(raw_override)
         client = _get_github_client()
         client.create_file(
@@ -1398,7 +1411,7 @@ def _render_asana_sync_section_in_settings(campaign_cfg):
                 st.error("Enter the Asana project name, or uncheck Enable.")
             else:
                 try:
-                    raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
+                    raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
                     updated = build_asana_settings_override(raw_override, enabled, project_name.strip())
                     client = _get_github_client()
                     client.create_file(
@@ -1447,7 +1460,7 @@ def _render_tracker_sync_section_in_settings(campaign_cfg):
                                        key="tracker_sync_enabled")
         if st.button("💾 Save Creator Tracker Settings", key="tracker_sync_save"):
             try:
-                raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
+                raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
                 updated = build_tracker_sync_settings_override(raw_override, tracker_enabled)
                 client = _get_github_client()
                 client.create_file(
