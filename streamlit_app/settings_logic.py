@@ -74,6 +74,44 @@ def load_raw_override_live(campaign_name: str, github_client, campaigns_dir: str
     return load_raw_override(campaign_name, campaigns_dir)
 
 
+def merge_live_override_into_cfg(campaign_cfg: Dict, live_override: Dict) -> Dict:
+    """Overlays a LIVE override file on top of an already-merged
+    campaign_cfg, returning a new dict (never mutating the input, which
+    may be a cached object shared across reruns).
+
+    campaign_cfg is built from the local checkout — defaults from
+    settings.yaml merged with whatever override file happened to be on
+    disk at deploy time. On Streamlit Cloud that disk copy is frozen
+    until a redeploy, so the Settings and Schedule tabs displayed stale
+    values indefinitely even though the save had committed to GitHub
+    correctly. Overlaying the live override fixes the DISPLAY side the
+    same way load_raw_override_live fixed the read-modify-write side.
+
+    Only the keys an override file can legitimately contain are
+    overlaid, and only when present, so nothing else in the merged
+    config is disturbed. `sending` and `schedule` are merged key-by-key
+    rather than replaced wholesale — an override that sets only
+    daily_limit must not silently drop the other sending keys that came
+    from defaults.
+    """
+    if not live_override:
+        return campaign_cfg
+    merged = dict(campaign_cfg)
+    for section in ("sending", "schedule", "asana", "tracker_sync"):
+        if section in live_override:
+            base = dict(merged.get(section) or {})
+            incoming = live_override[section]
+            if isinstance(incoming, dict):
+                base.update(incoming)
+                merged[section] = base
+            else:
+                merged[section] = incoming
+    for scalar in ("status", "previous_status"):
+        if scalar in live_override:
+            merged[scalar] = live_override[scalar]
+    return merged
+
+
 def validate_settings(daily_limit: int, per_account_daily_limit: Optional[int]) -> List[str]:
     """Mirrors outreach.apply_sending_overrides' own validation rules, so
     Settings can never persist a value the core system would itself
