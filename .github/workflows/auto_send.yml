@@ -20,7 +20,7 @@ on:
     # its own scheduling delay (typically a few minutes under load), so
     # treat "every 30" as "within roughly 30-40 minutes of the window
     # opening", not to-the-minute precision.
-    - cron: "*/30 * * * *"
+    - cron: "5,35 * * * *"
 
 # Two overlapping runs must never happen here specifically: send_batch
 # reads "how many sent today" ONCE at the start of a run to compute the
@@ -29,8 +29,15 @@ on:
 # available, sending real duplicate emails to the same leads. Queuing the
 # second run (never cancelling or running both at once) is what prevents
 # this.
+# Shared across every scheduled workflow that touches Google Sheets.
+# Google's "read requests per minute" quota is per SERVICE ACCOUNT, not per
+# workflow, so these all draw on ONE budget. The previous per-workflow groups
+# only stopped a workflow overlapping ITSELF — two DIFFERENT workflows could
+# still hit Sheets simultaneously and blow the quota, which is what produced
+# the intermittent 429s. A shared group serialises them instead.
+# cancel-in-progress: false so a queued run still happens, just not at once.
 concurrency:
-  group: auto-send
+  group: google-sheets-api
   cancel-in-progress: false
 
 jobs:
