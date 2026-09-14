@@ -16,7 +16,7 @@ from config import (  # noqa: E402
     WORKFLOW_SET_LEAD_OVERRIDE,
     TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH,
 )
-from email_account_slots_logic import read_local_slot_mapping  # noqa: E402
+from email_account_slots_logic import read_slot_mapping_live  # noqa: E402
 from accounts_logic import merge_account_directories  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from preview_logic import list_campaigns, get_campaign_cfg  # noqa: E402
@@ -44,7 +44,7 @@ from campaign_builder import (  # noqa: E402
     list_campaign_files_to_delete, build_campaign_duplication_files,
 )
 from settings_logic import (
-    load_raw_override_live,  # noqa: E402
+    load_raw_override_live, merge_live_override_into_cfg,  # noqa: E402
     validate_settings, build_updated_override, override_to_yaml_bytes, override_file_path,
     build_asana_settings_override, build_tracker_sync_settings_override,
 )
@@ -991,6 +991,11 @@ def _render_sequences_tab(campaign_cfg, leads):
 
 def _render_settings_tab(campaign_cfg, leads):
     campaign_name = campaign_cfg["_campaign_name"]
+    # campaign_cfg is built from the LOCAL checkout, which on Streamlit
+    # Cloud is frozen until redeploy — overlay the live override so saved
+    # values actually show up here. See merge_live_override_into_cfg.
+    campaign_cfg = merge_live_override_into_cfg(
+        campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
     sending = campaign_cfg.get("sending", {})
 
     # Merges BOTH sources — the legacy Streamlit-secrets-based directory
@@ -998,7 +1003,11 @@ def _render_settings_tab(campaign_cfg, leads):
     # button writes to — so an account added there shows up here too,
     # without needing to also hand-maintain [email_accounts_directory].
     streamlit_secret_directory = dict(st.secrets.get("email_accounts_directory", {}))
-    slot_mapping = read_local_slot_mapping(EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH)
+    # LIVE read — an account added via Email Accounts commits this file to
+    # GitHub, but the local checkout stays frozen until redeploy, so a new
+    # account never appeared in this picker. See read_slot_mapping_live.
+    slot_mapping = read_slot_mapping_live(_safe_github_client(),
+                                           EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH)
     account_directory = merge_account_directories(streamlit_secret_directory, slot_mapping)
     available_accounts = list(account_directory.keys())
 
@@ -1138,6 +1147,9 @@ def _render_delete_campaign_section(campaign_cfg):
 
 def _render_schedule_tab(campaign_cfg):
     campaign_name = campaign_cfg["_campaign_name"]
+    # Same live overlay as the Settings tab — see its comment.
+    campaign_cfg = merge_live_override_into_cfg(
+        campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
     current = get_current_schedule(campaign_cfg)
 
     st.caption(
