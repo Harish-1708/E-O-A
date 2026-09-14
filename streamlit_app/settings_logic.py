@@ -28,6 +28,52 @@ def load_raw_override(campaign_name: str, campaigns_dir: str) -> Dict:
         return yaml.safe_load(f) or {}
 
 
+def load_raw_override_live(campaign_name: str, github_client, campaigns_dir: str,
+                            branch: str = "main") -> Dict:
+    """The override file's raw content read LIVE from GitHub, falling
+    back to the local checkout only if GitHub can't be reached.
+
+    Why this exists — the actual reported bug: every settings write in
+    this app commits to GitHub via the API, but reads came from the
+    LOCAL checkout on disk. On Streamlit Cloud that checkout only
+    changes when the app redeploys, so a saved change could be visibly
+    committed on GitHub and still never appear in the UI — surviving a
+    refresh, a cache expiry, and even a full logout/login, because
+    nothing about those re-reads the repository. The user sees "saved
+    successfully", GitHub shows the commit, and the app keeps showing
+    the old value indefinitely.
+
+    Reading live closes that gap the same way the Sequences tab already
+    does for template files, which hit this identical problem earlier.
+
+    The local-disk fallback keeps this safe rather than fragile: if the
+    GitHub token is missing or the API call fails, behaviour degrades to
+    exactly what it was before instead of erroring out. A file that
+    genuinely doesn't exist yet returns {} — every campaign is valid
+    without an override file.
+    """
+    if github_client is not None:
+        try:
+            content = github_client.get_file_content(
+                f"config/campaigns/{campaign_name}.yaml", ref=branch)
+            if content is None:
+                return {}
+            return yaml.safe_load(content.decode("utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001
+            # A 404 is a definitive answer, not a failure: the override
+            # file genuinely does not exist on the branch, which is a
+            # normal, valid state. Returning {} here matters — falling
+            # back to disk instead could resurrect a stale local copy of
+            # a file that was deliberately deleted.
+            if "404" in str(exc):
+                return {}
+            # Anything else (network, auth, rate limit) is a real failure
+            # to READ, so degrade to the local checkout rather than
+            # erroring out or showing a misleadingly empty config.
+            pass
+    return load_raw_override(campaign_name, campaigns_dir)
+
+
 def validate_settings(daily_limit: int, per_account_daily_limit: Optional[int]) -> List[str]:
     """Mirrors outreach.apply_sending_overrides' own validation rules, so
     Settings can never persist a value the core system would itself
