@@ -24,8 +24,15 @@ on:
 # duplicate rows in the Response Sheet. cancel-in-progress: false means the
 # second run QUEUES and waits its turn instead of being killed mid-IMAP-
 # fetch — we want every run to still happen, just never two at once.
+# Shared across every scheduled workflow that touches Google Sheets.
+# Google's "read requests per minute" quota is per SERVICE ACCOUNT, not per
+# workflow, so these all draw on ONE budget. The previous per-workflow groups
+# only stopped a workflow overlapping ITSELF — two DIFFERENT workflows could
+# still hit Sheets simultaneously and blow the quota, which is what produced
+# the intermittent 429s. A shared group serialises them instead.
+# cancel-in-progress: false so a queued run still happens, just not at once.
 concurrency:
-  group: check-replies
+  group: google-sheets-api
   cancel-in-progress: false
 
 jobs:
