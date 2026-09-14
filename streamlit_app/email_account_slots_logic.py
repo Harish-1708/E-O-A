@@ -95,6 +95,34 @@ def get_account_names(mapping: Dict[str, Dict]) -> List[str]:
     return sorted(mapping.keys())
 
 
+def read_slot_mapping_live(github_client, abs_path: str, branch: str = "main") -> Dict[str, Dict]:
+    """The slot mapping read LIVE from GitHub, falling back to the local
+    checkout if GitHub can't be reached.
+
+    Adding an account commits this file to GitHub, but every reader used
+    the LOCAL copy — which on Streamlit Cloud is frozen until a
+    redeploy. So a newly added account was committed correctly and still
+    never appeared in the Settings sender-account picker, no matter how
+    long you waited or how many times you logged out and back in.
+
+    Same fallback contract as load_raw_override_live: a 404 means the
+    file genuinely isn't there yet (no accounts added) and returns {};
+    any other failure degrades to the local copy rather than erroring.
+    """
+    if github_client is not None:
+        try:
+            content = github_client.get_file_content(SLOT_MAPPING_PATH, ref=branch)
+            if content is None:
+                return {}
+            data = yaml.safe_load(content.decode("utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:  # noqa: BLE001
+            if "404" in str(exc):
+                return {}
+            pass
+    return read_local_slot_mapping(abs_path)
+
+
 def read_local_slot_mapping(abs_path: str) -> Dict[str, Dict]:
     """Local file read (the repo's own checkout), NOT a GitHub API call —
     same pattern as reading templates/settings.yaml elsewhere in this app.
