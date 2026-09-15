@@ -35,6 +35,32 @@ def list_campaigns() -> List[str]:
     return outreach.discover_campaign_names(config.TEMPLATES_ROOT)
 
 
+def list_campaigns_live(github_client) -> List[str]:
+    """Campaign names read LIVE from GitHub, falling back to the local
+    checkout if GitHub can't be reached.
+
+    A campaign exists because a templates/<name>/ folder exists, so
+    creating, duplicating or deleting one changes GitHub immediately
+    while the local checkout stays frozen until Streamlit Cloud
+    redeploys — the same staleness class as campaign settings and the
+    account slot mapping. Sorted for a stable display order regardless
+    of the order GitHub returns entries in.
+
+    Same fallback contract as the other live readers: any API failure
+    degrades to the previous local behaviour rather than erroring, and
+    an empty live result is treated as a real failure signal (a repo
+    with zero campaign folders is indistinguishable from a failed
+    listing here, and falling back is the safer of the two)."""
+    if github_client is not None:
+        try:
+            names = github_client.list_subdirectories("templates")
+            if names:
+                return sorted(names)
+        except Exception:  # noqa: BLE001 - network/auth/API failure
+            pass
+    return list_campaigns()
+
+
 def run_preview(campaign_name: str, stage_name: str, batch_size: int,
                  leads: List[Dict], forced_variant: Optional[str] = None,
                  ignore_wait_days: bool = False) -> List[Dict]:
