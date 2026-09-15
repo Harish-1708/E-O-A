@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from page_state import mark_active_page  # noqa: E402
 from auth import login_gate, current_user  # noqa: E402
 from config import REPO_ROOT, WORKFLOW_CHECK_REPLIES, WORKFLOW_SEND_REPLY, WORKFLOW_MARK_RESPONSES_READ  # noqa: E402
-from preview_logic import list_campaigns, get_campaign_cfg  # noqa: E402
+from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector, ReadOnlySheetsError  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from send_logic import build_check_replies_inputs  # noqa: E402
@@ -54,6 +54,15 @@ def _get_github_client() -> GitHubClient:
     gh = st.secrets["github"]
     return GitHubClient(token=gh["token"], owner=gh["owner"], repo=gh["repo"])
 
+def _safe_github_client():
+    """The GitHub client, or None if it can't be built. Returning None
+    rather than raising lets live reads degrade to the local checkout
+    instead of breaking the whole page."""
+    try:
+        return _get_github_client()
+    except Exception:  # noqa: BLE001 - missing/invalid token, etc.
+        return None
+
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _load_all_responses(campaign_names):
@@ -89,7 +98,7 @@ def _load_all_leads(campaign_names):
 
 
 try:
-    campaign_names = list_campaigns()
+    campaign_names = list_campaigns_live(_safe_github_client())
 except Exception as exc:  # noqa: BLE001
     st.error(f"Couldn't list campaigns: {exc}")
     st.stop()
