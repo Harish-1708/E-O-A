@@ -118,6 +118,28 @@ class GitHubClient:
         entries = resp.json()
         return [entry["name"] for entry in entries if entry.get("type") == "file"]
 
+    def list_subdirectories(self, path: str, ref: str = "main") -> List[str]:
+        """Directory names directly inside a repo directory, read fresh
+        from GitHub. The counterpart to list_directory_files, which
+        deliberately filters to type == "file" and so can never see a
+        campaign's own folder.
+
+        Needed because the campaign list itself is derived from which
+        folders exist under templates/ — so creating, duplicating or
+        deleting a campaign changed GitHub immediately while the app
+        kept listing the frozen local checkout until a redeploy.
+
+        Returns [] if the directory doesn't exist, matching
+        list_directory_files' contract."""
+        url = f"{GITHUB_API}/repos/{self.owner}/{self.repo}/contents/{path}"
+        resp = requests.get(url, headers=self._headers, params={"ref": ref}, timeout=self.timeout)
+        if resp.status_code == 404:
+            return []
+        if resp.status_code != 200:
+            raise GitHubActionsError(f"Failed to list '{path}': {resp.status_code} {resp.text[:300]}")
+        entries = resp.json()
+        return [entry["name"] for entry in entries if entry.get("type") == "dir"]
+
     def get_file_content(self, path: str, ref: str = "main") -> bytes:
         """Raw bytes of one file's current content, read fresh from
         GitHub — same "authoritative, never the local checkout" reason
