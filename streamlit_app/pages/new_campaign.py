@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from auth import login_gate, current_user  # noqa: E402
 from config import TEMPLATES_ROOT, WORKFLOW_DASHBOARD  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
-from preview_logic import list_campaigns  # noqa: E402
+from preview_logic import list_campaigns_live  # noqa: E402
 from campaign_builder import (  # noqa: E402
     validate_campaign_name, validate_variant_content, build_campaign_files,
     get_next_stage_for_campaign, commit_message_for_campaign, VARIANT_LETTERS,
@@ -36,6 +36,15 @@ def _get_github_client() -> GitHubClient:
     gh = st.secrets["github"]
     return GitHubClient(token=gh["token"], owner=gh["owner"], repo=gh["repo"])
 
+def _safe_github_client():
+    """The GitHub client, or None if it can't be built. Returning None
+    rather than raising lets live reads degrade to the local checkout
+    instead of breaking the whole page."""
+    try:
+        return _get_github_client()
+    except Exception:  # noqa: BLE001 - missing/invalid token, etc.
+        return None
+
 
 def _initialize_campaign_tabs(campaign_name: str) -> None:
     """Triggers the Dashboard workflow right after a commit — running it
@@ -56,7 +65,7 @@ def _initialize_campaign_tabs(campaign_name: str) -> None:
 
 
 try:
-    existing_campaigns = list_campaigns()
+    existing_campaigns = list_campaigns_live(_safe_github_client())
 except Exception as exc:  # noqa: BLE001
     st.error(f"Couldn't list existing campaigns: {exc}")
     existing_campaigns = []
