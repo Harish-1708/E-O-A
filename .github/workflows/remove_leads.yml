@@ -54,7 +54,34 @@ jobs:
           if [ -f "$PAYLOAD_PATH" ]; then
             git rm -f "$PAYLOAD_PATH"
             git commit -m "Remove processed removal payload: $PAYLOAD_PATH"
-            git push
+            # Push with retry-on-rebase: another workflow committing to
+            # main between this job's checkout and this push is routine,
+            # not exceptional, given how many workflows write to this
+            # same branch — NOT a hypothetical, this exact rejection was
+            # reported and reproduced against a live race. A bare
+            # `git push` with no retry meant the ENTIRE cleanup step
+            # failed outright on any such overlap, even though the
+            # actual data operation (above) had already succeeded — only
+            # this payload-file cleanup was ever at risk.
+            MAX_ATTEMPTS=5
+            pushed=false
+            for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+              if git push; then
+                echo "Pushed on attempt $attempt."
+                pushed=true
+                break
+              fi
+              echo "Push rejected (attempt $attempt/$MAX_ATTEMPTS) -- another commit landed on main. Rebasing and retrying..."
+              git fetch origin main
+              if ! git rebase origin/main; then
+                git rebase --abort
+                echo "Rebase failed -- will retry from a fresh fetch."
+              fi
+              sleep $(( (RANDOM % 3) + 1 ))
+            done
+            if [ "$pushed" = false ]; then
+              echo "::warning::Could not push payload cleanup after $MAX_ATTEMPTS attempts -- the actual data operation already succeeded; only this cleanup step is affected. The payload file will be removed on a future run."
+            fi
           else
             echo "Payload file already gone — nothing to clean up."
           fi
