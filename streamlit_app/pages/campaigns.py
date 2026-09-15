@@ -19,7 +19,7 @@ from config import (  # noqa: E402
 from email_account_slots_logic import read_slot_mapping_live  # noqa: E402
 from accounts_logic import merge_account_directories  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
-from preview_logic import list_campaigns, get_campaign_cfg  # noqa: E402
+from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
 from campaigns_hub_logic import build_campaigns_hub, filter_campaigns_by_search  # noqa: E402
 from campaign_analytics_logic import (  # noqa: E402
@@ -144,7 +144,7 @@ def _get_master_header_cached(campaign_name: str):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _load_hub_rows():
-    campaign_names = list_campaigns()
+    campaign_names = list_campaigns_live(_safe_github_client())
     return build_campaigns_hub(campaign_names, get_campaign_cfg, _fetch_sheet_data)
 
 
@@ -358,7 +358,7 @@ def _render_hub(just_arrived: bool):
             st.session_state["show_new_campaign_dialog"] = False
         if st.session_state["show_new_campaign_dialog"]:
             try:
-                existing_campaigns = list_campaigns()
+                existing_campaigns = list_campaigns_live(_safe_github_client())
             except Exception:  # noqa: BLE001
                 existing_campaigns = []
             _new_campaign_dialog(existing_campaigns)
@@ -367,7 +367,7 @@ def _render_hub(just_arrived: bool):
         st.session_state["duplicating_campaign"] = None
     if st.session_state.get("duplicating_campaign"):
         try:
-            existing_campaigns = list_campaigns()
+            existing_campaigns = list_campaigns_live(_safe_github_client())
         except Exception:  # noqa: BLE001
             existing_campaigns = []
         _duplicate_campaign_dialog(st.session_state["duplicating_campaign"], existing_campaigns)
