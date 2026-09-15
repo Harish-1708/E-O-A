@@ -1,0 +1,21 @@
+{
+  "leads": [
+    {
+      "FirstName": "Carlos",
+      "LastName": "Murray",
+      "Name": "Carlos Murray",
+      "Email": "Carlosmurray32@hotmail.com",
+      "Client": "DudeRobe",
+      "Product": "DudeRobe",
+      "Creator": "carlosmurray706",
+      "Content Score": "5",
+      "Video File": "",
+      "Refunnel Link": "",
+      "Usage Rights": "",
+      "Rights Expiration": "",
+      "Ad Ready": "",
+      "Last Contact Date": ""
+    }
+  ],
+  "allow_duplicate_emails": true
+}
