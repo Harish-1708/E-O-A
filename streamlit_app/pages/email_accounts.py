@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from page_state import mark_active_page  # noqa: E402
 from auth import login_gate, current_user  # noqa: E402
 from config import REPO_ROOT, SETTINGS_PATH, WORKFLOW_CHECK_ACCOUNT_HEALTH, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH  # noqa: E402
-from preview_logic import list_campaigns, get_campaign_cfg  # noqa: E402
+from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector, ReadOnlySheetsError  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from accounts_logic import (  # noqa: E402
@@ -17,7 +17,7 @@ from accounts_logic import (  # noqa: E402
 )
 from email_account_slots_logic import (  # noqa: E402
     SLOT_MAPPING_PATH, serialize_slot_mapping, add_account_to_mapping,
-    remove_account_from_mapping, update_account_address_in_mapping, read_local_slot_mapping,
+    remove_account_from_mapping, update_account_address_in_mapping, read_slot_mapping_live,
     build_account_secret_payload, parse_bulk_accounts_csv,
 )
 from data_import_logic import parse_csv_bytes  # noqa: E402
@@ -58,7 +58,21 @@ def _get_github_client() -> GitHubClient:
     return GitHubClient(token=gh["token"], owner=gh["owner"], repo=gh["repo"])
 
 
-slot_mapping = read_local_slot_mapping(EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH)
+def _safe_github_client():
+    """The GitHub client, or None if it can't be built. Returning None
+    rather than raising lets the slot-mapping READ degrade to the local
+    checkout instead of breaking the whole page."""
+    try:
+        return _get_github_client()
+    except Exception:  # noqa: BLE001 - missing/invalid token, etc.
+        return None
+
+
+# LIVE read. Removing an account commits this file to GitHub, but the
+# local checkout on Streamlit Cloud stays frozen until a redeploy — so a
+# removed account kept showing as connected here indefinitely, exactly
+# like the campaign settings/schedule did before the same fix.
+slot_mapping = read_slot_mapping_live(_safe_github_client(), EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH)
 streamlit_secret_directory = dict(st.secrets.get("email_accounts_directory", {}))
 account_directory = merge_account_directories(streamlit_secret_directory, slot_mapping)
 
@@ -66,7 +80,7 @@ settings = outreach.load_settings(SETTINGS_PATH)
 default_account = settings.get("email_accounts", {}).get("default_account", "")
 
 try:
-    campaigns = list_campaigns()
+    campaigns = list_campaigns_live(_safe_github_client())
 except Exception as exc:  # noqa: BLE001
     st.error(f"Couldn't list campaigns: {exc}")
     campaigns = []
