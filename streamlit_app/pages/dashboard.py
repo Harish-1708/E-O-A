@@ -55,6 +55,9 @@ def _load_campaign_data(campaign_name: str):
 
 
 try:
+    # Local listing: this page has no GitHub client configured. It is
+    # read-only and never creates or deletes campaigns, so a newly
+    # created one simply appears here after the next redeploy.
     campaigns = list_campaigns()
 except Exception as exc:  # noqa: BLE001
     st.error(f"Couldn't list campaigns from templates/: {exc}")
