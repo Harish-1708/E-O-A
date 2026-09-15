@@ -7,7 +7,6 @@ schedule:
   window_start: '10:00'
   window_end: '17:00'
   send_days:
-  - mon
   - tue
   - wed
   - thu
