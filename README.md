@@ -150,6 +150,86 @@ Remove buttons on the Email Accounts page instead:
    `EMAIL_ACCOUNTS_JSON` whenever you're ready; there's no rush, and
    nothing breaks either way in the meantime.
 
+## Status controls were the third consumer missed
+
+Settings and Schedule were fixed to read the live override. Status
+controls — the actual Pause/Resume buttons — were not, because the live
+overlay was being applied separately inside each tab function instead of
+once at the source. Pausing committed correctly to GitHub every time;
+the page just never looked at GitHub to check.
+
+Consolidated to a SINGLE overlay point, applied once immediately after
+`campaign_cfg` is first built on the campaign detail page, before the
+Draft banner, before Status controls, before any tab. Every future
+consumer of `campaign_cfg` on this page inherits live data automatically
+— there is no longer a second or third place this can be forgotten.
+Reproduced the exact bug at the full-page level (stale disk showing
+"active", live GitHub showing "paused") and confirmed the Status
+controls now show Paused / offer Resume correctly; sabotage-verified by
+removing the overlay and confirming the test fails.
+
+## Git push races on payload cleanup — reproduced and fixed
+
+`remove_leads.yml`, `import_leads.yml`, `mark_responses_read.yml`, and
+`send_reply.yml` each delete their processed payload file with a bare
+`git commit && git push` as their final step. With enough scheduled and
+manual workflows writing to the same `main` branch, two pushes landing
+close together is routine, not a hypothetical — reproduced by literally
+simulating two concurrent clones racing to push, which reliably produces
+the exact `[rejected] ... (fetch first)` error.
+
+The underlying data operation (the actual removal, import, mark-read, or
+reply-send) always happens in an earlier step against the Sheet directly
+and is unaffected by this — only the payload-file cleanup was ever at
+risk of being lost, leaving a processed file behind and the job
+reporting a false failure.
+
+Fixed with a retry-with-rebase loop (5 attempts, jittered), verified
+against a real simulated git race, not just reasoned about: attempt 1
+reproduces the exact rejection, rebase succeeds, attempt 2 pushes
+cleanly, with no data lost and the concurrent commit preserved in
+history. If all 5 attempts are exhausted, the step logs a `::warning::`
+annotation and exits 0 — a cleanup step failing must never make the job
+report failure when the actual work already succeeded.
+
+## Live reads vs the local checkout — the systemic rule
+
+This app WRITES every config change to GitHub via the API, but the code
+historically READ the same data from the local checkout. On Streamlit
+Cloud that checkout is frozen until a redeploy, so a change could be
+visibly committed on GitHub and never appear in the UI — surviving a
+refresh, cache expiry, and even a full logout/login.
+
+**The rule: anything the app writes to GitHub must be read from GitHub.**
+
+Three repo paths are written by the app, and all three now have live
+readers with a local-disk fallback:
+
+| Path | Live reader | Used by |
+|---|---|---|
+| `config/campaigns/<name>.yaml` | `load_raw_override_live()` + `merge_live_override_into_cfg()` | Settings, Schedule, Status |
+| `config/email_account_slots.yaml` | `read_slot_mapping_live()` | Email Accounts, Settings sender picker |
+| `templates/<campaign>/` | `list_campaigns_live()`, `list_directory_files()`, `get_file_content()` | Campaign list, Sequences |
+
+`config/settings.yaml` is deliberately NOT in this list — the app never
+writes it, so reading it locally cannot go stale.
+
+Every live reader follows the same three-part contract:
+1. live GitHub content wins over a stale local copy
+2. a definitive "not there" (404) is reported as such, never silently
+   backfilled from the stale local copy — otherwise deleting something
+   would resurrect it
+3. a genuine API failure degrades to the local copy rather than
+   erroring out or showing a misleadingly empty result
+
+**Read-only pages** (`dashboard.py`, `overview.py`) have no GitHub
+client configured and intentionally keep the local listing — they never
+create or delete anything, so a new campaign simply appears there after
+the next redeploy.
+
+**If you add a new config file the app writes, add a live reader for it
+at the same time**, or it will reproduce this exact bug.
+
 ## Known limitations (by design, not bugs)
 
 - **Follow-ups no longer get stuck on a sender account removed from the
