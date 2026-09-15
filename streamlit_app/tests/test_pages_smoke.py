@@ -2998,6 +2998,42 @@ def test_status_controls_paused_campaign_shows_resume_button(fixture_repo):
     assert any(b.label == "▶ Resume" for b in at.button)
 
 
+def test_status_controls_reflects_live_paused_status_over_stale_disk(fixture_repo):
+    """The actual reported production bug, reproduced at the FULL PAGE
+    level (not just the underlying merge function in isolation): the
+    local checkout says "active" (as if Pause had never been clicked),
+    but the live GitHub file says "paused" (the commit that DID
+    actually succeed). The Status controls — a THIRD consumer missed by
+    the earlier Settings/Schedule-only fix — must show Paused, not
+    Running, and must show it regardless of how long the disk-frozen
+    Streamlit Cloud checkout has been sitting there."""
+    fake_spreadsheet = FakeSpreadsheet({})
+
+    def fake_get_file_content(self, path, ref="main"):
+        if path.endswith(f"{FIXTURE_CAMPAIGN}.yaml"):
+            return b"status: paused\n"
+        # Fall through to normal template content for everything else.
+        filename = path.rsplit("/", 1)[-1]
+        stage_variant = filename[:-4]
+        return f"Subject: {stage_variant}\n\nBody for {stage_variant}.".encode("utf-8")
+
+    with patch("gspread.authorize", return_value=type("C", (), {"open_by_key": lambda self, k: fake_spreadsheet})()), \
+         patch("google.oauth2.service_account.Credentials.from_service_account_info", return_value=object()), \
+         patch("github_client.GitHubClient.get_file_content", fake_get_file_content), \
+         patch("outreach.get_campaign", _fake_get_campaign_with_status("active")):  # stale disk: active
+        at = AppTest.from_file(os.path.join(PAGES_DIR, "campaigns.py"))
+        at.secrets.update(_dashboard_secrets())
+        for k, v in _authed_session().items():
+            at.session_state[k] = v
+        at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
+        at.run(timeout=15)
+
+    assert list(at.exception) == []
+    subheaders = [h.value for h in at.subheader]
+    assert "⏸ Paused" in subheaders
+    assert any(b.label == "▶ Resume" for b in at.button)
+
+
 def test_status_controls_resume_button_commits_active_status(fixture_repo):
     fake_spreadsheet = FakeSpreadsheet({})
     captured, fake_create_file = _mock_github_writes()
