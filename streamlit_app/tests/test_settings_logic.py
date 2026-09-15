@@ -292,3 +292,15 @@ def test_merge_live_override_empty_is_a_noop():
 def test_merge_live_override_carries_status_through():
     base = {"_campaign_name": "X", "status": "active"}
     assert merge_live_override_into_cfg(base, {"status": "paused"})["status"] == "paused"
+
+
+def test_merge_live_override_reflects_paused_status_for_the_status_controls():
+    """The actual reported bug: pausing a campaign committed correctly to
+    GitHub, but the Status tab's controls read campaign_cfg with no live
+    overlay applied at all — a THIRD consumer missed by the earlier fix,
+    which only covered Settings and Schedule. Pause/Resume never
+    reflected in the UI no matter how long you waited, because nothing
+    about waiting re-reads the repository."""
+    stale_cfg = {"_campaign_name": "X", "status": "active"}
+    merged = merge_live_override_into_cfg(stale_cfg, {"status": "paused"})
+    assert merged["status"] == "paused"
