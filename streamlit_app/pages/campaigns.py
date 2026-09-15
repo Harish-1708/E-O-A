@@ -990,12 +990,9 @@ def _render_sequences_tab(campaign_cfg, leads):
 
 
 def _render_settings_tab(campaign_cfg, leads):
+    # campaign_cfg arrives here already live-merged — see the single
+    # overlay point where it's first built, above in this file.
     campaign_name = campaign_cfg["_campaign_name"]
-    # campaign_cfg is built from the LOCAL checkout, which on Streamlit
-    # Cloud is frozen until redeploy — overlay the live override so saved
-    # values actually show up here. See merge_live_override_into_cfg.
-    campaign_cfg = merge_live_override_into_cfg(
-        campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
     sending = campaign_cfg.get("sending", {})
 
     # Merges BOTH sources — the legacy Streamlit-secrets-based directory
@@ -1146,10 +1143,9 @@ def _render_delete_campaign_section(campaign_cfg):
 
 
 def _render_schedule_tab(campaign_cfg):
+    # campaign_cfg arrives here already live-merged — see the single
+    # overlay point where it's first built, above in this file.
     campaign_name = campaign_cfg["_campaign_name"]
-    # Same live overlay as the Settings tab — see its comment.
-    campaign_cfg = merge_live_override_into_cfg(
-        campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
     current = get_current_schedule(campaign_cfg)
 
     st.caption(
@@ -1688,6 +1684,19 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
     except Exception as exc:  # noqa: BLE001
         st.error(f"Couldn't load '{campaign_name}': {exc}")
         return
+
+    # LIVE overlay applied ONCE, here, upstream of EVERYTHING on this page
+    # (the Draft banner, Status controls, and all six tabs) — deliberately
+    # not repeated per-tab. The actual reported bug: pausing a campaign
+    # committed correctly to GitHub, but _render_status_controls read
+    # campaign_cfg straight from the local checkout with no overlay at
+    # all, so Pause/Resume never reflected in the UI no matter how long
+    # you waited. Applying this in exactly one place, at the source,
+    # is what stops a future consumer of campaign_cfg being missed the
+    # same way this one was — see load_raw_override_live's own docstring
+    # for the full staleness story.
+    campaign_cfg = merge_live_override_into_cfg(
+        campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
 
     st.title(campaign_name)
 
