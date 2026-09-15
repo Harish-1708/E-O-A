@@ -10,7 +10,7 @@ from page_state import mark_active_page  # noqa: E402
 from auth import login_gate, current_user  # noqa: E402
 from config import WORKFLOW_SEND, WORKFLOW_CHECK_REPLIES, WORKFLOW_BACKFILL_THREAD_SUBJECT  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
-from preview_logic import list_campaigns, get_campaign_cfg, run_preview  # noqa: E402
+from preview_logic import list_campaigns_live, get_campaign_cfg, run_preview  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector, ReadOnlySheetsError  # noqa: E402
 from send_logic import (  # noqa: E402
     build_send_inputs, build_check_replies_inputs, build_backfill_thread_subject_inputs, confirmation_is_valid,
@@ -33,6 +33,15 @@ def _get_github_client() -> GitHubClient:
     gh = st.secrets["github"]
     return GitHubClient(token=gh["token"], owner=gh["owner"], repo=gh["repo"])
 
+def _safe_github_client():
+    """The GitHub client, or None if it can't be built. Returning None
+    rather than raising lets live reads degrade to the local checkout
+    instead of breaking the whole page."""
+    try:
+        return _get_github_client()
+    except Exception:  # noqa: BLE001 - missing/invalid token, etc.
+        return None
+
 
 @st.cache_resource(show_spinner=False)
 def _get_sheets_connector() -> ReadOnlySheetsConnector:
@@ -42,7 +51,7 @@ def _get_sheets_connector() -> ReadOnlySheetsConnector:
 
 
 try:
-    campaigns = list_campaigns()
+    campaigns = list_campaigns_live(_safe_github_client())
 except Exception as exc:  # noqa: BLE001
     st.error(f"Couldn't list campaigns: {exc}")
     st.stop()
