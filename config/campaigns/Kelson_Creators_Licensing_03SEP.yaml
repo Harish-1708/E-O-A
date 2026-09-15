@@ -17,5 +17,6 @@ sending:
   sender_rotation: true
   rotation_accounts:
   - sales1
+  per_account_daily_limit: 25
 tracker_sync:
   enabled: true
