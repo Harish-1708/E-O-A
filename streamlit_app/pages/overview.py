@@ -45,6 +45,7 @@ def _fetch_campaign_data(campaign_name: str):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _load_overview():
+    # Local listing — see note in dashboard.py; read-only page.
     campaign_names = list_campaigns()
     return build_all_campaigns_overview(campaign_names, _fetch_campaign_data)
 
