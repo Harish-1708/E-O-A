@@ -142,10 +142,27 @@ def _get_master_header_cached(campaign_name: str):
     return _get_connector().get_header(campaign_cfg["master_tab"])
 
 
+def _get_campaign_cfg_live(campaign_name: str):
+    """get_campaign_cfg, with the live GitHub override overlaid — the
+    same single-point pattern used on the campaign detail page.
+
+    The actual reported bug: the campaigns hub list built each row's
+    status straight from get_campaign_cfg, which is LOCAL-DISK ONLY —
+    it never consulted GitHub at all, unlike the detail page which was
+    fixed earlier in this file. Resuming a campaign committed correctly
+    every time; the hub row for it just never looked. It would show
+    "Paused" indefinitely, regardless of how long you waited, because
+    nothing about waiting re-reads the repository — only a genuinely
+    fresh live read does."""
+    campaign_cfg = get_campaign_cfg(campaign_name)
+    return merge_live_override_into_cfg(
+        campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def _load_hub_rows():
     campaign_names = list_campaigns_live(_safe_github_client())
-    return build_campaigns_hub(campaign_names, get_campaign_cfg, _fetch_sheet_data)
+    return build_campaigns_hub(campaign_names, _get_campaign_cfg_live, _fetch_sheet_data)
 
 
 def _relative_time(timestamp_str: str) -> str:
