@@ -6,6 +6,7 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import outreach  # noqa: E402
 from page_state import mark_active_page  # noqa: E402
 from auth import login_gate, current_user  # noqa: E402
 from config import WORKFLOW_SEND, WORKFLOW_CHECK_REPLIES, WORKFLOW_BACKFILL_THREAD_SUBJECT  # noqa: E402
@@ -60,7 +61,8 @@ if not campaigns:
     st.info("No campaigns found yet.")
     st.stop()
 
-STAGES = ["intro", "followup1", "followup2", "followup3", "followup4"]
+STAGES = outreach.CANONICAL_STAGE_ORDER  # derived, not a separate hardcoded copy —
+                                         # see outreach.py's own comment on that list
 VARIANTS = ["Auto", "A", "B", "C", "D"]
 
 campaign = st.selectbox("Campaign", campaigns, key="controls_campaign")
