@@ -5,7 +5,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-from conftest import FIXTURE_CAMPAIGN, FIXTURE_TEMPLATES
 from campaign_builder import (
     validate_campaign_name, validate_variant_content, build_template_file_content,
     build_campaign_files, get_next_stage_for_campaign, commit_message_for_campaign,
@@ -128,9 +127,22 @@ def test_build_campaign_files_uses_given_stage_prefix():
 
 # ---------- get_next_stage_for_campaign — against the REAL sample campaign ----------
 
-def test_get_next_stage_for_fully_built_campaign_returns_none():
-    # The fixture campaign has all 5 stages built.
-    result = get_next_stage_for_campaign(FIXTURE_CAMPAIGN, FIXTURE_TEMPLATES)
+def test_get_next_stage_for_fully_built_campaign_returns_none(tmp_path):
+    """Deliberately builds its OWN fixture sized to whatever
+    outreach.CANONICAL_STAGE_ORDER currently holds, rather than reusing
+    the shared Sample_Campaign fixture (which intentionally stays at 5
+    stages for the many OTHER tests coupled to that specific number) —
+    this is the one test that genuinely needs to verify the real,
+    current cap, and building it dynamically means it can never itself
+    go stale the way the production "already has all 5 stages" text
+    once did when that cap was raised from 5 to 11."""
+    import outreach
+    campaign_dir = tmp_path / "FullyBuiltCampaign"
+    campaign_dir.mkdir()
+    for stage in outreach.CANONICAL_STAGE_ORDER:
+        for letter in outreach.ALL_VARIANT_LETTERS:
+            (campaign_dir / f"{stage}_{letter}.txt").write_text(f"Subject: {stage} {letter}\n\nBody")
+    result = get_next_stage_for_campaign("FullyBuiltCampaign", str(tmp_path))
     assert result is None
 
 
