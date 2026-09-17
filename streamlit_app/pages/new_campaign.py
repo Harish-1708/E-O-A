@@ -12,7 +12,7 @@ from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from preview_logic import list_campaigns_live  # noqa: E402
 from campaign_builder import (  # noqa: E402
     validate_campaign_name, validate_variant_content, build_campaign_files,
-    get_next_stage_for_campaign, commit_message_for_campaign, VARIANT_LETTERS,
+    get_next_stage_for_campaign, commit_message_for_campaign, VARIANT_LETTERS, TOTAL_STAGE_COUNT,
 )
 
 # Page config is set once, centrally, in app.py via st.navigation/st.Page —
@@ -145,7 +145,7 @@ else:
             next_stage = None
 
         if next_stage is None:
-            st.info(f"'{selected_campaign}' already has all 5 stages — there's nothing left to add.")
+            st.info(f"'{selected_campaign}' already has all {TOTAL_STAGE_COUNT} stages — there's nothing left to add.")
         else:
             stage_prefix, required_variants = next_stage
             st.write(f"**Next stage:** `{stage_prefix}` · **Required variants:** {', '.join(required_variants)}")
