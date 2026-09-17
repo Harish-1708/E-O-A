@@ -24,11 +24,21 @@ default_campaign_settings:
   # A campaign with just intro_A.txt is valid; it simply won't use most of
   # this table. Only consulted for stage names actually found on disk.
   stage_wait_days:
+    # Uniform 2-day cadence: intro Monday -> followup1 Wednesday ->
+    # followup2 Friday -> followup3 Sunday, and so on. wait_days_after_previous
+    # is measured from the PREVIOUS stage's own send, not from intro, so every
+    # entry below is 2 regardless of how many stages precede it.
     intro: 0
-    followup1: 3
-    followup2: 4
-    followup3: 5
-    followup4: 5
+    followup1: 2
+    followup2: 2
+    followup3: 2
+    followup4: 2
+    followup5: 2
+    followup6: 2
+    followup7: 2
+    followup8: 2
+    followup9: 2
+    followup10: 2
 
   sending:
     timezone: "Asia/Kolkata"
