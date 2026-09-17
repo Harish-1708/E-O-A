@@ -10,7 +10,7 @@ is the in-app confirmation the Streamlit page requires before calling
 this, plus the fact that only a logged-in user of this app can reach it.
 
 Two modes, both funneling through the same file-building logic:
-- A brand NEW campaign — starts at "intro", any 1-4 variant letters.
+- A brand NEW campaign — starts at "intro", any 1-4 variant letters (variant count is separate from stage count, and is not part of this change).
 - The NEXT stage on an EXISTING campaign — the stage after whatever it
   already has, and (unlike a new campaign) the variant letters are NOT a
   free choice: they must exactly match the campaign's existing variants,
@@ -32,6 +32,13 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import outreach  # noqa: E402
+
+# The single source of truth every page uses for "how many stages can a
+# campaign have" text — never a separately hardcoded number, which is
+# exactly what silently went stale in three different UI files (a "5
+# stages" message that quietly became wrong the moment this list was
+# extended to 11).
+TOTAL_STAGE_COUNT = len(outreach.CANONICAL_STAGE_ORDER)
 from settings_logic import override_to_yaml_bytes  # noqa: E402
 
 
@@ -85,7 +92,7 @@ def get_next_stage_for_campaign(campaign_name: str, templates_root: str) -> Opti
     """For an EXISTING campaign, returns (next_stage_prefix,
     required_variant_letters) — the only stage/variant combination
     outreach.py's own auto-discovery would accept next — or None if the
-    campaign already has all 5 stages built out.
+    campaign already has all TOTAL_STAGE_COUNT stages built out.
 
     Reuses outreach.discover_stages_and_variants directly rather than
     re-deriving the rule, so this can never drift from what the core
@@ -97,7 +104,7 @@ def get_next_stage_for_campaign(campaign_name: str, templates_root: str) -> Opti
     for prefix in outreach.CANONICAL_STAGE_ORDER:
         if prefix not in existing_prefixes:
             return prefix, variants
-    return None  # all 5 stages already exist
+    return None  # all TOTAL_STAGE_COUNT stages already exist
 
 
 def commit_message_for_campaign(campaign_name: str, stage_prefix: str, variant_count: int,
