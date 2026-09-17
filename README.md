@@ -192,6 +192,167 @@ history. If all 5 attempts are exhausted, the step logs a `::warning::`
 annotation and exits 0 — a cleanup step failing must never make the job
 report failure when the actual work already succeeded.
 
+## Asana network timeouts weren't retried at all
+
+Reported as intermittent Asana sync failures (~1 in 10 runs), always a
+different lead each time: `HTTPSConnectionPool(...): Read timed out
+(read timeout=20)`. The existing `_call_with_asana_retries` already
+retried a 429 or 5xx correctly — but only by checking `resp.status_code`
+on whatever the request function returned. A read timeout or connection
+error never returns anything at all; `requests` raises
+`requests.exceptions.Timeout` / `ConnectionError` directly, so that
+check was never reached. One transient ~20-second hiccup — ordinary
+network jitter across the 150+ Asana calls a single sync run makes
+(several calls per lead × 30-40 leads) — permanently failed that one
+lead for the entire run with zero retry, even though the identical
+request almost always succeeds moments later.
+
+Fixed: the wrapper now also catches `Timeout` and `ConnectionError` and
+retries them on the same exponential backoff as a 429/5xx. A genuine
+HTTP error (403, 404, a real auth problem) is still never retried or
+confused with a network failure — verified with a dedicated test that
+asserts `time.sleep` is never even called for a definitive 404.
+Sabotage-verified against the exact reported stack trace: reverting the
+fix reproduces `requests.exceptions.ReadTimeout: simulated` propagating
+straight through, uncaught, matching the production log precisely.
+
+## "auto-send only processes one campaign" — not hardcoded, but silent
+
+Reported as: manual auto-send only ever touches one campaign, while the
+scheduled run "works fine". Traced the actual code: `cmd_auto_send_all`
+correctly loops over every campaign from `discover_campaign_names()` —
+nothing is hardcoded, and both the scheduled and manual triggers call
+the exact same `auto-send-all` command with zero campaign-specific
+inputs (confirmed directly in `auto_send.yml`).
+
+The real cause: a campaign whose status isn't `active` (Paused, Draft,
+Deleted) is correctly excluded, but the `continue` that excluded it
+printed nothing at all — it simply vanished from the log with zero
+explanation. A second campaign sitting in Paused looked indistinguishable
+from a second campaign never being considered in the first place. Now
+prints `<name>: skipped (status is '<status>', not active).` for each
+excluded campaign, so it's immediately clear whether a campaign is
+missing from a run because of its own status or because of a real bug.
+
+This surfaced the fourth missed consumer of the same live-status problem
+below: the resumed campaign didn't actually resolve as expected in this
+specific case, because the campaigns HUB LIST — not the detail page —
+was showing it as still paused.
+
+## The campaigns hub list — a fourth missed consumer
+
+Settings, Schedule, and the detail page's own Status controls were all
+fixed to read the live GitHub override. The campaigns HUB LIST (the "all
+campaigns" overview) was not — `_load_hub_rows` built every row straight
+from `get_campaign_cfg`, which is local-disk only. Resuming a campaign
+showed correctly on that campaign's own detail page; the hub row for the
+exact same campaign kept showing "⏸ Paused" indefinitely, regardless of
+how long you waited, because nothing about waiting re-reads the
+repository.
+
+Fixed with a new `_get_campaign_cfg_live()` — the same overlay used
+everywhere else — injected into `build_campaigns_hub` via its existing
+dependency-injection parameter, so `build_campaigns_hub` itself needed
+no changes at all. Reproduced the exact bug at the full-page level
+(stale disk saying "paused", live GitHub saying "active") and confirmed
+the hub row now shows "🟢 Running"; sabotage-verified by reverting to
+the disk-only getter and confirming the test fails.
+
+## Manual Asana edits during Negotiating no longer get overwritten
+
+Reported directly: once a lead reaches Negotiating, manually setting a
+field directly in Asana (a Rights Expiration date being the concrete
+example) kept reverting back to the Sheet's older value on the next
+sync, every single run. Custom-field sync previously always pushed
+every matching Sheet column onto the Asana task on every update — no
+distinction between a field that had never been set and one a human had
+just deliberately typed in.
+
+Once a task's LIVE section is Negotiating or later (Negotiating, Rights
+Secured, Declined / Dead), custom-field sync switches to fill-blanks-
+only: a field the task already has ANY value for — from an earlier
+sync, or typed directly into Asana by a human — is left completely
+untouched, never overwritten and never cleared. A field that's
+genuinely still blank still gets filled in normally, so new information
+(from the Sheet) can keep flowing in — only an existing value is ever
+protected. Earlier stages (Sourced, Outreach Sent, Follow-up) are
+unaffected and keep syncing exactly as before.
+
+Deliberately efficient: the extra live lookup needed to know which
+fields are currently blank only happens for a lead whose task is
+already in Negotiating+, so this doesn't add an API call for the
+majority of leads on any given run that haven't reached that stage yet.
+
+Reproduced the exact reported case end-to-end (a task live in
+Negotiating with a human-set Rights Expiration, syncing a lead whose
+Sheet has an older value for that same field) and confirmed the human's
+value survives the sync untouched; sabotage-verified by disabling the
+protection and confirming the test fails with the field overwritten.
+
+## Follow-up cadence and count — extended from 4 to 10, on request
+
+Requested: a uniform 2-day cadence between stages (intro Monday ->
+followup1 Wednesday), and at least 10 follow-ups instead of 4.
+
+**The cap was governed by exactly one list.** `CANONICAL_STAGE_ORDER`
+(now `intro` + `followup1`..`followup10`, 11 stages total) is the single
+source every other piece derives its own notion of "how many stages
+exist" from — `discover_stages_and_variants`, `stage_field_names`, the
+Sequences tab's Add Stage flow, and the Send tab's stage picker in both
+`campaigns.py` and `controls.py`. Extending that one list was the actual
+fix for most of this.
+
+**One real, separate bug found and fixed during the audit:**
+`_most_recent_send_at` hardcoded exactly Intro + FollowUp1-4 — any lead
+that progressed further would get a stale, too-early "most recent send"
+timestamp back, since the true latest lived in a FollowUp5+ field this
+never checked. That silently undermined the chronological sanity check
+used to judge whether an inbound message could plausibly be a genuine
+reply. Now derives from `CANONICAL_STAGE_ORDER`'s own length, so it
+can't go stale again if the cap changes further. Sabotage-verified: the
+old hardcoded version returns Aug 15 (FollowUp4) instead of the true
+Sep 1 (FollowUp7) in the regression test built for this.
+
+**Two hardcoded, duplicate copies of the stage list** existed in
+`controls.py` and `campaigns.py` (a second `STAGES = [...]` completely
+independent of `CANONICAL_STAGE_ORDER`) — these fed the Send tab's stage
+picker and would have silently capped manual sends at FollowUp4 forever
+regardless of how many stages a campaign actually had. Both now
+reference `outreach.CANONICAL_STAGE_ORDER` directly.
+
+**Cadence:** `config/settings.yaml`'s `stage_wait_days` now sets every
+follow-up (1 through 10) to `2`, replacing the old escalating 3/4/5/5
+pattern. Verified against `_compute_next_eligible_at` directly: the wait
+is measured from each stage's own send timestamp, not from intro, so a
+uniform `2` produces exactly the requested Mon -> Wed -> Fri -> Sun...
+cadence regardless of how many stages a lead has already been through.
+
+**Test fixtures — deliberately NOT all bumped to 11 stages.** The
+shared `Sample_Campaign` fixture stays at 5 stages, because a large
+number of existing tests are legitimately coupled to that specific
+count for reasons unrelated to this change (checking exact expander
+counts, "campaign already has all N stages" text, etc. — see
+`conftest.py`'s own note on why fixtures exist at all). Bumping the
+shared fixture to 11 would have meant updating every one of those for
+no benefit. Instead, the one test that genuinely needs to verify the
+real, current cap (`test_get_next_stage_for_fully_built_campaign_returns_none`)
+now builds its own dynamically-sized fixture from
+`CANONICAL_STAGE_ORDER` directly in `tmp_path`, so it can never itself
+go stale the way the production "already has all 5 stages" text did.
+
+Two other tests broke as a direct, expected consequence of the fixture
+no longer being "fully built" at 5 stages once the cap became 11 — both
+were fixed at their actual root cause, not patched around:
+- A locked-variants test was catching a legitimately-enabled Subject
+  input from the now-visible "Add a follow-up stage" section, because
+  its filter matched on visible label text ("Subject...") rather than
+  the distinct widget key each section actually uses. Now filters by
+  key.
+- A "maxed out" test conflated two unrelated concepts — Add Variant
+  being at its letter limit (A-D, unrelated to this change) and the
+  old, now-dynamic "already has all 5 stages" text (Add Stage). Split
+  apart; the test now only checks what its name actually claims to.
+
 ## Live reads vs the local checkout — the systemic rule
 
 This app WRITES every config change to GitHub via the API, but the code
