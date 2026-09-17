@@ -18,3 +18,4 @@ asana:
   project_name: Creator Outreach
 tracker_sync:
   enabled: true
+status: paused
