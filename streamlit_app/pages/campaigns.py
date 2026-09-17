@@ -896,7 +896,7 @@ def _render_sequences_tab(campaign_cfg, leads):
 
     with st.expander("➕ Add a follow-up stage" if next_stage else "➕ Add a follow-up stage (none left)"):
         if next_stage is None:
-            st.info("This campaign already has all 5 stages.")
+            st.info(f"This campaign already has all {len(outreach.CANONICAL_STAGE_ORDER)} stages.")
         else:
             stage_prefix, required_variants = next_stage
             st.write(f"**Next stage:** `{stage_prefix}` · **Required variants:** {', '.join(required_variants)}")
@@ -1526,7 +1526,7 @@ def _render_send_section_in_settings(campaign_cfg, leads):
     Completed or Attention-needed campaign is never even offered a Send
     button that would just fail or no-op."""
     campaign_name = campaign_cfg["_campaign_name"]
-    STAGES = ["intro", "followup1", "followup2", "followup3", "followup4"]
+    STAGES = outreach.CANONICAL_STAGE_ORDER  # derived — see outreach.py's own comment on that list
     VARIANTS = ["Auto", "A", "B", "C", "D"]
 
     st.divider()
