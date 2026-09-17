@@ -16,3 +16,5 @@ sending:
 asana:
   enabled: true
   project_name: Creator Outreach
+tracker_sync:
+  enabled: true
