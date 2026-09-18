@@ -14,7 +14,7 @@ from config import (  # noqa: E402
     WORKFLOW_IMPORT_LEADS, WORKFLOW_REMOVE_LEADS, WORKFLOW_DASHBOARD, WORKFLOW_SEND_REPLY,
     WORKFLOW_SEND, WORKFLOW_CHECK_REPLIES, WORKFLOW_BACKFILL_THREAD_SUBJECT, WORKFLOW_SYNC_ASANA,
     WORKFLOW_SET_LEAD_OVERRIDE,
-    TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH,
+    TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, SETTINGS_PATH,
 )
 from email_account_slots_logic import read_slot_mapping_live  # noqa: E402
 from accounts_logic import merge_account_directories  # noqa: E402
@@ -740,17 +740,40 @@ def _render_data_tab(campaign_cfg, leads):
                             st.error(f"Failed to trigger update: {exc}")
 
 
-def _fetch_live_stages_and_variants(client, campaign_name):
+def _fetch_live_stages_and_variants(client, campaign_name, stage_wait_days=None):
     """Re-reads the campaign's template structure fresh from GitHub's
     own API — deliberately NOT from Streamlit's local checkout, which
     can lag behind a recent commit, sometimes for a while rather than
-    the few seconds a redeploy is supposed to take. Used both to RENDER
-    the Sequences tab (so what you see is never stale) and immediately
-    before Delete Stage / Delete Variant actually execute (so a
-    destructive action can never be decided from an outdated view even
-    if it somehow slipped past the render)."""
+    the few seconds a redeploy is supposed to take. Used to RENDER the
+    Sequences tab (so what you see is never stale), immediately before
+    Delete Stage / Delete Variant actually execute (so a destructive
+    action can never be decided from an outdated view even if it
+    somehow slipped past the render), AND — the actual reported bug
+    this closes — to overlay live stage discovery onto campaign_cfg
+    itself, since compute_campaign_status (and every other stage-aware
+    computation) reads campaign_cfg["stages"], which get_campaign_cfg
+    builds from the same frozen local checkout. A campaign whose only
+    stage (intro) was fully sent correctly showed Completed; adding a
+    follow-up stage 24+ hours later committed the new template files
+    fine, and the Sequences tab even showed them correctly (already
+    live) — but the STATUS never left Completed, because nothing about
+    status computation had ever been told to look at GitHub instead of
+    the stale local file list.
+
+    stage_wait_days defaults to {} for the Sequences-tab callers, which
+    only care which stages/variants exist, not their timing."""
     filenames = client.list_directory_files(f"templates/{campaign_name}")
-    return outreach.parse_stages_and_variants_from_filenames(filenames, {})
+    return outreach.parse_stages_and_variants_from_filenames(filenames, stage_wait_days or {})
+
+
+def _live_stage_wait_days():
+    """The stage_wait_days DEFAULTS from settings.yaml — safe to read
+    from the local checkout because, unlike campaign config or template
+    files, the app never writes this file, so it can never go stale the
+    way those can. There is currently no per-campaign override for
+    this, so the default is the only source of truth."""
+    settings = outreach.load_settings(SETTINGS_PATH)
+    return dict(settings.get("default_campaign_settings", {}).get("stage_wait_days", {}))
 
 
 def _fetch_live_template_content(client, campaign_name, stage_prefix, variant):
@@ -1714,6 +1737,29 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
     # for the full staleness story.
     campaign_cfg = merge_live_override_into_cfg(
         campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
+
+    # Live stage/variant discovery, overlaid the same way and at the
+    # same single point as the override above. A campaign whose only
+    # stage was fully sent correctly showed Completed — adding a new
+    # follow-up stage afterward committed the template files fine (the
+    # Sequences tab even showed them, since IT already read live via
+    # _fetch_live_stages_and_variants), but compute_campaign_status and
+    # everything else reads campaign_cfg["stages"], which get_campaign_cfg
+    # built from the same frozen local template listing this page's
+    # OTHER live reads exist specifically to avoid. Falls back to the
+    # existing (locally-discovered) stages/variants on any API failure,
+    # or if the live listing is empty/invalid — a page must never break
+    # or go blank because a live re-discovery call failed.
+    _github_client_for_stages = _safe_github_client()
+    if _github_client_for_stages is not None:
+        try:
+            live_stages, live_variants = _fetch_live_stages_and_variants(
+                _github_client_for_stages, campaign_name, _live_stage_wait_days())
+            if live_stages and live_variants:
+                campaign_cfg["stages"] = live_stages
+                campaign_cfg["variants"] = live_variants
+        except Exception:  # noqa: BLE001 - network/auth/parsing failure, keep the local fallback
+            pass
 
     st.title(campaign_name)
 
