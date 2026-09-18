@@ -353,6 +353,236 @@ were fixed at their actual root cause, not patched around:
   old, now-dynamic "already has all 5 stages" text (Add Stage). Split
   apart; the test now only checks what its name actually claims to.
 
+## The Asana task-name / "Product" corruption — same root cause, different visible symptom
+
+Reported separately: some task titles show a timestamp where the
+product name should be ("DudeRobe | @keepupwiththeroses –
+2026-09-17 15:27:03" instead of "... – SheRobe"), and it reverts back
+every sync.
+
+Checked Asana directly on the affected task, then the real Sheet cell
+by cell. Confirmed: the task's "Product" custom field itself reads
+correctly ("DudeRobe") — the corruption is in the SHEET's own
+`Product` column, which now holds a raw timestamp instead of the
+product name, and `build_asana_task_name` reads that column directly
+for the task title.
+
+This is the SAME root cause as the AsanaTaskGID/Status column-position
+bug, landing on a different column purely because of this particular
+sheet's own header layout. `Kelson_Creators_Licensing_03SEP`'s header
+has 11 custom columns (Ad Ready, Client, Content Score, Creator, Last
+Contact Date, Name, Product, Refunnel Link, Rights Expiration, Usage
+Rights, Video File) inserted between `AsanaTaskGID` and
+`ManualAsanaStage`. The old `update_lead_statuses` bug computed
+`MASTER_COLUMNS.index("LastActionAt") + 1` — a position that, on THIS
+sheet's real layout, lands exactly on `Product`. Every time
+`LastActionAt` got stamped (i.e. on ordinary sends and reply checks),
+its timestamp was written into `Product` instead — confirmed by
+scanning the sheet directly: 6 rows currently hold a raw timestamp in
+`Product`, matching exactly the 6 creators whose Asana task titles were
+reported or independently found to be broken this way
+(`@keepupwiththeroses`, `@mrshanrn`, `@mallikachhetri13`,
+`@sarahpup785`, `@itsmarianv`, `@jameerae10`).
+
+**This does not need a further code fix** — the column-position fix
+already deployed stops this from happening to any NEW write, on any
+sheet, regardless of its custom-column layout. But it can't retroactively
+repair a column's value that was already overwritten; the original
+product name for these 6 rows was never recorded anywhere else, so it
+has to be re-entered manually in the Sheet's `Product` column, after
+which the task title will correct itself on the next sync.
+
+## Re-audited for the whole bug CLASS, not just the reported column
+
+Asked directly: "confirm this won't happen again." A stronger answer
+than "the one reported spot is fixed" — re-grepped the entire codebase
+for every remaining `SOME_COLUMNS.index(...)` pattern used for a real
+sheet write. Found and fixed FOUR more, on the Responses sheet, using
+the identical latent pattern (`RESPONSES_COLUMNS.index(...)` in
+`get_logged_message_ids`, `get_logged_message_info`,
+`update_response_match`, and `mark_responses_read`) — not yet actively
+triggering a visible bug (that sheet's schema hasn't been extended
+recently the way `MASTER_COLUMNS` was), but the exact same landmine,
+waiting for the next time `RESPONSES_COLUMNS` gains an entry inserted
+before an existing one, or that sheet gets widened with its own custom
+columns. Fixed identically — each now reads its column position from
+`self.responses_ws.row_values(1)`, never the Python list's position.
+
+Confirmed zero remaining `MASTER_COLUMNS.index(...)` or
+`RESPONSES_COLUMNS.index(...)` calls anywhere in the codebase.
+Sabotage-verified two of the four new fixes directly. So: yes — this
+specific failure mode is closed everywhere it could occur, not just
+where it already had.
+
+## Confirmed the column-position fix is actually working, via real production data
+
+Follow-up report: "just updated the tool, but it keeps duplicating."
+Pulled the real Asana project and the real Sheet directly (not just
+reasoning about the code) to check.
+
+**What the data actually showed:** every lead in the newly-created
+"Kelson_Creators_Licensing_17SEP" campaign has exactly TWO Asana tasks
+— one created ~15:06-15:08 (before the column-position fix was
+deployed) and one created ~16:58-17:00 (the very first sync run after
+it). No third task exists for any of them. The Sheet itself confirms
+why: every row has the OLD task's GID sitting, exactly as predicted,
+in `FollowUp10SentAt` (position 45 — precisely `MASTER_COLUMNS`' own
+internal position for `AsanaTaskGID` before the fix), and the NEW,
+correctly-created task's GID sitting in the real `AsanaTaskGID` column.
+
+**This confirms the fix is working, not failing.** A row already
+corrupted by the old bug has a permanently blank real `AsanaTaskGID`
+column — the fix can't retroactively know a task already exists for
+that row, so exactly one more "catch-up" task gets created the first
+time it syncs post-fix. After that one catch-up, the row is finally
+correctly tracked and stops duplicating. What was reported as "it kept
+duplicating" was that one unavoidable catch-up run, not ongoing,
+continued duplication — verified directly against Asana that no third
+copy has appeared since.
+
+## Second, independent safeguard: dedup by video content, not just AsanaTaskGID
+
+Requested directly: stop duplicating based on Video File / Refunnel
+Link matching, so the tool doesn't depend on the Sheet's own
+`AsanaTaskGID` tracking never failing again for any reason, ever. Built
+this as a genuinely valuable second layer, on top of the column-fix
+above rather than instead of it.
+
+Before creating a new task for any lead, `sync_campaign_to_asana` now
+checks whether a task already exists in the project for that exact
+video — matched via `_extract_tiktok_video_id` (the same ID-extraction
+already used for tracker disambiguation, reliably shared by both a
+long-form Video File URL and a Refunnel Link even when one of the two
+is stored as TikTok's short, opaque share-link form) — falling back to
+an exact raw-string match when no ID can be extracted from either. If
+a match is found, that existing task's GID is reused and written back
+to the Sheet instead of creating another one.
+
+The existing-task index is built ONCE per sync run (not per lead), and
+skipped entirely — zero extra API calls — for any project that doesn't
+have a Video File or Refunnel Link custom field configured at all.
+Paginated, since a project can hold far more tasks than one page
+returns. When more than one existing task happens to already share a
+content key (a prior duplication incident could easily have produced
+exactly this), the oldest task wins, on the reasoning that it's more
+likely to already carry real history worth keeping.
+
+Verified end-to-end: a lead with a blank `AsanaTaskGID` whose video
+matches an existing task reuses it (no new task, `AsanaTaskGID`
+correctly written back); a lead whose video matches nothing still
+gets a real new task created normally. Sabotage-verified by disabling
+the check and confirming the reuse test fails.
+
+**Cleanup note:** this safeguard prevents new duplicates going forward.
+It does not retroactively merge or delete the duplicate tasks already
+sitting in Asana from before either fix — those still need manual
+cleanup, and the stale GID values sitting in `FollowUp10SentAt` (or
+wherever the old positional bug happened to land for a given sheet's
+own header shape) are harmless leftover data but can be cleared for
+tidiness.
+
+## CRITICAL: writes by column POSITION broke the moment MASTER_COLUMNS grew — confirmed via real Asana data
+
+Reported as: syncing Asana twice creates duplicate tasks for the same,
+single Sheet row. Checked the actual "Creator Outreach" Asana project
+directly — every task in "Sourced" was duplicated (most 2x, several
+4x), created in two tight clusters roughly 5 minutes apart, matching
+two sync runs exactly.
+
+**Root cause, confirmed by direct sabotage against the real numbers:**
+`update_lead_fields` and `update_lead_statuses` computed which column to
+write to via `MASTER_COLUMNS.index(column_name) + 1` — the column's
+POSITION in the Python list — and wrote to that exact position on the
+real Google Sheet. This only works if the real sheet's header is in the
+EXACT same order as `MASTER_COLUMNS` itself. It never reliably is:
+`_get_or_create_ws` deliberately APPENDS any missing required column to
+the END of whatever header a sheet already has — it never reorders
+existing columns to match `MASTER_COLUMNS`' internal order, specifically
+so existing data is never disturbed. So the two orders diverging isn't
+an edge case; it's the normal, expected state for any sheet that's been
+incrementally widened over time (which is every sheet that's existed
+for more than one schema change).
+
+Extending follow-ups from 4 to 10 inserted 12 new columns partway
+through the `MASTER_COLUMNS` list, before `AsanaTaskGID`, `Status`, and
+`LastActionAt` — shifting every one of their Python-list positions by
+12. `AsanaTaskGID`'s write went to (real) column 45 in one direct test
+reproduction, when the actual column sat at real position 3. This means:
+- Every Asana task creation appeared to succeed, but the new task's GID
+  never actually reached the sheet's real `AsanaTaskGID` cell — landing
+  in some unrelated column instead. Every following sync saw a blank
+  GID and created another task. For every lead. Every run.
+- `update_lead_statuses` (the soft-remove-a-lead flow) had the
+  identical bug for `Status` and `LastActionAt` — meaning a "removed"
+  lead's real Status column was never actually touched, and whatever
+  column really sat at the wrong computed position got silently
+  overwritten with "Removed" instead. Real, silent data corruption on
+  an unrelated column, not just a missed removal.
+
+**Fixed:** both methods now look up each column's position from the
+sheet's own, live header (`self.master_ws.row_values(1)`) — matching
+the "by name, never a fixed positional offset" principle
+`_get_or_create_ws` itself already documents and follows, which these
+two methods had silently never actually lived up to despite that
+principle being stated as already true for "every read/write anywhere
+in this system."
+
+**Test coverage gap that let this ship unnoticed:** neither method had
+ANY direct test before this — every existing test exercised
+`FakeSheets`' own separate, hand-written stand-in for them, never the
+real `SheetsConnector` implementation where the bug actually lived.
+Added direct tests against the real class (bypassing `__init__`, which
+needs a live connection) with a header order that deliberately diverges
+from `MASTER_COLUMNS`, matching a realistic incrementally-widened sheet.
+Sabotage-verified against the exact numbers: reverting the fix
+reproduces a write landing at column 45 instead of the real column 3.
+
+**Action needed if this has already run in production:** any Asana
+task without a corresponding `AsanaTaskGID` correctly recorded in the
+Sheet will keep generating a fresh duplicate on every sync going
+forward until this fix is deployed. Once deployed, the duplicates
+already created in Asana will not be automatically cleaned up — they
+were each a real, successful task creation from the tool's point of
+view. Manual cleanup in Asana is needed for anything already
+duplicated; new duplication should stop as soon as this ships, since
+new task GIDs will finally land in the correct real column.
+
+## MASTER_COLUMNS growth broke every existing Sheet's grid width
+
+Direct, urgent consequence of extending follow-ups from 4 to 10:
+`MASTER_COLUMNS` grew from 34 to 46 columns. Every EXISTING campaign's
+Master Sheet tab has a fixed grid width set whenever it was first
+created — the reported case was stuck at 39. Any command that connects
+to Sheets (`_connect_sheets` -> `SheetsConnector.__init__` ->
+`_get_or_create_ws`) tries to widen that tab's header to match the new,
+longer `MASTER_COLUMNS`, and Google's real API rejects a cell write
+beyond the tab's current grid width outright with a 400 error —
+`Range ('...'!AN1) exceeds grid limits. Max columns: 39` — regardless of
+how correct the header content itself is. This affected every existing
+campaign, not just the one that happened to hit it first, and could
+recur again for any future MASTER_COLUMNS growth.
+
+`ensure_master_header_includes` (used for CUSTOM columns from CSV
+imports) already resizes the grid before writing — its own docstring
+even says "this one had been sitting at 38 for a long time," meaning
+this exact failure mode had already bitten this system once before.
+`_get_or_create_ws` — used for the STANDARD MASTER_COLUMNS schema check
+on every single `SheetsConnector` construction — never got the same
+protection. Now it does: resizes the grid first, with the same
+10-column headroom pattern, whenever the required header would exceed
+the tab's current width. A tab whose grid is already wide enough
+correctly skips the resize call entirely rather than paying for one on
+every connection.
+
+Verified against the exact reported numbers, not a generic case: a
+39-column grid, `MASTER_COLUMNS` at its real, current 46-column length,
+and a fake worksheet that actually ENFORCES the grid limit and raises
+the same shape of error Google's API does (rather than the normal test
+fake, which never checked this at all and would have passed either
+way). Sabotage-verified by removing the resize: the test reproduces
+`APIError: [400]: Range exceeds grid limits. Max columns: 39` — the
+exact reported error — failing on column 40, the exact reported column.
+
 ## Live reads vs the local checkout — the systemic rule
 
 This app WRITES every config change to GitHub via the API, but the code
