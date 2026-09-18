@@ -12,10 +12,10 @@ schedule:
   - thu
   - fri
 sending:
-  daily_limit: 25
+  daily_limit: 100
   sender_rotation: true
   rotation_accounts:
   - sales1
-  per_account_daily_limit: 25
+  per_account_daily_limit: 100
 tracker_sync:
   enabled: true
