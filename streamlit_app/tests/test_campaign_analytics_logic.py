@@ -29,7 +29,12 @@ def _real_dashboard_rows():
     leads = [
         {"Email": "a@abc.com", "IntroSentAt": "2026-08-01 09:00:00", "IntroVariant": "A",
          "FollowUp1SentAt": "", "FollowUp1Variant": "", "SenderAccount": "sales1",
-         "Status": "Stopped - Replied", "CurrentStage": "intro"},
+         # Status and ReplyStatus are always set together in the same
+         # update in production (see where ReplyStatus gets set during
+         # check_replies) — a fixture with one but not the other is
+         # unrealistic, and genuine_replies now reads ReplyStatus
+         # specifically, not Status.
+         "Status": "Stopped - Replied", "ReplyStatus": "Replied", "CurrentStage": "intro"},
         {"Email": "b@abc.com", "IntroSentAt": "2026-08-01 09:00:00", "IntroVariant": "B",
          "FollowUp1SentAt": "2026-08-05 09:00:00", "FollowUp1Variant": "B",
          "SenderAccount": "sales1", "Status": "", "CurrentStage": "followup1"},
