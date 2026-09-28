@@ -37,6 +37,55 @@ def test_parse_csv_bytes_empty_file():
     assert rows == []
 
 
+def test_parse_csv_bytes_handles_cp1252_windows_excel_export():
+    """The actual reported production bug: a CSV saved by Windows Excel
+    with a curly quote or em dash (extremely common — any file with a
+    creator's name containing an apostrophe, or a note with an em
+    dash) exports as cp1252, not UTF-8. Decoding it as utf-8-sig raised
+    UnicodeDecodeError straight out, crashing the entire Data tab with
+    a raw traceback instead of just failing to import that one file."""
+    raw = "FirstName,LastName,Note\nJane,O\u2019Brien,Great video \u2014 loved it\n".encode("cp1252")
+    columns, rows = parse_csv_bytes(raw)
+    assert columns == ["FirstName", "LastName", "Note"]
+    assert rows[0]["LastName"] == "O\u2019Brien"
+    assert rows[0]["Note"] == "Great video \u2014 loved it"
+
+
+def test_parse_csv_bytes_handles_utf16_with_bom():
+    """A file exported as 'Unicode Text' (UTF-16, always BOM-prefixed)
+    must also be handled — detected explicitly via its BOM, never via
+    a blind attempted decode (see test proving why below)."""
+    raw = "FirstName,Note\nJos\u00e9,Great\n".encode("utf-16")
+    columns, rows = parse_csv_bytes(raw)
+    assert columns == ["FirstName", "Note"]
+    assert rows[0]["FirstName"] == "Jos\u00e9"
+
+
+def test_parse_csv_bytes_never_raises_even_on_genuinely_undecodable_bytes():
+    """The backstop guarantee: even bytes with no valid encoding at all
+    under any of the attempted codecs must never raise — falls through
+    to latin-1, which can decode any byte sequence, rather than
+    crashing the whole page. The result may not be a valid CSV, but
+    that's the existing 'no columns found' path's job to catch, not an
+    unhandled exception's."""
+    raw = bytes([0x81, 0x8D, 0x8F])  # undefined in cp1252, but latin-1 accepts anything
+    columns, rows = parse_csv_bytes(raw)  # must not raise
+    assert isinstance(columns, list)
+
+
+def test_utf16_would_silently_corrupt_cp1252_bytes_if_tried_blindly():
+    """Documents the actual danger this fix avoids, rather than just
+    asserting the fix's own behavior: utf-16, tried blindly (without an
+    explicit BOM check first), SUCCEEDS on ordinary cp1252 bytes —
+    silently producing unrelated garbage characters instead of raising
+    and correctly falling through to cp1252. This is exactly why
+    parse_csv_bytes checks for a UTF-16 BOM explicitly rather than
+    including utf-16 in the blind try/except fallback chain."""
+    cp1252_bytes = "FirstName,Note\nJane,Hello\n".encode("cp1252")
+    garbage = cp1252_bytes.decode("utf-16")  # does NOT raise — that's the danger
+    assert "FirstName" not in garbage  # proves it's garbage, not a lucky match
+
+
 # ---------- build_default_mapping ----------
 
 def test_default_mapping_matches_known_fields_case_and_punctuation_insensitive():
