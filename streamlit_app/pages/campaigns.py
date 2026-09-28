@@ -14,12 +14,12 @@ from config import (  # noqa: E402
     WORKFLOW_IMPORT_LEADS, WORKFLOW_REMOVE_LEADS, WORKFLOW_DASHBOARD, WORKFLOW_SEND_REPLY,
     WORKFLOW_SEND, WORKFLOW_CHECK_REPLIES, WORKFLOW_BACKFILL_THREAD_SUBJECT, WORKFLOW_SYNC_ASANA,
     WORKFLOW_SET_LEAD_OVERRIDE,
-    TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, SETTINGS_PATH,
+    TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH,
 )
-from email_account_slots_logic import read_slot_mapping_live  # noqa: E402
+from email_account_slots_logic import read_local_slot_mapping  # noqa: E402
 from accounts_logic import merge_account_directories  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
-from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
+from preview_logic import list_campaigns, get_campaign_cfg  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
 from campaigns_hub_logic import build_campaigns_hub, filter_campaigns_by_search  # noqa: E402
 from campaign_analytics_logic import (  # noqa: E402
@@ -43,9 +43,8 @@ from campaign_builder import (  # noqa: E402
     validate_campaign_name, commit_message_for_campaign, confirmation_matches_campaign_name,
     list_campaign_files_to_delete, build_campaign_duplication_files,
 )
-from settings_logic import (
-    load_raw_override_live, merge_live_override_into_cfg,  # noqa: E402
-    validate_settings, build_updated_override, override_to_yaml_bytes, override_file_path,
+from settings_logic import (  # noqa: E402
+    load_raw_override, validate_settings, build_updated_override, override_to_yaml_bytes, override_file_path,
     build_asana_settings_override, build_tracker_sync_settings_override,
 )
 from schedule_logic import (  # noqa: E402
@@ -95,18 +94,6 @@ def _fetch_sheet_data(campaign_cfg):
     return leads, responses, send_log
 
 
-
-def _safe_github_client():
-    """The GitHub client, or None if it can't be built (no token, bad
-    config). Returning None rather than raising lets every settings READ
-    degrade to the local checkout instead of breaking the whole page —
-    reads must never be harder to do than they were before going live."""
-    try:
-        return _get_github_client()
-    except Exception:  # noqa: BLE001 - missing/invalid token, etc.
-        return None
-
-
 @st.cache_data(ttl=30, show_spinner=False)
 def _fetch_full_campaign_data_cached(campaign_name: str):
     """Cached by campaign_name (a plain string — hashable, a clean cache
@@ -142,27 +129,10 @@ def _get_master_header_cached(campaign_name: str):
     return _get_connector().get_header(campaign_cfg["master_tab"])
 
 
-def _get_campaign_cfg_live(campaign_name: str):
-    """get_campaign_cfg, with the live GitHub override overlaid — the
-    same single-point pattern used on the campaign detail page.
-
-    The actual reported bug: the campaigns hub list built each row's
-    status straight from get_campaign_cfg, which is LOCAL-DISK ONLY —
-    it never consulted GitHub at all, unlike the detail page which was
-    fixed earlier in this file. Resuming a campaign committed correctly
-    every time; the hub row for it just never looked. It would show
-    "Paused" indefinitely, regardless of how long you waited, because
-    nothing about waiting re-reads the repository — only a genuinely
-    fresh live read does."""
-    campaign_cfg = get_campaign_cfg(campaign_name)
-    return merge_live_override_into_cfg(
-        campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
-
-
 @st.cache_data(ttl=30, show_spinner=False)
 def _load_hub_rows():
-    campaign_names = list_campaigns_live(_safe_github_client())
-    return build_campaigns_hub(campaign_names, _get_campaign_cfg_live, _fetch_sheet_data)
+    campaign_names = list_campaigns()
+    return build_campaigns_hub(campaign_names, get_campaign_cfg, _fetch_sheet_data)
 
 
 def _relative_time(timestamp_str: str) -> str:
@@ -375,7 +345,7 @@ def _render_hub(just_arrived: bool):
             st.session_state["show_new_campaign_dialog"] = False
         if st.session_state["show_new_campaign_dialog"]:
             try:
-                existing_campaigns = list_campaigns_live(_safe_github_client())
+                existing_campaigns = list_campaigns()
             except Exception:  # noqa: BLE001
                 existing_campaigns = []
             _new_campaign_dialog(existing_campaigns)
@@ -384,7 +354,7 @@ def _render_hub(just_arrived: bool):
         st.session_state["duplicating_campaign"] = None
     if st.session_state.get("duplicating_campaign"):
         try:
-            existing_campaigns = list_campaigns_live(_safe_github_client())
+            existing_campaigns = list_campaigns()
         except Exception:  # noqa: BLE001
             existing_campaigns = []
         _duplicate_campaign_dialog(st.session_state["duplicating_campaign"], existing_campaigns)
@@ -552,8 +522,19 @@ def _render_data_tab(campaign_cfg, leads):
                    "name matches one of its fields — Client, Product, Content Score, etc.).")
         uploaded = st.file_uploader("Upload CSV", type=["csv"], key="data_csv_upload")
         if uploaded is not None:
-            columns, rows = parse_csv_bytes(uploaded.getvalue())
-            if not columns:
+            decode_error = None
+            try:
+                columns, rows = parse_csv_bytes(uploaded.getvalue())
+            except Exception as exc:  # noqa: BLE001 - a bad upload must never crash the whole page
+                # parse_csv_bytes already falls through several encodings
+                # before ever raising, so reaching here means something
+                # genuinely unexpected (e.g. not text data at all) — this
+                # is the backstop, not the primary defense.
+                decode_error = exc
+                columns, rows = [], []
+            if decode_error is not None:
+                st.error(f"Couldn't read that file as a CSV: {decode_error}")
+            elif not columns:
                 st.error("Couldn't read any columns from that file — is it a valid CSV?")
             else:
                 try:
@@ -740,40 +721,17 @@ def _render_data_tab(campaign_cfg, leads):
                             st.error(f"Failed to trigger update: {exc}")
 
 
-def _fetch_live_stages_and_variants(client, campaign_name, stage_wait_days=None):
+def _fetch_live_stages_and_variants(client, campaign_name):
     """Re-reads the campaign's template structure fresh from GitHub's
     own API — deliberately NOT from Streamlit's local checkout, which
     can lag behind a recent commit, sometimes for a while rather than
-    the few seconds a redeploy is supposed to take. Used to RENDER the
-    Sequences tab (so what you see is never stale), immediately before
-    Delete Stage / Delete Variant actually execute (so a destructive
-    action can never be decided from an outdated view even if it
-    somehow slipped past the render), AND — the actual reported bug
-    this closes — to overlay live stage discovery onto campaign_cfg
-    itself, since compute_campaign_status (and every other stage-aware
-    computation) reads campaign_cfg["stages"], which get_campaign_cfg
-    builds from the same frozen local checkout. A campaign whose only
-    stage (intro) was fully sent correctly showed Completed; adding a
-    follow-up stage 24+ hours later committed the new template files
-    fine, and the Sequences tab even showed them correctly (already
-    live) — but the STATUS never left Completed, because nothing about
-    status computation had ever been told to look at GitHub instead of
-    the stale local file list.
-
-    stage_wait_days defaults to {} for the Sequences-tab callers, which
-    only care which stages/variants exist, not their timing."""
+    the few seconds a redeploy is supposed to take. Used both to RENDER
+    the Sequences tab (so what you see is never stale) and immediately
+    before Delete Stage / Delete Variant actually execute (so a
+    destructive action can never be decided from an outdated view even
+    if it somehow slipped past the render)."""
     filenames = client.list_directory_files(f"templates/{campaign_name}")
-    return outreach.parse_stages_and_variants_from_filenames(filenames, stage_wait_days or {})
-
-
-def _live_stage_wait_days():
-    """The stage_wait_days DEFAULTS from settings.yaml — safe to read
-    from the local checkout because, unlike campaign config or template
-    files, the app never writes this file, so it can never go stale the
-    way those can. There is currently no per-campaign override for
-    this, so the default is the only source of truth."""
-    settings = outreach.load_settings(SETTINGS_PATH)
-    return dict(settings.get("default_campaign_settings", {}).get("stage_wait_days", {}))
+    return outreach.parse_stages_and_variants_from_filenames(filenames, {})
 
 
 def _fetch_live_template_content(client, campaign_name, stage_prefix, variant):
@@ -919,7 +877,7 @@ def _render_sequences_tab(campaign_cfg, leads):
 
     with st.expander("➕ Add a follow-up stage" if next_stage else "➕ Add a follow-up stage (none left)"):
         if next_stage is None:
-            st.info(f"This campaign already has all {len(outreach.CANONICAL_STAGE_ORDER)} stages.")
+            st.info("This campaign already has all 5 stages.")
         else:
             stage_prefix, required_variants = next_stage
             st.write(f"**Next stage:** `{stage_prefix}` · **Required variants:** {', '.join(required_variants)}")
@@ -1030,8 +988,6 @@ def _render_sequences_tab(campaign_cfg, leads):
 
 
 def _render_settings_tab(campaign_cfg, leads):
-    # campaign_cfg arrives here already live-merged — see the single
-    # overlay point where it's first built, above in this file.
     campaign_name = campaign_cfg["_campaign_name"]
     sending = campaign_cfg.get("sending", {})
 
@@ -1040,11 +996,7 @@ def _render_settings_tab(campaign_cfg, leads):
     # button writes to — so an account added there shows up here too,
     # without needing to also hand-maintain [email_accounts_directory].
     streamlit_secret_directory = dict(st.secrets.get("email_accounts_directory", {}))
-    # LIVE read — an account added via Email Accounts commits this file to
-    # GitHub, but the local checkout stays frozen until redeploy, so a new
-    # account never appeared in this picker. See read_slot_mapping_live.
-    slot_mapping = read_slot_mapping_live(_safe_github_client(),
-                                           EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH)
+    slot_mapping = read_local_slot_mapping(EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH)
     account_directory = merge_account_directories(streamlit_secret_directory, slot_mapping)
     available_accounts = list(account_directory.keys())
 
@@ -1102,7 +1054,7 @@ def _render_settings_tab(campaign_cfg, leads):
                 st.error(e)
         else:
             try:
-                raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
+                raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
                 updated = build_updated_override(raw_override, daily_limit, per_account_daily_limit,
                                                   sender_rotation, rotation_accounts)
                 client = _get_github_client()
@@ -1183,8 +1135,6 @@ def _render_delete_campaign_section(campaign_cfg):
 
 
 def _render_schedule_tab(campaign_cfg):
-    # campaign_cfg arrives here already live-merged — see the single
-    # overlay point where it's first built, above in this file.
     campaign_name = campaign_cfg["_campaign_name"]
     current = get_current_schedule(campaign_cfg)
 
@@ -1221,7 +1171,7 @@ def _render_schedule_tab(campaign_cfg):
                 st.error(e)
         else:
             try:
-                raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
+                raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
                 updated = build_updated_schedule_override(raw_override, selected_timezone, window_start,
                                                             window_end, send_days)
                 client = _get_github_client()
@@ -1327,7 +1277,7 @@ def _update_campaign_status(campaign_name: str, new_status: str) -> bool:
     passed — same "may take a minute" caveat as every other config write
     in this app."""
     try:
-        raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
+        raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
         updated = build_status_override(raw_override, new_status)
         client = _get_github_client()
         client.create_file(
@@ -1346,7 +1296,7 @@ def _temporarily_remove_campaign(campaign_name: str, current_status: str) -> boo
     the campaign back exactly as it was — see
     launch_logic.build_delete_override's docstring."""
     try:
-        raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
+        raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
         updated = build_delete_override(raw_override, current_status)
         client = _get_github_client()
         client.create_file(
@@ -1364,7 +1314,7 @@ def _restore_campaign(campaign_name: str) -> bool:
     """Restores whatever status was recorded at Temporarily Remove time —
     see launch_logic.build_restore_override's docstring."""
     try:
-        raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
+        raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
         updated = build_restore_override(raw_override)
         client = _get_github_client()
         client.create_file(
@@ -1459,7 +1409,7 @@ def _render_asana_sync_section_in_settings(campaign_cfg):
                 st.error("Enter the Asana project name, or uncheck Enable.")
             else:
                 try:
-                    raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
+                    raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
                     updated = build_asana_settings_override(raw_override, enabled, project_name.strip())
                     client = _get_github_client()
                     client.create_file(
@@ -1508,7 +1458,7 @@ def _render_tracker_sync_section_in_settings(campaign_cfg):
                                        key="tracker_sync_enabled")
         if st.button("💾 Save Creator Tracker Settings", key="tracker_sync_save"):
             try:
-                raw_override = load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR)
+                raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
                 updated = build_tracker_sync_settings_override(raw_override, tracker_enabled)
                 client = _get_github_client()
                 client.create_file(
@@ -1549,7 +1499,7 @@ def _render_send_section_in_settings(campaign_cfg, leads):
     Completed or Attention-needed campaign is never even offered a Send
     button that would just fail or no-op."""
     campaign_name = campaign_cfg["_campaign_name"]
-    STAGES = outreach.CANONICAL_STAGE_ORDER  # derived — see outreach.py's own comment on that list
+    STAGES = ["intro", "followup1", "followup2", "followup3", "followup4"]
     VARIANTS = ["Auto", "A", "B", "C", "D"]
 
     st.divider()
@@ -1724,42 +1674,6 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
     except Exception as exc:  # noqa: BLE001
         st.error(f"Couldn't load '{campaign_name}': {exc}")
         return
-
-    # LIVE overlay applied ONCE, here, upstream of EVERYTHING on this page
-    # (the Draft banner, Status controls, and all six tabs) — deliberately
-    # not repeated per-tab. The actual reported bug: pausing a campaign
-    # committed correctly to GitHub, but _render_status_controls read
-    # campaign_cfg straight from the local checkout with no overlay at
-    # all, so Pause/Resume never reflected in the UI no matter how long
-    # you waited. Applying this in exactly one place, at the source,
-    # is what stops a future consumer of campaign_cfg being missed the
-    # same way this one was — see load_raw_override_live's own docstring
-    # for the full staleness story.
-    campaign_cfg = merge_live_override_into_cfg(
-        campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
-
-    # Live stage/variant discovery, overlaid the same way and at the
-    # same single point as the override above. A campaign whose only
-    # stage was fully sent correctly showed Completed — adding a new
-    # follow-up stage afterward committed the template files fine (the
-    # Sequences tab even showed them, since IT already read live via
-    # _fetch_live_stages_and_variants), but compute_campaign_status and
-    # everything else reads campaign_cfg["stages"], which get_campaign_cfg
-    # built from the same frozen local template listing this page's
-    # OTHER live reads exist specifically to avoid. Falls back to the
-    # existing (locally-discovered) stages/variants on any API failure,
-    # or if the live listing is empty/invalid — a page must never break
-    # or go blank because a live re-discovery call failed.
-    _github_client_for_stages = _safe_github_client()
-    if _github_client_for_stages is not None:
-        try:
-            live_stages, live_variants = _fetch_live_stages_and_variants(
-                _github_client_for_stages, campaign_name, _live_stage_wait_days())
-            if live_stages and live_variants:
-                campaign_cfg["stages"] = live_stages
-                campaign_cfg["variants"] = live_variants
-        except Exception:  # noqa: BLE001 - network/auth/parsing failure, keep the local fallback
-            pass
 
     st.title(campaign_name)
 
