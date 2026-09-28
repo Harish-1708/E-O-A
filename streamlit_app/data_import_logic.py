@@ -33,9 +33,45 @@ def validate_custom_field_name(name: str, reserved_names: List[str]) -> Optional
     return None
 
 
+def _decode_csv_bytes(raw_bytes: bytes) -> str:
+    """Tries encodings in order of likelihood for a real-world CSV
+    export, falling through progressively instead of crashing outright
+    on the first mismatch — the actual reported production bug: a CSV
+    saved by Windows Excel (which very commonly exports as cp1252, not
+    UTF-8, the moment a file has a curly quote, an em dash, or any
+    accented name) raised UnicodeDecodeError straight out of
+    utf-8-sig-only decoding, crashing the entire Data tab with a raw
+    traceback instead of just failing to import.
+
+    UTF-16 is handled ONLY via an explicit BOM check, never as a blind
+    attempted decode — confirmed by direct testing that utf-16 SILENTLY
+    "succeeds" on ordinary cp1252 bytes, producing complete garbage
+    (unrelated CJK-looking characters) rather than raising. Trying it
+    blindly in the fallback chain would have silently corrupted every
+    cp1252 file instead of correctly falling through to cp1252 itself.
+
+    latin-1 is placed last deliberately: it can decode ANY byte
+    sequence at all (every value 0-255 maps to a defined character), so
+    it never raises — which is exactly why it must never be tried
+    before every more specific, more likely encoding has already
+    failed, or it would silently mask a genuine mismatch instead of
+    correctly falling through to the encoding that actually applies."""
+    if raw_bytes[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw_bytes.decode("utf-16")
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return raw_bytes.decode(encoding)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return raw_bytes.decode("latin-1")
+
+
 def parse_csv_bytes(raw_bytes: bytes) -> Tuple[List[str], List[Dict[str, str]]]:
-    """Returns (column_names, rows). utf-8-sig handles a BOM from Excel
-    exports without choking on it.
+    """Returns (column_names, rows). See _decode_csv_bytes for the full
+    encoding fallback chain — handles a BOM from Excel exports, and a
+    cp1252-encoded file (Excel's other common export, whenever a file
+    has a curly quote, an em dash, or an accented name) without
+    choking on either.
 
     A genuinely duplicate column NAME in the source CSV isn't corrected
     here — Python's own csv.DictReader silently keeps only the LAST
@@ -44,7 +80,7 @@ def parse_csv_bytes(raw_bytes: bytes) -> Tuple[List[str], List[Dict[str, str]]]:
     find_duplicate_columns, which the Data tab calls separately to warn
     about this rather than staying silent about data that's already
     gone by this point."""
-    text = raw_bytes.decode("utf-8-sig")
+    text = _decode_csv_bytes(raw_bytes)
     reader = csv.DictReader(io.StringIO(text))
     columns = reader.fieldnames or []
     rows = [dict(row) for row in reader]
