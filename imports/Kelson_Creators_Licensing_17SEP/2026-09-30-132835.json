@@ -1,0 +1,21 @@
+{
+  "leads": [
+    {
+      "FirstName": "Will",
+      "LastName": "Huddleston",
+      "Name": "Will Huddleston",
+      "Email": "will@pneumaventures.io",
+      "Client": "DudeRobe",
+      "Product": "DudeRobe",
+      "Creator": "@wfhudd",
+      "Content Score": "",
+      "Video File": "https://www.tiktok.com/@wfhudd/video/7651043021659688205",
+      "Refunnel Link": "https://cdn.refunnel.com/hls/tk_7651043021659688205_0/playlist.m3u8",
+      "Usage Rights": "",
+      "Rights Expiration": "",
+      "Ad Ready": "",
+      "Last Contact Date": ""
+    }
+  ],
+  "allow_duplicate_emails": true
+}
