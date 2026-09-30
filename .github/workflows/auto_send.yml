@@ -49,23 +49,6 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-      - name: Diagnose templates/ directory listing (temporary)
-        run: |
-          echo "=== ls -la templates/ ==="
-          ls -la templates/
-          echo ""
-          echo "=== find templates -maxdepth 1 -printf '%y %p\\n' (file type: d=dir, l=symlink) ==="
-          find templates -maxdepth 1 -printf '%y %p\n'
-          echo ""
-          echo "=== python os.listdir + os.path.isdir, exactly what discover_campaign_names sees ==="
-          python3 -c "
-          import os
-          root = 'templates'
-          print('raw listdir:', os.listdir(root))
-          for name in sorted(os.listdir(root)):
-              full = os.path.join(root, name)
-              print(f'{name!r}: isdir={os.path.isdir(full)} islink={os.path.islink(full)} exists={os.path.exists(full)}')
-          "
       - name: Auto send
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
