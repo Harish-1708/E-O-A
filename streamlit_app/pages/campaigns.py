@@ -39,7 +39,7 @@ from sequences_logic import (  # noqa: E402
     build_variant_deletion_paths,
 )
 from campaign_builder import (  # noqa: E402
-    get_next_stage_for_campaign, build_campaign_files, validate_variant_content,
+    next_stage_from_stages, build_campaign_files, validate_variant_content,
     validate_campaign_name, commit_message_for_campaign, confirmation_matches_campaign_name,
     list_campaign_files_to_delete, build_campaign_duplication_files,
 )
@@ -920,11 +920,15 @@ def _render_sequences_tab(campaign_cfg, leads):
                         st.error(f"Failed to add variant: {exc}")
 
     # ---------- Add a follow-up stage (reuses the exact New Campaign "Add Stage" logic) ----------
-    try:
-        next_stage = get_next_stage_for_campaign(campaign_name, TEMPLATES_ROOT)
-    except Exception as exc:  # noqa: BLE001
-        next_stage = None
-        st.error(f"Couldn't determine next stage: {exc}")
+    # Computed from the LIVE stages/variants already fetched at the top
+    # of this tab — never a separate re-read of the local checkout.
+    # Previously called get_next_stage_for_campaign(campaign_name,
+    # TEMPLATES_ROOT), which reads the frozen local checkout: a
+    # follow-up stage added through the app committed correctly to
+    # GitHub every time, but this expander kept showing the exact same
+    # "next stage" indefinitely, across every campaign, since the local
+    # checkout never learned about it without a redeploy.
+    next_stage = next_stage_from_stages(stages, existing_variants)
 
     with st.expander("➕ Add a follow-up stage" if next_stage else "➕ Add a follow-up stage (none left)"):
         if next_stage is None:
