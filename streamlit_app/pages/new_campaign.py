@@ -10,9 +10,11 @@ from auth import login_gate, current_user  # noqa: E402
 from config import TEMPLATES_ROOT, WORKFLOW_DASHBOARD  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from preview_logic import list_campaigns_live  # noqa: E402
+import outreach  # noqa: E402
 from campaign_builder import (  # noqa: E402
     validate_campaign_name, validate_variant_content, build_campaign_files,
-    get_next_stage_for_campaign, commit_message_for_campaign, VARIANT_LETTERS, TOTAL_STAGE_COUNT,
+    next_stage_from_stages, get_next_stage_for_campaign, commit_message_for_campaign,
+    VARIANT_LETTERS, TOTAL_STAGE_COUNT,
 )
 
 # Page config is set once, centrally, in app.py via st.navigation/st.Page —
@@ -44,6 +46,28 @@ def _safe_github_client():
         return _get_github_client()
     except Exception:  # noqa: BLE001 - missing/invalid token, etc.
         return None
+
+
+def _live_next_stage_for_campaign(campaign_name: str):
+    """get_next_stage_for_campaign, but reading GitHub live instead of
+    the local checkout — same fix, same reason, as the identical bug in
+    campaigns.py's Sequences tab: a follow-up stage added through the
+    app committed correctly to GitHub every time, but this page's "next
+    stage" kept showing the exact same value indefinitely, since the
+    local checkout (frozen on Streamlit Cloud until a redeploy) never
+    learned about it. Falls back to the local, disk-based function on
+    any API failure or if no client is available — a live read must
+    never be harder to do than it was before going live."""
+    client = _safe_github_client()
+    if client is not None:
+        try:
+            filenames = client.list_directory_files(f"templates/{campaign_name}")
+            stages, variants = outreach.parse_stages_and_variants_from_filenames(filenames, {})
+            if stages and variants:
+                return next_stage_from_stages(stages, variants)
+        except Exception:  # noqa: BLE001 - network/auth/parsing failure, fall back to local
+            pass
+    return get_next_stage_for_campaign(campaign_name, TEMPLATES_ROOT)
 
 
 def _initialize_campaign_tabs(campaign_name: str) -> None:
@@ -139,7 +163,7 @@ else:
         selected_campaign = st.selectbox("Campaign", existing_campaigns)
 
         try:
-            next_stage = get_next_stage_for_campaign(selected_campaign, TEMPLATES_ROOT)
+            next_stage = _live_next_stage_for_campaign(selected_campaign)
         except Exception as exc:  # noqa: BLE001
             st.error(f"Couldn't inspect '{selected_campaign}': {exc}")
             next_stage = None
