@@ -14,10 +14,12 @@ from sheets_readonly import ReadOnlySheetsConnector, ReadOnlySheetsError  # noqa
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from send_logic import build_check_replies_inputs  # noqa: E402
 from responses_hub_logic import (  # noqa: E402
-    tag_responses_with_campaign, response_key, filter_responses, count_unread,
-    sort_responses_newest_first, get_campaign_names_present, CLASSIFICATION_OPTIONS,
+    tag_responses_with_campaign, filter_responses, count_unread,
+    get_campaign_names_present, CLASSIFICATION_OPTIONS,
     STATUS_FILTER_ALL, INBOX_FILTER_ALL, INBOX_FILTER_UNREAD, search_responses,
-    is_response_read, split_keys_by_campaign, build_mark_read_payload,
+    split_keys_by_campaign, build_mark_read_payload,
+    group_responses_by_lead, sort_conversation_groups_newest_first, group_unread_count,
+    all_response_keys_in_group, filter_groups_by_unread,
 )
 from responses_reply_logic import (  # noqa: E402
     find_lead_for_response, build_reply_defaults, parse_email_list, validate_reply,
@@ -174,45 +176,81 @@ if unavailable_campaigns:
                f"no replies for them yet): {', '.join(unavailable_campaigns)}")
 
 filtered = search_responses(all_responses, search_query)
-filtered = filter_responses(filtered, status_filter, campaign_filter, inbox_filter, read_keys)
-filtered = sort_responses_newest_first(filtered)
+# inbox_filter deliberately NOT applied here — unread/read is handled at
+# the CONVERSATION level below (filter_groups_by_unread), not per
+# message, so a conversation with one unread message among several
+# older, already-read ones still surfaces correctly.
+filtered = filter_responses(filtered, status_filter, campaign_filter, INBOX_FILTER_ALL, read_keys)
 
-if not filtered:
+# One card per CREATOR/THREAD, not one per individual reply — the
+# actual reported production bug: the same creator sending several
+# messages over time showed as a separate card for every single
+# message. See group_responses_by_lead's own docstring for the full
+# reasoning; grouping happens on the already-filtered list, so a
+# conversation shows up whenever any one of its messages matches the
+# current search/status/campaign filters.
+groups = group_responses_by_lead(filtered)
+groups = filter_groups_by_unread(groups, inbox_filter, read_keys)
+groups = sort_conversation_groups_newest_first(groups)
+
+if not groups:
     st.info("No responses match these filters.")
 else:
-    for response in filtered:
-        campaign_name = response["_campaign"]
-        key = response_key(response)
-        is_unread = not is_response_read(response, read_keys)
+    for group in groups:
+        campaign_name = group["campaign"]
+        latest = group["latest"]
+        # A stable identifier for the WHOLE conversation — every widget
+        # below (mark-read, reply form) is keyed to this, not to any one
+        # individual message, so the UI state survives regardless of
+        # which message happens to be "latest" on a later rerun.
+        group_key = f"{campaign_name}:{group['lead_id']}"
+        group_unread = group_unread_count(group, read_keys)
+        is_unread = group_unread > 0
         leads = leads_by_campaign.get(campaign_name, [])
-        lead = find_lead_for_response(response, leads)
-        label = f"{response.get('From', '(unknown sender)')} — {response.get('Subject', '(no subject)')}"
+        lead = find_lead_for_response(latest, leads)
+        label = f"{latest.get('From', '(unknown sender)')} — {latest.get('Subject', '(no subject)')}"
+        message_count = len(group["messages"])
 
         with st.container(border=True):
             col_a, col_b = st.columns([3, 1])
             with col_a:
                 prefix = "🔵 " if is_unread else ""
                 st.markdown(f"{prefix}**{label}**")
-                intent = response.get("Intent", "")
-                intent_confidence = response.get("IntentConfidence", "")
+                intent = latest.get("Intent", "")
+                intent_confidence = latest.get("IntentConfidence", "")
                 intent_badge = f" · 🎯 {intent} ({intent_confidence} confidence)" if intent else ""
-                st.caption(f"{campaign_name} · {response.get('ReceivedAt', '')} · "
-                           f"{response.get('Classification', '')}{intent_badge}")
+                count_badge = f" · {message_count} message{'s' if message_count != 1 else ''}" \
+                    if message_count > 1 else ""
+                st.caption(f"{campaign_name} · {latest.get('ReceivedAt', '')} · "
+                           f"{latest.get('Classification', '')}{intent_badge}{count_badge}")
+                # "Stopped Sequence" stays visible at the conversation
+                # level regardless of which message is currently
+                # "latest" — it describes the lead's own automated-
+                # sequence state, not any single message.
+                if lead is not None and (lead.get("Status") or "").startswith("Stopped"):
+                    st.caption(f"🛑 {lead.get('Status')} — automated follow-ups stopped; "
+                               f"you can still reply manually below.")
             with col_b:
-                st.caption(response.get("ActionTaken", ""))
+                st.caption(latest.get("ActionTaken", ""))
                 if is_unread:
                     # A deliberate, explicit action — st.expander's body
                     # runs on every rerun REGARDLESS of whether it's
                     # actually open, so marking read merely because the
                     # Reply expander's code executed would mark
                     # EVERYTHING read on the very first page load.
-                    if st.button("✓ Mark as read", key=f"mark_read_{key}"):
-                        read_keys.add(key)
-                        pending_sync_keys.add(key)
+                    if st.button(f"✓ Mark as read ({group_unread})", key=f"mark_read_{group_key}"):
+                        # Marks the WHOLE conversation read, not just the
+                        # single message shown — an earlier message in
+                        # the same thread must never stay stuck unread
+                        # just because a newer one got looked at.
+                        for k in all_response_keys_in_group(group):
+                            read_keys.add(k)
+                            pending_sync_keys.add(k)
                         st.rerun()
-            st.write(response.get("Snippet", ""))
+            st.write(latest.get("Snippet", ""))
 
-            with st.expander("💬 View full conversation"):
+            with st.expander(f"💬 View full conversation ({message_count} message"
+                              f"{'s' if message_count != 1 else ''})"):
                 if lead is None:
                     st.caption("Can't reconstruct this conversation — no matching lead found in the "
                                "Master Sheet (the response may predate the lead being added).")
@@ -231,15 +269,19 @@ else:
                         st.divider()
 
             with st.expander("↩️ Reply"):
-                defaults = build_reply_defaults(response, lead)
-                to_email = st.text_input("To", value=defaults["to"], key=f"hub_reply_to_{key}")
-                subject = st.text_input("Subject", value=defaults["subject"], key=f"hub_reply_subject_{key}")
-                cc_raw = st.text_input("Cc (comma-separated)", key=f"hub_reply_cc_{key}")
-                bcc_raw = st.text_input("Bcc (comma-separated)", key=f"hub_reply_bcc_{key}")
-                body = st.text_area("Message", key=f"hub_reply_body_{key}", height=150)
+                # Threaded off the conversation's MOST RECENT inbound
+                # message — replying always continues the same Gmail
+                # thread the creator is actually looking at right now,
+                # never an older message further back in the history.
+                defaults = build_reply_defaults(latest, lead)
+                to_email = st.text_input("To", value=defaults["to"], key=f"hub_reply_to_{group_key}")
+                subject = st.text_input("Subject", value=defaults["subject"], key=f"hub_reply_subject_{group_key}")
+                cc_raw = st.text_input("Cc (comma-separated)", key=f"hub_reply_cc_{group_key}")
+                bcc_raw = st.text_input("Bcc (comma-separated)", key=f"hub_reply_bcc_{group_key}")
+                body = st.text_area("Message", key=f"hub_reply_body_{group_key}", height=150)
                 uploaded_files = st.file_uploader(
                     "Attach images or files (optional)", accept_multiple_files=True,
-                    key=f"hub_reply_attachments_{key}",
+                    key=f"hub_reply_attachments_{group_key}",
                 )
                 if uploaded_files:
                     total_bytes = total_attachment_size_bytes(uploaded_files)
@@ -250,7 +292,7 @@ else:
                 else:
                     st.caption("⚠️ Couldn't find this lead's sender account — check the Master Sheet.")
 
-                if st.button("Send Reply", type="primary", key=f"hub_send_reply_{key}"):
+                if st.button("Send Reply", type="primary", key=f"hub_send_reply_{group_key}"):
                     cc = parse_email_list(cc_raw)
                     bcc = parse_email_list(bcc_raw)
                     attachment_bytes = total_attachment_size_bytes(uploaded_files) if uploaded_files else 0
@@ -262,9 +304,9 @@ else:
                     else:
                         try:
                             attachments = build_attachment_entries(uploaded_files) if uploaded_files else None
-                            payload = build_reply_payload(response, lead, defaults["sender_account"], to_email,
+                            payload = build_reply_payload(latest, lead, defaults["sender_account"], to_email,
                                                            subject, body, cc, bcc, attachments=attachments)
-                            path = reply_payload_path(campaign_name, response.get("ResponseID", "unknown"))
+                            path = reply_payload_path(campaign_name, latest.get("ResponseID", "unknown"))
                             client = _get_github_client()
                             client.create_file(
                                 path, payload_to_bytes(payload),
@@ -272,8 +314,12 @@ else:
                             )
                             client.dispatch_workflow(WORKFLOW_SEND_REPLY,
                                                       {"campaign": campaign_name, "payload_path": path})
-                            read_keys.add(key)
-                            pending_sync_keys.add(key)
+                            # Replying means you've seen the whole
+                            # conversation — mark every message in it
+                            # read, not just the one it was threaded off.
+                            for k in all_response_keys_in_group(group):
+                                read_keys.add(k)
+                                pending_sync_keys.add(k)
                             st.success("Reply queued — it'll be sent within a minute or two.")
                         except GitHubActionsError as exc:
                             st.error(f"Failed to send: {exc}")
