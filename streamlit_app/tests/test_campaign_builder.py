@@ -7,7 +7,7 @@ import pytest
 
 from campaign_builder import (
     validate_campaign_name, validate_variant_content, build_template_file_content,
-    build_campaign_files, get_next_stage_for_campaign, commit_message_for_campaign,
+    build_campaign_files, get_next_stage_for_campaign, next_stage_from_stages, commit_message_for_campaign,
     confirmation_matches_campaign_name, list_campaign_files_to_delete,
     build_duplicated_config_override, build_campaign_duplication_files,
 )
@@ -144,6 +144,53 @@ def test_get_next_stage_for_fully_built_campaign_returns_none(tmp_path):
             (campaign_dir / f"{stage}_{letter}.txt").write_text(f"Subject: {stage} {letter}\n\nBody")
     result = get_next_stage_for_campaign("FullyBuiltCampaign", str(tmp_path))
     assert result is None
+
+
+def test_next_stage_from_stages_matches_get_next_stage_for_campaign(tmp_path):
+    """The actual reported production bug: a follow-up stage added
+    through the app committed correctly to GitHub every time, but
+    "Add a follow-up stage" kept showing the exact same next stage,
+    indefinitely, across every campaign. Root cause:
+    get_next_stage_for_campaign reads the LOCAL checkout, frozen on
+    Streamlit Cloud until a redeploy — while the page rendering this
+    expander had ALREADY fetched the live stage list moments earlier
+    and never reused it. next_stage_from_stages operates on an
+    already-fetched stages/variants list instead, with no disk read of
+    its own, and must compute the identical result."""
+    import outreach
+    campaign_dir = tmp_path / "PartialCampaign"
+    campaign_dir.mkdir()
+    for letter in ["A", "B"]:
+        (campaign_dir / f"intro_{letter}.txt").write_text(f"Subject: Hi {letter}\n\nBody {letter}")
+
+    stages, variants = outreach.discover_stages_and_variants(str(campaign_dir), stage_wait_days={})
+    assert next_stage_from_stages(stages, variants) == get_next_stage_for_campaign("PartialCampaign", str(tmp_path))
+    assert next_stage_from_stages(stages, variants) == ("followup1", ["A", "B"])
+
+
+def test_next_stage_from_stages_reflects_a_stage_added_live_even_if_disk_is_stale(tmp_path):
+    """The exact scenario reported: a stage was added (e.g. followup7)
+    and committed successfully, but the app kept showing it as the
+    "next" stage anyway. Simulates this directly: the on-disk checkout
+    only knows about up through followup6 (stale), but the LIVE stage
+    list (what the app actually fetched from GitHub) already includes
+    followup7 — next_stage_from_stages, operating on the live list
+    passed to it, must correctly say followup8 is next, never
+    followup7 again."""
+    live_stages = [{"template_prefix": p} for p in
+                    ["intro", "followup1", "followup2", "followup3", "followup4",
+                     "followup5", "followup6", "followup7"]]
+    assert next_stage_from_stages(live_stages, ["A", "B", "C", "D"]) == ("followup8", ["A", "B", "C", "D"])
+    # Confirm this genuinely differs from what a stale, disk-only read
+    # (still missing followup7) would have said.
+    stale_campaign_dir = tmp_path / "StaleOnDisk"
+    stale_campaign_dir.mkdir()
+    for stage in ["intro", "followup1", "followup2", "followup3", "followup4", "followup5", "followup6"]:
+        for letter in "ABCD":
+            (stale_campaign_dir / f"{stage}_{letter}.txt").write_text(f"Subject: {stage}\n\nBody")
+    stale_result = get_next_stage_for_campaign("StaleOnDisk", str(tmp_path))
+    assert stale_result == ("followup7", ["A", "B", "C", "D"])
+    assert stale_result != next_stage_from_stages(live_stages, ["A", "B", "C", "D"])
 
 
 def test_get_next_stage_for_partial_campaign_returns_next_stage_and_matching_variants(tmp_path):
