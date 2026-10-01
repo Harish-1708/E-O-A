@@ -88,23 +88,43 @@ def build_campaign_files(campaign_name: str, stage_prefix: str,
     return files
 
 
+def next_stage_from_stages(stages: List[Dict], variants: List[str]) -> Optional[Tuple[str, List[str]]]:
+    """Same computation as get_next_stage_for_campaign, but operating on
+    stages/variants ALREADY fetched by the caller — no disk or network
+    read of its own at all. This is the actual fix for a real reported
+    bug: a follow-up stage added through the app committed correctly to
+    GitHub every time, but "Add a follow-up stage" kept showing the
+    exact same next stage, indefinitely, across every campaign. Root
+    cause: get_next_stage_for_campaign reads templates_root — the local
+    checkout, frozen on Streamlit Cloud until a redeploy — while the
+    Sequences tab that renders this same expander had ALREADY fetched
+    the live stage list moments earlier (for the "Edit templates" and
+    "Add variant" sections just above it) and never reused it here.
+    Callers that already have a live stages/variants list — which is
+    every caller inside a page that renders the Sequences tab — should
+    use this instead of re-reading from disk a second time."""
+    existing_prefixes = [s["template_prefix"] for s in stages]
+    for prefix in outreach.CANONICAL_STAGE_ORDER:
+        if prefix not in existing_prefixes:
+            return prefix, variants
+    return None  # all TOTAL_STAGE_COUNT stages already exist
+
+
 def get_next_stage_for_campaign(campaign_name: str, templates_root: str) -> Optional[Tuple[str, List[str]]]:
     """For an EXISTING campaign, returns (next_stage_prefix,
     required_variant_letters) — the only stage/variant combination
     outreach.py's own auto-discovery would accept next — or None if the
     campaign already has all TOTAL_STAGE_COUNT stages built out.
 
-    Reuses outreach.discover_stages_and_variants directly rather than
-    re-deriving the rule, so this can never drift from what the core
-    system actually enforces.
-    """
+    Reads templates_root — the LOCAL checkout, which on Streamlit Cloud
+    is frozen until a redeploy. Only still appropriate for a caller
+    that genuinely has no live stages/variants already fetched (a page
+    that isn't also rendering the Sequences tab); everywhere else,
+    prefer next_stage_from_stages against an already-live-fetched list
+    instead of reading from disk a second time."""
     campaign_dir = os.path.join(templates_root, campaign_name)
     stages, variants = outreach.discover_stages_and_variants(campaign_dir, stage_wait_days={})
-    existing_prefixes = [s["template_prefix"] for s in stages]
-    for prefix in outreach.CANONICAL_STAGE_ORDER:
-        if prefix not in existing_prefixes:
-            return prefix, variants
-    return None  # all TOTAL_STAGE_COUNT stages already exist
+    return next_stage_from_stages(stages, variants)
 
 
 def commit_message_for_campaign(campaign_name: str, stage_prefix: str, variant_count: int,
