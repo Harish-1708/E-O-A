@@ -8,6 +8,8 @@ from responses_hub_logic import (
     sort_responses_newest_first, get_campaign_names_present, build_reply_summary_label,
     find_response_by_key, STATUS_FILTER_ALL, INBOX_FILTER_ALL, INBOX_FILTER_UNREAD, search_responses,
     is_response_read, split_keys_by_campaign, build_mark_read_payload, matches_status_filter,
+    group_responses_by_lead, sort_conversation_groups_newest_first, group_unread_count,
+    all_response_keys_in_group, filter_groups_by_unread,
 )
 
 
@@ -359,3 +361,145 @@ def test_filter_responses_lead_followup_never_matches_a_bounce():
     responses = [_response(Classification="Bounce (Hard)", Intent="")]
     result = filter_responses(responses, "Lead / Needs Follow-up", STATUS_FILTER_ALL, INBOX_FILTER_ALL, set())
     assert result == []
+
+
+# ---------- group_responses_by_lead (the actual reported bug) ----------
+
+def test_group_responses_by_lead_collapses_one_creators_messages_into_one_conversation():
+    """The actual reported production bug, shown directly in a
+    screenshot: the same creator (Kari Blackburn) sending several
+    messages over time showed as a SEPARATE card for every single
+    message, instead of one conversation that simply grows. Must
+    collapse to exactly one group for one lead, regardless of how many
+    responses they've sent."""
+    responses = [
+        _response(ResponseID="r1", LeadID="5", ReceivedAt="2026-09-30 11:57:00"),
+        _response(ResponseID="r2", LeadID="5", ReceivedAt="2026-09-30 19:15:37"),
+        _response(ResponseID="r3", LeadID="5", ReceivedAt="2026-09-30 19:15:38"),
+        _response(ResponseID="r4", LeadID="5", ReceivedAt="2026-10-01 15:38:00"),
+    ]
+    groups = group_responses_by_lead(responses)
+    assert len(groups) == 1
+    assert len(groups[0]["messages"]) == 4
+
+
+def test_group_responses_by_lead_keeps_different_leads_separate():
+    responses = [
+        _response(ResponseID="r1", LeadID="5", From="kari@abc.com"),
+        _response(ResponseID="r2", LeadID="9", From="other@abc.com"),
+    ]
+    groups = group_responses_by_lead(responses)
+    assert len(groups) == 2
+    assert {g["lead_id"] for g in groups} == {"5", "9"}
+
+
+def test_group_responses_by_lead_keeps_same_lead_id_separate_across_campaigns():
+    """LeadID alone is only unique WITHIN a campaign — the same numeric
+    ID in two different campaigns' sheets refers to two entirely
+    different people, and must never be merged into one conversation."""
+    responses = [
+        _response(ResponseID="r1", LeadID="5", _campaign="CampaignA"),
+        _response(ResponseID="r2", LeadID="5", _campaign="CampaignB"),
+    ]
+    groups = group_responses_by_lead(responses)
+    assert len(groups) == 2
+    assert {g["campaign"] for g in groups} == {"CampaignA", "CampaignB"}
+
+
+def test_group_responses_by_lead_latest_is_the_most_recent_message():
+    responses = [
+        _response(ResponseID="r1", LeadID="5", Subject="First one", ReceivedAt="2026-09-30 11:57:00"),
+        _response(ResponseID="r2", LeadID="5", Subject="Most recent", ReceivedAt="2026-10-01 15:38:00"),
+        _response(ResponseID="r3", LeadID="5", Subject="Middle one", ReceivedAt="2026-09-30 19:15:38"),
+    ]
+    groups = group_responses_by_lead(responses)
+    assert groups[0]["latest"]["Subject"] == "Most recent"
+    # Newest first throughout, not just the head.
+    assert [m["Subject"] for m in groups[0]["messages"]] == ["Most recent", "Middle one", "First one"]
+
+
+def test_group_responses_by_lead_a_response_with_no_lead_id_gets_its_own_group():
+    """Must never silently merge two UNRELATED responses just because
+    neither has a LeadID, and must never drop one entirely."""
+    responses = [
+        _response(ResponseID="r1", LeadID="", From="a@abc.com"),
+        _response(ResponseID="r2", LeadID="", From="b@abc.com"),
+    ]
+    groups = group_responses_by_lead(responses)
+    assert len(groups) == 2
+
+
+def test_group_responses_by_lead_preserves_first_seen_order_for_ties():
+    responses = [_response(ResponseID="r1", LeadID="5"), _response(ResponseID="r2", LeadID="9")]
+    groups = group_responses_by_lead(responses)
+    assert [g["lead_id"] for g in groups] == ["5", "9"]
+
+
+# ---------- sort_conversation_groups_newest_first ----------
+
+def test_sort_conversation_groups_by_their_latest_message():
+    """The exact reported requirement: if Kari sends another message,
+    HER conversation moves to the top — sorting is by each
+    conversation's own most recent activity, not by when the
+    conversation first started."""
+    groups = group_responses_by_lead([
+        _response(ResponseID="r1", LeadID="5", ReceivedAt="2026-09-01 10:00:00"),  # old conversation
+        _response(ResponseID="r2", LeadID="9", ReceivedAt="2026-09-15 10:00:00"),
+        _response(ResponseID="r3", LeadID="9", ReceivedAt="2026-10-01 10:00:00"),  # lead 9 just replied again
+    ])
+    sorted_groups = sort_conversation_groups_newest_first(groups)
+    assert sorted_groups[0]["lead_id"] == "9"
+    assert sorted_groups[1]["lead_id"] == "5"
+
+
+# ---------- group_unread_count / all_response_keys_in_group ----------
+
+def test_group_unread_count_counts_unread_messages_within_the_group():
+    responses = [
+        _response(ResponseID="r1", LeadID="5", IsRead="Yes"),
+        _response(ResponseID="r2", LeadID="5", IsRead=""),
+        _response(ResponseID="r3", LeadID="5", IsRead=""),
+    ]
+    group = group_responses_by_lead(responses)[0]
+    assert group_unread_count(group, set()) == 2
+
+
+def test_all_response_keys_in_group_covers_every_message_for_mark_as_read():
+    """Marking a conversation read must mark EVERY message in it, not
+    just the one most recently shown — otherwise earlier messages in
+    the same thread stay stuck as unread forever."""
+    responses = [_response(ResponseID="r1", LeadID="5"), _response(ResponseID="r2", LeadID="5")]
+    group = group_responses_by_lead(responses)[0]
+    keys = all_response_keys_in_group(group)
+    assert len(keys) == 2
+    assert all(k.endswith("r1") or k.endswith("r2") for k in keys)
+
+
+# ---------- filter_groups_by_unread ----------
+
+def test_filter_groups_by_unread_keeps_a_conversation_with_any_unread_message():
+    """Read/unread is a property of the WHOLE conversation from the
+    person's own point of view — a thread with one unread message
+    (even an older one, not the latest) must still surface, exactly
+    like a real email client's unread filter."""
+    responses = [
+        _response(ResponseID="r1", LeadID="5", ReceivedAt="2026-09-01 10:00:00", IsRead=""),
+        _response(ResponseID="r2", LeadID="5", ReceivedAt="2026-10-01 10:00:00", IsRead="Yes"),
+    ]
+    groups = group_responses_by_lead(responses)
+    result = filter_groups_by_unread(groups, INBOX_FILTER_UNREAD, set())
+    assert len(result) == 1
+
+
+def test_filter_groups_by_unread_drops_a_fully_read_conversation():
+    responses = [_response(ResponseID="r1", LeadID="5", IsRead="Yes")]
+    groups = group_responses_by_lead(responses)
+    result = filter_groups_by_unread(groups, INBOX_FILTER_UNREAD, set())
+    assert result == []
+
+
+def test_filter_groups_by_unread_all_filter_is_a_no_op():
+    responses = [_response(ResponseID="r1", LeadID="5", IsRead="Yes")]
+    groups = group_responses_by_lead(responses)
+    result = filter_groups_by_unread(groups, INBOX_FILTER_ALL, set())
+    assert len(result) == 1
