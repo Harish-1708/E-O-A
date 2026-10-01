@@ -57,6 +57,8 @@ from responses_reply_logic import (  # noqa: E402
     find_lead_for_response, build_reply_defaults, parse_email_list, validate_reply,
     build_reply_payload, reply_payload_path, build_attachment_entries, total_attachment_size_bytes,
 )
+from responses_hub_logic import group_responses_by_lead, sort_conversation_groups_newest_first  # noqa: E402
+from conversation_logic import build_conversation_thread, filter_responses_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
     compute_campaign_status, compute_campaign_readiness, status_label,
     STATUS_DRAFT, STATUS_RUNNING, STATUS_PAUSED, STATUS_ATTENTION, STATUS_COMPLETED,
@@ -1276,30 +1278,75 @@ def _render_responses_tab(campaign_cfg, leads, responses):
     )
 
     sorted_responses = sorted(responses, key=lambda r: r.get("ReceivedAt", ""), reverse=True)
-    for response in sorted_responses:
-        lead = find_lead_for_response(response, leads)
-        label = f"{response.get('From', '(unknown sender)')} — {response.get('Subject', '(no subject)')}"
+    # One card per CREATOR/THREAD, not one per individual reply — the
+    # actual reported production bug: the same creator sending several
+    # messages over time showed as a separate card for every single
+    # message. See group_responses_by_lead's own docstring in
+    # responses_hub_logic for the full reasoning; this tab doesn't need
+    # the standalone Responses hub's read/unread tracking, only the
+    # same grouping.
+    groups = group_responses_by_lead(sorted_responses)
+    groups = sort_conversation_groups_newest_first(groups)
+    for group in groups:
+        latest = group["latest"]
+        lead = find_lead_for_response(latest, leads)
+        label = f"{latest.get('From', '(unknown sender)')} — {latest.get('Subject', '(no subject)')}"
+        message_count = len(group["messages"])
         # ActionTaken is what actually happened — a "Logged Only (...)"
         # outcome means the sequence was NOT stopped, even if
         # Classification says "Genuine Reply" (that field only describes
         # the message content, not what the system did about it).
         # Surfacing both, clearly labeled, resolves an ambiguity the raw
-        # Sheet columns read confusingly side by side otherwise.
-        action = response.get("ActionTaken", "")
+        # Sheet columns read confusingly side by side otherwise. Reflects
+        # the MOST RECENT message's own outcome — if an earlier message
+        # didn't stop the sequence but this lead's latest reply did,
+        # that's the state that actually matters right now.
+        action = latest.get("ActionTaken", "")
         stopped = action == "Stopped Sequence"
         icon = "🛑" if stopped else "📝"
         with st.container(border=True):
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.markdown(f"{icon} **{label}**")
-                st.caption(f"{response.get('ReceivedAt', '')} · {response.get('Classification', '')}")
+                count_badge = f" · {message_count} message{'s' if message_count != 1 else ''}" \
+                    if message_count > 1 else ""
+                st.caption(f"{latest.get('ReceivedAt', '')} · {latest.get('Classification', '')}{count_badge}")
+                # "Stopped Sequence" stays visible at the conversation
+                # level based on the LEAD's own automated-sequence
+                # state, not any single message — manual replies remain
+                # available either way.
+                if lead is not None and (lead.get("Status") or "").startswith("Stopped"):
+                    st.caption(f"🛑 {lead.get('Status')} — automated follow-ups stopped; "
+                               f"you can still reply manually below.")
             with col2:
                 st.caption(action + ("" if stopped else " — sequence NOT stopped"))
-            st.write(response.get("Snippet", ""))
+            st.write(latest.get("Snippet", ""))
 
-            reply_key_suffix = response.get("ResponseID") or response.get("MessageID") or label
+            reply_key_suffix = f"{group['lead_id']}" or latest.get("ResponseID") or latest.get("MessageID") or label
+
+            with st.expander(f"💬 View full conversation ({message_count} message"
+                              f"{'s' if message_count != 1 else ''})"):
+                if lead is None:
+                    st.caption("Can't reconstruct this conversation — no matching lead found in the "
+                               "Master Sheet (the response may predate the lead being added).")
+                else:
+                    responses_for_this_lead = filter_responses_for_lead(responses, lead.get("LeadID", ""))
+                    thread = build_conversation_thread(campaign_cfg, lead, responses_for_this_lead)
+                    if not thread:
+                        st.caption("No messages found for this lead yet.")
+                    for msg in thread:
+                        if msg["direction"] == "outgoing":
+                            st.markdown(f"**You** · {msg['timestamp']}")
+                        else:
+                            st.markdown(f"**{msg.get('from', 'Them')}** · {msg['timestamp']}")
+                        st.text(msg["body"])
+                        st.divider()
+
             with st.expander("↩️ Reply"):
-                defaults = build_reply_defaults(response, lead)
+                # Threaded off the conversation's MOST RECENT inbound
+                # message — replying always continues the same Gmail
+                # thread the creator is actually looking at right now.
+                defaults = build_reply_defaults(latest, lead)
                 to_email = st.text_input("To", value=defaults["to"], key=f"reply_to_{reply_key_suffix}")
                 subject = st.text_input("Subject", value=defaults["subject"], key=f"reply_subject_{reply_key_suffix}")
                 cc_raw = st.text_input("Cc (comma-separated)", key=f"reply_cc_{reply_key_suffix}")
@@ -1330,9 +1377,9 @@ def _render_responses_tab(campaign_cfg, leads, responses):
                     else:
                         try:
                             attachments = build_attachment_entries(uploaded_files) if uploaded_files else None
-                            payload = build_reply_payload(response, lead, defaults["sender_account"], to_email,
+                            payload = build_reply_payload(latest, lead, defaults["sender_account"], to_email,
                                                            subject, body, cc, bcc, attachments=attachments)
-                            path = reply_payload_path(campaign_name, response.get("ResponseID", "unknown"))
+                            path = reply_payload_path(campaign_name, latest.get("ResponseID", "unknown"))
                             client = _get_github_client()
                             client.create_file(
                                 path, payload_to_bytes(payload),
