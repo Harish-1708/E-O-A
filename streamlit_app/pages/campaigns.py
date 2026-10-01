@@ -41,7 +41,7 @@ from sequences_logic import (  # noqa: E402
 from campaign_builder import (  # noqa: E402
     next_stage_from_stages, build_campaign_files, validate_variant_content,
     validate_campaign_name, commit_message_for_campaign, confirmation_matches_campaign_name,
-    list_campaign_files_to_delete, build_campaign_duplication_files,
+    list_campaign_files_to_delete, build_campaign_duplication_files, TOTAL_STAGE_COUNT,
 )
 from settings_logic import (  # noqa: E402
     load_raw_override_live, merge_live_override_into_cfg,
@@ -889,13 +889,17 @@ def _render_sequences_tab(campaign_cfg, leads):
             for stage in stages:
                 prefix = stage["template_prefix"]
                 st.markdown(f"**{stage['name']}**")
-                # Keyed by variant letter too, not just stage — without
-                # this, Streamlit reuses the SAME widget across separate
-                # "Add Variant" attempts (adding B, then later C), and
-                # whatever was typed for the earlier variant silently
-                # carries over into the next one instead of starting blank.
-                subject = st.text_input("Subject", key=f"newvariant_subject_{prefix}_{next_letter}")
-                body = st.text_area("Body", key=f"newvariant_body_{prefix}_{next_letter}", height=120)
+                # Keyed by campaign_name and variant letter too, not just
+                # stage — without this, Streamlit reuses the SAME widget
+                # across separate "Add Variant" attempts (adding B, then
+                # later C, OR navigating to a DIFFERENT campaign that also
+                # needs the next variant — session state persists across
+                # page navigation), and whatever was typed earlier
+                # silently carries over into the next attempt instead of
+                # starting blank.
+                subject = st.text_input("Subject", key=f"newvariant_subject_{campaign_name}_{prefix}_{next_letter}")
+                body = st.text_area("Body", height=120,
+                                     key=f"newvariant_body_{campaign_name}_{prefix}_{next_letter}")
                 contents_by_stage[prefix] = {"subject": subject, "body": body}
 
             if st.button(f"Add Variant {next_letter}", type="primary"):
@@ -932,7 +936,7 @@ def _render_sequences_tab(campaign_cfg, leads):
 
     with st.expander("➕ Add a follow-up stage" if next_stage else "➕ Add a follow-up stage (none left)"):
         if next_stage is None:
-            st.info("This campaign already has all 5 stages.")
+            st.info(f"This campaign already has all {TOTAL_STAGE_COUNT} stages.")
         else:
             stage_prefix, required_variants = next_stage
             st.write(f"**Next stage:** `{stage_prefix}` · **Required variants:** {', '.join(required_variants)}")
@@ -941,9 +945,21 @@ def _render_sequences_tab(campaign_cfg, leads):
                 st.markdown(f"**Variant {letter}**")
                 subject = st.text_input(
                     "Subject (leave blank to continue the previous thread)",
-                    key=f"followup_subject_{letter}",
+                    # Keyed by campaign_name AND stage_prefix too, not
+                    # just letter — without this, Streamlit reuses the
+                    # SAME widget across separate "Add a follow-up stage"
+                    # attempts (adding followup5, then later followup6 to
+                    # the same campaign, OR navigating to a DIFFERENT
+                    # campaign that also needs the same stage next —
+                    # session state persists across page navigation), and
+                    # whatever was typed earlier silently carries over
+                    # instead of starting blank. The exact same fix
+                    # already applied to "Add Variant" just above, never
+                    # applied here.
+                    key=f"followup_subject_{campaign_name}_{stage_prefix}_{letter}",
                 )
-                body = st.text_area("Body", key=f"followup_body_{letter}", height=120)
+                body = st.text_area("Body", height=120,
+                                     key=f"followup_body_{campaign_name}_{stage_prefix}_{letter}")
                 variant_inputs[letter] = {"subject": subject, "body": body}
 
             if st.button(f"Add {stage_prefix}", type="primary"):
