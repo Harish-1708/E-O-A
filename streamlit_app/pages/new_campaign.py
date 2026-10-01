@@ -184,9 +184,17 @@ else:
                 subject = st.text_input(
                     f"Subject ({letter}) — leave blank to continue the same thread as this lead's "
                     "previous email instead of starting a new one",
-                    key=f"stage_subject_{letter}",
+                    # Keyed by campaign AND stage_prefix too, not just
+                    # letter — without this, Streamlit reuses the SAME
+                    # widget across separate "Add Stage" attempts (adding
+                    # a stage to one campaign, then later to a different
+                    # one, or adding followup5 then later followup6 to
+                    # the same campaign), and whatever was typed earlier
+                    # silently carries over instead of starting blank.
+                    key=f"stage_subject_{selected_campaign}_{stage_prefix}_{letter}",
                 )
-                body = st.text_area(f"Body ({letter})", key=f"stage_body_{letter}", height=150)
+                body = st.text_area(f"Body ({letter})", height=150,
+                                     key=f"stage_body_{selected_campaign}_{stage_prefix}_{letter}")
                 variant_inputs[letter] = {"subject": subject, "body": body}
 
             confirm_stage = st.checkbox(
