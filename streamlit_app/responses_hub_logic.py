@@ -169,3 +169,76 @@ def find_response_by_key(responses: List[Dict], key: str) -> Optional[Dict]:
         if response_key(r) == key:
             return r
     return None
+
+
+def group_responses_by_lead(responses: List[Dict]) -> List[Dict]:
+    """Groups a flat list of response rows into one entry per
+    (campaign, lead) — the actual fix for a real reported bug: the same
+    creator sending several messages over time showed as a separate
+    card for every single message, instead of one conversation that
+    simply grows and moves to the top.
+
+    Groups by (campaign, LeadID) — the same pairing response_key()
+    already uses to keep identifiers unique across campaigns. LeadID is
+    the lead's own stable identity within its campaign, already the
+    result of whatever Header/Subject/Email matching decided this reply
+    belongs to in the first place — reusing it here means conversation
+    grouping can never disagree with which lead a reply was actually
+    matched to.
+
+    Each group is {"campaign", "lead_id", "messages" (newest first),
+    "latest" (the single most recent message — what the card's own
+    preview shows)}. A response with no LeadID at all (shouldn't
+    normally happen, but a response logged before a matching lead
+    existed) gets its own group keyed to itself, rather than being
+    silently merged with some OTHER lead-less response it has nothing
+    to do with, or dropped entirely."""
+    groups: Dict[tuple, List[Dict]] = {}
+    order: List[tuple] = []
+    for r in responses:
+        campaign = r.get("_campaign", "")
+        lead_id = str(r.get("LeadID", "")).strip()
+        key = (campaign, lead_id) if lead_id else (campaign, f"_no_lead_{response_key(r)}")
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(r)
+
+    result = []
+    for campaign, lead_id in order:
+        messages = sorted(groups[(campaign, lead_id)], key=lambda r: r.get("ReceivedAt", ""), reverse=True)
+        result.append({"campaign": campaign, "lead_id": lead_id, "messages": messages, "latest": messages[0]})
+    return result
+
+
+def sort_conversation_groups_newest_first(groups: List[Dict]) -> List[Dict]:
+    """A conversation's own position is governed by its MOST RECENT
+    message — the same creator replying again moves their conversation
+    back to the top, exactly like a real inbox, rather than leaving it
+    wherever its first-ever message happened to sort."""
+    return sorted(groups, key=lambda g: g["latest"].get("ReceivedAt", ""), reverse=True)
+
+
+def group_unread_count(group: Dict, read_keys: Set[str]) -> int:
+    return sum(1 for r in group["messages"] if not is_response_read(r, read_keys))
+
+
+def all_response_keys_in_group(group: Dict) -> List[str]:
+    """Every message's own key within one conversation — used so
+    "mark as read" acts on the WHOLE conversation at once, matching
+    what a person actually means by opening and reading a thread,
+    rather than leaving every earlier message in it still unread."""
+    return [response_key(r) for r in group["messages"]]
+
+
+def filter_groups_by_unread(groups: List[Dict], inbox_filter: str, read_keys: Set[str]) -> List[Dict]:
+    """Applied AFTER grouping, deliberately separate from
+    filter_responses' own status/campaign filtering (which runs on the
+    flat message list before grouping, so a conversation surfaces
+    whenever any one of its messages matches). Read/unread is a
+    property of the conversation as a whole from the person's own point
+    of view — unread if ANY message in it hasn't been seen yet, not
+    only when its single most recent message happens to be new."""
+    if inbox_filter != INBOX_FILTER_UNREAD:
+        return groups
+    return [g for g in groups if group_unread_count(g, read_keys) > 0]
