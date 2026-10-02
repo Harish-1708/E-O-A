@@ -27,6 +27,7 @@ log and job summary, and is NEVER written to the Sheet. Notes stays
 import argparse
 import os
 import sys
+import time
 from typing import Dict, List, Optional
 
 import gspread
@@ -327,6 +328,46 @@ def _connect_sheets(sheet_id: str, service_account_info: Dict):
     return gc.open_by_key(sheet_id), _DriveService(drive_creds)
 
 
+_TRANSIENT_RETRY_DELAYS_SECONDS = [5, 15]
+
+
+def _call_with_transient_retries(fn, *args, **kwargs):
+    """Retries fn(*args, **kwargs) on a genuinely transient network
+    failure — the actual reported production error: a one-off SSL
+    connection reset while fetching the Sheet's own metadata, with
+    nothing wrong on either side (permissions confirmed correct
+    directly), that happened to hit mid-handshake. Not retried for
+    anything else (a real 403, a missing env var, a malformed
+    response) — only the specific transport-level failures below,
+    which are the ones a brief pause and a second attempt can
+    actually fix. The whole connect-and-sync sequence is safe to
+    retry as a unit: sync_once is idempotent (already-synced tasks are
+    skipped, an existing link is never overwritten), so re-running it
+    from scratch after a failed first attempt can never duplicate or
+    corrupt anything."""
+    last_exc = None
+    for attempt, delay in enumerate([0] + _TRANSIENT_RETRY_DELAYS_SECONDS):
+        if delay:
+            time.sleep(delay)
+        try:
+            return fn(*args, **kwargs)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            # Deliberately NOT a bare OSError/ConnectionError catch —
+            # PermissionError (this module's own clear, deliberate
+            # signal for a real 403) is itself a subclass of OSError in
+            # Python, so a broad catch here would silently swallow and
+            # uselessly retry that too, defeating the point of it
+            # failing fast and clearly. requests always wraps the
+            # lower-level network errors that actually occur (a raw
+            # ConnectionResetError, an SSL handshake failure) into one
+            # of these two exception types before they ever reach this
+            # code, so there's nothing a broader catch would add here.
+            last_exc = exc
+            continue
+    raise RuntimeError(f"Still failing after retrying a transient network error "
+                        f"{len(_TRANSIENT_RETRY_DELAYS_SECONDS)} time(s): {last_exc}") from last_exc
+
+
 def _require_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -353,13 +394,22 @@ def main():
 
     import json
     service_account_info = json.loads(_require_env("GOOGLE_SERVICE_ACCOUNT_JSON"))
-    spreadsheet, drive_service = _connect_sheets(sheet_id, service_account_info)
-    worksheet = spreadsheet.worksheet(args.worksheet_name)
+    asana_token = _require_env("ASANA_TOKEN")
 
-    import asana_client  # thin wrapper, kept separate so this stays testable without a real Asana token
-    asana_tasks = asana_client.get_all_project_tasks(asana_project_gid, _require_env("ASANA_TOKEN"))
+    def _connect_and_sync():
+        # Everything that talks to a network, as one unit — connecting
+        # (where the actual reported error happened, a one-off SSL
+        # reset while fetching the Sheet's own metadata) through the
+        # sync itself. Retried as a whole rather than call-by-call: the
+        # whole thing is safe to simply run again from scratch (see
+        # _call_with_transient_retries' own docstring).
+        spreadsheet, drive_service = _connect_sheets(sheet_id, service_account_info)
+        worksheet = spreadsheet.worksheet(args.worksheet_name)
+        import asana_client  # thin wrapper, kept separate so this stays testable without a real Asana token
+        asana_tasks = asana_client.get_all_project_tasks(asana_project_gid, asana_token)
+        return sync_once(asana_tasks, worksheet, drive_service, raw_folder_id, tiktok_folder_id)
 
-    summary = sync_once(asana_tasks, worksheet, drive_service, raw_folder_id, tiktok_folder_id)
+    summary = _call_with_transient_retries(_connect_and_sync)
     print(f"New rows: {summary['new_rows']}. Links filled in on existing rows: {summary['filled_in']}. "
           f"Ambiguous (not written): {summary['ambiguous']}.")
     return 0
