@@ -167,6 +167,37 @@ def test_list_drive_folder_items_passes_the_discovered_drive_id_into_the_actual_
     assert captured.get("driveId") == "shared-drive-abc"
 
 
+def test_list_drive_folder_items_skips_discovery_entirely_when_drive_id_given_explicitly():
+    """The real production fix for a specific failure: the files.get
+    discovery lookup itself 403'd on its own, even with the folder's
+    sharing and the authenticating service account identity both
+    independently confirmed correct. Passing shared_drive_id directly
+    must skip that lookup call completely, not merely override its
+    result — so this stays usable even when that lookup can't succeed
+    at all."""
+    ds = FakeDriveService({"folder123": []})  # NO drive_ids_by_folder — .get() would return nothing useful
+    get_calls = []
+    original_get = ds.files().get
+
+    def spy_get(**kwargs):
+        get_calls.append(kwargs)
+        return original_get(**kwargs)
+
+    captured = {}
+    original_list = ds.files().list
+
+    def spy_list(**kwargs):
+        captured.update(kwargs)
+        return original_list(**kwargs)
+
+    with patch.object(ds.files(), "get", side_effect=spy_get), \
+         patch.object(ds.files(), "list", side_effect=spy_list):
+        list_drive_folder_items(ds, "folder123", shared_drive_id="explicit-drive-id")
+
+    assert get_calls == []  # discovery never even attempted
+    assert captured.get("driveId") == "explicit-drive-id"
+
+
 def test_list_drive_folder_items_omits_drive_id_for_an_ordinary_folder():
     """Must never pass a meaningless driveId for a regular "My Drive"
     folder — doing so could itself cause a different error, and the
