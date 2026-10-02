@@ -1,9 +1,12 @@
 import os
 import sys
+from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ugc_tracker_sync import sync_once, ensure_tracker_header, SHEET_COLUMNS
+from ugc_tracker_sync import sync_once, ensure_tracker_header, SHEET_COLUMNS, _DriveListRequest
 
 
 class FakeWorksheet:
@@ -108,6 +111,30 @@ def _drive_item(name, item_id, is_folder=False):
 # committed code (this repo is public).
 RAW_FOLDER_ID = "fake-raw-folder-id"
 TIKTOK_FOLDER_ID = "fake-tiktok-folder-id"
+
+
+# ---------- the actual reported production error: a 403 from Drive ----------
+
+def test_drive_list_request_403_names_the_specific_folder_and_explains_sharing():
+    """The actual reported production error: a service account was
+    only shared one of its two required folders, directly, not the
+    parent — and the raw 403 traceback gave no hint which folder or
+    why. Must name the exact folder id and explain that each folder
+    needs its own direct share, not just the parent."""
+    request = _DriveListRequest("fake-token", q="'1CU4ZVPWp8enP4RCnESk_anUhCqhJJXpc' in parents and trashed = false",
+                                 fields="files(id,name)", pageToken=None, pageSize=1000)
+
+    class FakeResponse:
+        status_code = 403
+
+    with patch("ugc_tracker_sync.requests.get", return_value=FakeResponse()):
+        with pytest.raises(PermissionError) as exc_info:
+            request.execute()
+
+    message = str(exc_info.value)
+    assert "1CU4ZVPWp8enP4RCnESk_anUhCqhJJXpc" in message
+    assert "service account" in message.lower()
+    assert "parent" in message.lower()  # the specific misunderstanding this is clarifying
 
 
 # ---------- ensure_tracker_header: the actual reported bug ----------
