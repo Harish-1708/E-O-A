@@ -6,7 +6,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ugc_tracker_sync import sync_once, ensure_tracker_header, SHEET_COLUMNS, _DriveListRequest
+import requests
+
+from ugc_tracker_sync import (
+    sync_once, ensure_tracker_header, SHEET_COLUMNS, _DriveListRequest, _call_with_transient_retries,
+)
 
 
 class FakeWorksheet:
@@ -111,6 +115,54 @@ def _drive_item(name, item_id, is_folder=False):
 # committed code (this repo is public).
 RAW_FOLDER_ID = "fake-raw-folder-id"
 TIKTOK_FOLDER_ID = "fake-tiktok-folder-id"
+
+
+# ---------- transient network retry: the actual reported production error ----------
+
+def test_call_with_transient_retries_succeeds_on_a_later_attempt():
+    """The actual reported production error: a one-off SSL connection
+    reset while fetching the Sheet's own metadata, with permissions on
+    both sides confirmed correct directly — a second attempt should
+    simply work."""
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.exceptions.ConnectionError("Connection reset by peer")
+        return "ok"
+
+    with patch("ugc_tracker_sync.time.sleep"):
+        result = _call_with_transient_retries(flaky)
+
+    assert result == "ok"
+    assert calls["n"] == 2
+
+
+def test_call_with_transient_retries_gives_up_after_exhausting_retries():
+    def always_fails():
+        raise requests.exceptions.ConnectionError("still down")
+
+    with patch("ugc_tracker_sync.time.sleep"):
+        with pytest.raises(RuntimeError, match="transient network error"):
+            _call_with_transient_retries(always_fails)
+
+
+def test_call_with_transient_retries_never_retries_a_non_transient_error():
+    """A real permissions problem or a programming bug must surface
+    immediately — retrying it several times with delays just wastes
+    the run's time before failing anyway."""
+    calls = {"n": 0}
+
+    def fails_for_real():
+        calls["n"] += 1
+        raise PermissionError("genuinely not shared")
+
+    with patch("ugc_tracker_sync.time.sleep"):
+        with pytest.raises(PermissionError):
+            _call_with_transient_retries(fails_for_real)
+
+    assert calls["n"] == 1  # never retried
 
 
 # ---------- Shared Drive support: the actual reported root cause ----------
