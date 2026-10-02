@@ -30,8 +30,9 @@ import sys
 from typing import Dict, List, Optional
 
 import gspread
+import requests
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build as build_drive_service
+from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from ugc_tracker_logic import (
     extract_rights_secured_tasks, find_drive_match, build_hyperlink_formula,
@@ -54,6 +55,50 @@ COL_STATUS, COL_EDITED_FOLDER, COL_NOTES, COL_TASK_GID = 6, 7, 8, 9
 
 DRIVE_RAW_FOLDER_ID = "1CU4ZVPWp8enP4RCnESk_anUhCqhJJXpc"
 DRIVE_TIKTOK_FOLDER_ID = "10tDm_qgNZ_9PmklmJyFHyYDoNor2Htvf"
+
+
+class _DriveListRequest:
+    """One prepared Drive files.list call — .execute() is what
+    actually makes the HTTP request, mirroring googleapiclient's own
+    lazy-request shape closely enough that list_drive_folder_items,
+    and every test's FakeDriveService, need no changes at all."""
+
+    def __init__(self, access_token: str, q: str, fields: str, pageToken, pageSize: int):
+        self._access_token = access_token
+        self._params = {"q": q, "fields": fields, "pageSize": pageSize}
+        if pageToken:
+            self._params["pageToken"] = pageToken
+
+    def execute(self) -> Dict:
+        response = requests.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers={"Authorization": f"Bearer {self._access_token}"},
+            params=self._params, timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+class _DriveService:
+    """A minimal stand-in for googleapiclient's Drive service object —
+    just enough of its .files().list(...).execute() shape to avoid
+    depending on the (fairly heavy) google-api-python-client library,
+    which nothing else in this codebase uses; everywhere else talks to
+    its APIs directly over requests, including this module's own
+    Asana client."""
+
+    def __init__(self, credentials: Credentials):
+        # Refreshed once, up front, rather than per-call — a single
+        # sync run makes at most a handful of Drive calls, well within
+        # one token's lifetime, so there's no need to re-refresh.
+        credentials.refresh(GoogleAuthRequest())
+        self._access_token = credentials.token
+
+    def files(self):
+        return self
+
+    def list(self, q, fields, pageToken=None, pageSize=100) -> _DriveListRequest:
+        return _DriveListRequest(self._access_token, q, fields, pageToken, pageSize)
 
 
 def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = False) -> List[Dict]:
@@ -222,7 +267,11 @@ def _connect_sheets(sheet_id: str, service_account_info: Dict):
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.readonly"]
     creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
     gc = gspread.authorize(creds)
-    return gc.open_by_key(sheet_id), build_drive_service("drive", "v3", credentials=creds)
+    # A fresh Credentials object for the Drive shim, since .refresh()
+    # mutates the token in place and gspread.authorize's own copy
+    # shouldn't be touched by this module's unrelated Drive calls.
+    drive_creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
+    return gc.open_by_key(sheet_id), _DriveService(drive_creds)
 
 
 def main():
