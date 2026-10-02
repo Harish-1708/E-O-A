@@ -52,6 +52,13 @@ jobs:
           UGC_TRACKER_SHEET_ID: ${{ secrets.UGC_TRACKER_SHEET_ID }}
           UGC_TRACKER_RAW_FOLDER_ID: ${{ secrets.UGC_TRACKER_RAW_FOLDER_ID }}
           UGC_TRACKER_TIKTOK_FOLDER_ID: ${{ secrets.UGC_TRACKER_TIKTOK_FOLDER_ID }}
+          # Optional — only add this one if automatic Shared Drive
+          # discovery turns out not to work for your setup (a specific
+          # 403 on that lookup itself, even with sharing and the
+          # service account identity both confirmed correct). Safe to
+          # leave unset otherwise; the script falls back to discovering
+          # it automatically.
+          UGC_TRACKER_SHARED_DRIVE_ID: ${{ secrets.UGC_TRACKER_SHARED_DRIVE_ID }}
           # If other scripts in this repo already hardcode the Creator
           # Outreach project's GID, set this secret to that same value
           # rather than changing anything else.
