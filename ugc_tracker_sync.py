@@ -41,17 +41,22 @@ from ugc_tracker_logic import (
 )
 
 
-# Column order exactly as it exists in the real Sheet today, plus the
-# hidden Task GID column appended at the end for dedup. Status and
-# Edited folder sit between Rights expiration and Notes, matching the
-# Sheet's own current layout — this sync writes a blank string to
-# both on row creation and never touches them again afterward.
+# Asana Task GID leads the sheet (column A) — the dedup key is the
+# first thing visible, making it easy to spot or reference directly.
+# Status and Edited folder sit between Rights expiration and Notes,
+# matching the original Sheet's own layout — this sync writes a blank
+# string to both on row creation and never touches them again
+# afterward. _HEADER_FIRST_CELL derives from this list rather than
+# being a separate hardcoded string, so the header-detection logic
+# below can never drift out of sync with the actual column order.
 SHEET_COLUMNS = [
-    "Creator", "Brand", "Tiktok", "Raw", "Rights expiration",
-    "Status", "Edited folder", "Notes", "Asana Task GID",
+    "Asana Task GID", "Creator", "Brand", "Tiktok", "Raw", "Rights expiration",
+    "Status", "Edited folder", "Notes",
 ]
-COL_CREATOR, COL_BRAND, COL_TIKTOK, COL_RAW, COL_RIGHTS_EXP = 1, 2, 3, 4, 5
-COL_STATUS, COL_EDITED_FOLDER, COL_NOTES, COL_TASK_GID = 6, 7, 8, 9
+COL_TASK_GID = 1
+COL_CREATOR, COL_BRAND, COL_TIKTOK, COL_RAW, COL_RIGHTS_EXP = 2, 3, 4, 5, 6
+COL_STATUS, COL_EDITED_FOLDER, COL_NOTES = 7, 8, 9
+_HEADER_FIRST_CELL = SHEET_COLUMNS[0]
 
 def _extract_folder_id_from_query(q: str) -> str:
     return q.split("'")[1] if "'" in q else "?"
@@ -218,7 +223,8 @@ def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = Fa
 
 
 def ensure_tracker_header(worksheet) -> bool:
-    """If the Tracker sheet has no row starting with "Creator" yet —
+    """If the Tracker sheet has no row starting with its own first
+    column name (SHEET_COLUMNS[0], currently "Asana Task GID") yet —
     a brand new, empty sheet being used for this automation for the
     first time — creates the header row automatically, matching
     SHEET_COLUMNS exactly, rather than requiring someone to type it in
@@ -231,7 +237,7 @@ def ensure_tracker_header(worksheet) -> bool:
     existed (useful for logging, not required by the caller)."""
     all_values = worksheet.get_all_values()
     for row in all_values:
-        if row and row[0].strip() == "Creator":
+        if row and row[0].strip() == _HEADER_FIRST_CELL:
             return False
     worksheet.insert_row(SHEET_COLUMNS, index=1, value_input_option="RAW")
     return True
@@ -247,11 +253,12 @@ def read_tracker_rows(worksheet) -> List[Dict]:
     all_values = worksheet.get_all_values()
     header_row_index = None
     for idx, row in enumerate(all_values):
-        if row and row[0].strip() == "Creator":
+        if row and row[0].strip() == _HEADER_FIRST_CELL:
             header_row_index = idx
             break
     if header_row_index is None:
-        raise ValueError("Couldn't find the header row (a row starting with 'Creator') in the Tracker sheet.")
+        raise ValueError(f"Couldn't find the header row (a row starting with '{_HEADER_FIRST_CELL}') "
+                          f"in the Tracker sheet.")
     header = all_values[header_row_index]
     rows = []
     for offset, row in enumerate(all_values[header_row_index + 1:]):
@@ -300,6 +307,21 @@ def build_new_row(task: Dict, creator_label: str, match: Dict[str, Optional[str]
     string. Status, Edited folder, and Notes are always blank —
     those three are never set by this sync."""
     row = [""] * len(SHEET_COLUMNS)
+    # A real reported production bug: with value_input_option="USER_ENTERED"
+    # (needed so the HYPERLINK formulas below actually evaluate as
+    # formulas, not literal text), Sheets auto-detects a long digit
+    # string as a NUMBER and displays it in scientific notation
+    # ("1.21894E+15") once it exceeds ~15 significant digits — which
+    # every Asana Task GID does. That's not just a display issue: the
+    # next run's dedup check compares this exact string against a
+    # fresh GID from Asana, and "1.21894E+15" can never match
+    # "1218941739494020" again, so the row would look unsynced forever
+    # and get silently duplicated. A leading apostrophe is Sheets' own,
+    # standard way to force a value to be stored as plain text rather
+    # than a number — never shown in the cell itself, and confirmed
+    # stripped back out again when read back via get_all_values(), so
+    # existing_task_gids() always compares against the real, exact GID.
+    row[COL_TASK_GID - 1] = f"'{task['task_gid']}"
     row[COL_CREATOR - 1] = creator_label
     row[COL_BRAND - 1] = task["product"]
     if match.get("tiktok_url"):
@@ -310,8 +332,42 @@ def build_new_row(task: Dict, creator_label: str, match: Dict[str, Optional[str]
     row[COL_STATUS - 1] = ""
     row[COL_EDITED_FOLDER - 1] = ""
     row[COL_NOTES - 1] = ""
-    row[COL_TASK_GID - 1] = task["task_gid"]
     return row
+
+
+STATUS_OPTIONS = ["Not edited", "Edited", "Live"]
+
+
+def ensure_status_dropdown(worksheet) -> None:
+    """Sets (or re-sets) a dropdown data validation rule on the whole
+    Status column, matching the original Tracker's own documented
+    options. Safe to call on every run, unlike ensure_tracker_header —
+    re-applying the same validation rule is a harmless no-op, not a
+    duplicate insert, so there's no need to first check whether one
+    already exists. Covers a generous number of rows (not just
+    currently-used ones) so a dropdown is already waiting on any row
+    this sync adds later, without needing to re-run this per row."""
+    worksheet.spreadsheet.batch_update({
+        "requests": [{
+            "setDataValidation": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 1,  # row 2 onward — row 1 is the header
+                    "endRowIndex": 2000,
+                    "startColumnIndex": COL_STATUS - 1,
+                    "endColumnIndex": COL_STATUS,
+                },
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [{"userEnteredValue": option} for option in STATUS_OPTIONS],
+                    },
+                    "showCustomUi": True,
+                    "strict": True,
+                },
+            },
+        }],
+    })
 
 
 def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: str,
@@ -332,6 +388,7 @@ def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: 
     created_header = ensure_tracker_header(worksheet)
     if created_header:
         print_fn("No header row found — this looks like a brand new Tracker sheet. Created the header row.")
+    ensure_status_dropdown(worksheet)
     tracker_rows = read_tracker_rows(worksheet)
     already_synced = existing_task_gids(tracker_rows)
 
