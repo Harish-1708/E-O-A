@@ -100,8 +100,11 @@ def _drive_item(name, item_id, is_folder=False):
     }
 
 
-RAW_FOLDER_ID = "1CU4ZVPWp8enP4RCnESk_anUhCqhJJXpc"
-TIKTOK_FOLDER_ID = "10tDm_qgNZ_9PmklmJyFHyYDoNor2Htvf"
+# Arbitrary fake IDs — this test never touches a real Drive folder,
+# and the real IDs live only in GitHub Actions secrets, never in
+# committed code (this repo is public).
+RAW_FOLDER_ID = "fake-raw-folder-id"
+TIKTOK_FOLDER_ID = "fake-tiktok-folder-id"
 
 
 # ---------- new row creation ----------
@@ -112,7 +115,7 @@ def test_sync_once_creates_a_new_row_for_a_rights_secured_task_not_yet_in_tracke
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
     drive = FakeDriveService({})
 
-    summary = sync_once(tasks, ws, drive)
+    summary = sync_once(tasks, ws, drive, RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
 
     assert summary["new_rows"] == 1
     assert len(ws.appended) == 1
@@ -128,7 +131,7 @@ def test_sync_once_leaves_status_edited_folder_and_notes_blank_on_a_new_row():
     never set by this sync — not even a default value."""
     tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
-    summary = sync_once(tasks, ws, FakeDriveService({}))
+    summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     row = ws.appended[0]
     assert row[5] == ""  # Status
@@ -140,7 +143,7 @@ def test_sync_once_skips_a_task_already_in_the_tracker():
     tasks = [_asana_task("111", "Rights Secured", creator="@existing", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
                         ["@existing", "DudeRobe", "", "", "3/1/2027", "Not edited", "", "", "111"]])
-    summary = sync_once(tasks, ws, FakeDriveService({}))
+    summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 0
     assert ws.appended == []
 
@@ -148,7 +151,7 @@ def test_sync_once_skips_a_task_already_in_the_tracker():
 def test_sync_once_ignores_tasks_outside_rights_secured():
     tasks = [_asana_task("111", "Negotiating", creator="@x", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
-    summary = sync_once(tasks, ws, FakeDriveService({}))
+    summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 0
 
 
@@ -161,7 +164,7 @@ def test_sync_once_fills_tiktok_and_raw_when_exact_id_match_found():
         RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "raw1")],
         TIKTOK_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mp4", "tt1")],
     }
-    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder))
+    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     row = ws.appended[0]
     assert "HYPERLINK" in row[2]  # Tiktok
@@ -174,7 +177,7 @@ def test_sync_once_fills_tiktok_and_raw_when_exact_id_match_found():
 def test_sync_once_leaves_tiktok_and_raw_blank_when_nothing_matches():
     tasks = [_asana_task("111", "Rights Secured", creator="@nobody", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
-    summary = sync_once(tasks, ws, FakeDriveService({}))
+    summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     row = ws.appended[0]
     assert row[2] == ""
     assert row[3] == ""
@@ -193,7 +196,7 @@ def test_sync_once_the_real_ksmshaw_ambiguous_case_leaves_raw_blank_and_logs_it(
         ],
     }
     logged = []
-    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), print_fn=logged.append)
+    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID, print_fn=logged.append)
     row = ws.appended[0]
     assert row[3] == ""  # Raw stays blank
     assert summary["ambiguous"] == 1
@@ -209,7 +212,7 @@ def test_sync_once_tiktok_folder_never_matches_a_folder_even_if_one_existed():
     items_by_folder = {
         TIKTOK_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111]", "folder1", is_folder=True)],
     }
-    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder))
+    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     assert ws.appended[0][2] == ""  # Tiktok stays blank — the folder must be excluded
 
@@ -220,7 +223,7 @@ def test_sync_once_raw_folder_does_match_a_folder_for_multi_clip_creators():
     items_by_folder = {
         RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111]", "folder1", is_folder=True)],
     }
-    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder))
+    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     assert "folder1" in ws.appended[0][3]  # Raw
 
@@ -233,7 +236,7 @@ def test_sync_once_assigns_suffix_for_a_creator_with_two_rights_secured_tasks_in
         _asana_task("200", "Rights Secured", creator="@ksmshaw", product="DudeRobe"),
     ]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
-    sync_once(tasks, ws, FakeDriveService({}))
+    sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     labels = sorted(r[0] for r in ws.appended)
     assert labels == ["@ksmshaw", "@ksmshaw_2"]
 
@@ -250,7 +253,7 @@ def test_sync_once_new_task_for_a_creator_already_in_tracker_gets_suffix_not_bla
     ]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
                         ["@2.fit.bros", "DudeRobe", "", "", "3/1/2027", "", "", "", "100"]])
-    summary = sync_once(tasks, ws, FakeDriveService({}))
+    summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     assert ws.appended[0][0] == "@2.fit.bros_2"
 
@@ -263,7 +266,7 @@ def test_sync_once_fills_in_raw_for_an_existing_row_once_content_appears_later()
                         ["@x", "DudeRobe", "", "", "3/1/2027", "Not edited", "", "", "111"]])
     items_by_folder = {RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "raw1")]}
 
-    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder))
+    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
 
     assert summary["new_rows"] == 0
     assert summary["filled_in"] == 1
@@ -282,7 +285,7 @@ def test_sync_once_never_overwrites_a_cell_that_already_has_a_link():
                         ["@x", "DudeRobe", "", existing_link, "3/1/2027", "", "", "", "111"]])
     items_by_folder = {RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "new_raw")]}
 
-    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder))
+    summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
 
     assert summary["filled_in"] == 0
     assert ws.updated_cells == []
@@ -294,7 +297,7 @@ def test_sync_once_never_touches_status_or_edited_folder_on_an_existing_row():
                         ["@x", "DudeRobe", "", "", "3/1/2027", "Edited", "some-link", "a note", "111"]])
     items_by_folder = {RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "raw1")]}
 
-    sync_once(tasks, ws, FakeDriveService(items_by_folder))
+    sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
 
     touched_cols = {col for (_row, col, _val) in ws.updated_cells}
     assert 6 not in touched_cols  # Status
