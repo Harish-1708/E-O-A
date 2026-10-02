@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ugc_tracker_sync import sync_once, SHEET_COLUMNS
+from ugc_tracker_sync import sync_once, ensure_tracker_header, SHEET_COLUMNS
 
 
 class FakeWorksheet:
@@ -36,6 +36,9 @@ class FakeWorksheet:
         while len(self._grid[row_idx]) < col:
             self._grid[row_idx].append("")
         self._grid[row_idx][col - 1] = value
+
+    def insert_row(self, values, index=1, value_input_option="RAW"):
+        self._grid.insert(index - 1, list(values))
 
 
 class FakeFilesList:
@@ -105,6 +108,48 @@ def _drive_item(name, item_id, is_folder=False):
 # committed code (this repo is public).
 RAW_FOLDER_ID = "fake-raw-folder-id"
 TIKTOK_FOLDER_ID = "fake-tiktok-folder-id"
+
+
+# ---------- ensure_tracker_header: the actual reported bug ----------
+
+def test_ensure_tracker_header_creates_it_on_a_brand_new_empty_sheet():
+    """The actual reported production bug: a fresh Tracker sheet, set
+    up for the first time with nothing in it at all, crashed instead
+    of being usable. Must create the header automatically."""
+    ws = FakeWorksheet([])
+    created = ensure_tracker_header(ws)
+    assert created is True
+    assert ws.get_all_values()[0] == SHEET_COLUMNS
+
+
+def test_ensure_tracker_header_does_nothing_when_one_already_exists():
+    """Must never touch the agency's existing, already-set-up Tracker
+    — title row, description row, stats row, and all — just because
+    this check runs on every sync."""
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
+    original = ws.get_all_values()
+    created = ensure_tracker_header(ws)
+    assert created is False
+    assert ws.get_all_values() == original
+
+
+def test_sync_once_works_end_to_end_starting_from_a_completely_empty_sheet():
+    """The full reported scenario, not just the header check in
+    isolation: a brand new empty Tracker sheet must be usable
+    immediately — header created, then the row for a Rights Secured
+    task appended right after it, all in one run."""
+    tasks = [_asana_task("111", "Rights Secured", creator="@newcreator", product="DudeRobe",
+                          rights_expiration="2027-04-01T00:00:00.000Z")]
+    ws = FakeWorksheet([])
+    logged = []
+
+    summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID, print_fn=logged.append)
+
+    assert summary["new_rows"] == 1
+    grid = ws.get_all_values()
+    assert grid[0] == SHEET_COLUMNS
+    assert grid[1][0] == "@newcreator"
+    assert any("brand new Tracker sheet" in line for line in logged)
 
 
 # ---------- new row creation ----------
