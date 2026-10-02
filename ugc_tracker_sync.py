@@ -28,7 +28,7 @@ import argparse
 import os
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import gspread
 import requests
@@ -222,7 +222,7 @@ def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = Fa
             return items
 
 
-def ensure_tracker_header(worksheet) -> bool:
+def ensure_tracker_header(worksheet) -> Tuple[bool, int]:
     """If the Tracker sheet has no row starting with its own first
     column name (SHEET_COLUMNS[0], currently "Asana Task GID") yet —
     a brand new, empty sheet being used for this automation for the
@@ -233,14 +233,16 @@ def ensure_tracker_header(worksheet) -> bool:
     agency's existing Tracker, with its own title/description/stats
     rows above the header, which this must never disturb.
 
-    Returns True if it created the header, False if one already
-    existed (useful for logging, not required by the caller)."""
+    Returns (created, header_row_number) — header_row_number is
+    1-indexed and needed by the caller to compute exactly how many
+    rows actually have data, for a dropdown/color range that grows
+    with real content instead of blanketing hundreds of empty rows."""
     all_values = worksheet.get_all_values()
-    for row in all_values:
+    for idx, row in enumerate(all_values):
         if row and row[0].strip() == _HEADER_FIRST_CELL:
-            return False
+            return False, idx + 1
     worksheet.insert_row(SHEET_COLUMNS, index=1, value_input_option="RAW")
-    return True
+    return True, 1
 
 
 def read_tracker_rows(worksheet) -> List[Dict]:
@@ -336,24 +338,37 @@ def build_new_row(task: Dict, creator_label: str, match: Dict[str, Optional[str]
 
 
 STATUS_OPTIONS = ["Not edited", "Edited", "Live"]
+# Light background colors, easy to tell apart at a glance — not the
+# saturated pure red/green/blue, which would make the Status TEXT
+# itself hard to read against its own cell background.
+STATUS_COLORS = {
+    "Not edited": {"red": 0.96, "green": 0.78, "blue": 0.78},
+    "Edited": {"red": 0.78, "green": 0.93, "blue": 0.78},
+    "Live": {"red": 0.78, "green": 0.85, "blue": 0.96},
+}
+# How many rows AHEAD of the current last row with data to extend the
+# dropdown/color range by — covers several runs' worth of new rows
+# without needing to re-run this on every single one, while staying
+# nowhere near "set up for 1000 empty rows."
+_RANGE_LOOKAHEAD_ROWS = 25
 
 
-def ensure_status_dropdown(worksheet) -> None:
-    """Sets (or re-sets) a dropdown data validation rule on the whole
-    Status column, matching the original Tracker's own documented
-    options. Safe to call on every run, unlike ensure_tracker_header —
-    re-applying the same validation rule is a harmless no-op, not a
-    duplicate insert, so there's no need to first check whether one
-    already exists. Covers a generous number of rows (not just
-    currently-used ones) so a dropdown is already waiting on any row
-    this sync adds later, without needing to re-run this per row."""
+def ensure_status_dropdown(worksheet, last_data_row: int) -> None:
+    """Sets (or re-sets) a dropdown data validation rule on the Status
+    column, matching the original Tracker's own documented options.
+    Safe to call on every run — re-applying the same validation rule
+    to the same range is a harmless no-op, not a duplicate insert.
+
+    last_data_row is the actual last row with real data this run —
+    the range covers that plus a small lookahead, not a blanket
+    thousand empty rows a real reported concern flagged directly."""
     worksheet.spreadsheet.batch_update({
         "requests": [{
             "setDataValidation": {
                 "range": {
                     "sheetId": worksheet.id,
                     "startRowIndex": 1,  # row 2 onward — row 1 is the header
-                    "endRowIndex": 2000,
+                    "endRowIndex": last_data_row + _RANGE_LOOKAHEAD_ROWS,
                     "startColumnIndex": COL_STATUS - 1,
                     "endColumnIndex": COL_STATUS,
                 },
@@ -368,6 +383,55 @@ def ensure_status_dropdown(worksheet) -> None:
             },
         }],
     })
+
+
+def ensure_status_colors(worksheet, last_data_row: int) -> None:
+    """Colors each Status cell by its value — light red for Not
+    edited, green for Edited, blue for Live — so a row's state is
+    visible at a glance without reading the text.
+
+    Unlike data validation, a conditional format rule STACKS rather
+    than overwrites when re-added — re-running this naively on every
+    sync would pile up duplicate rules indefinitely. So this first
+    reads the sheet's own existing conditional format rules and
+    deletes every one of them (highest index first, since deleting
+    shifts the rest down), then adds back exactly the three this
+    function owns, with the current range. This does mean this
+    function must never be used on a sheet with OTHER, unrelated
+    conditional formatting a person set up by hand, since it would
+    delete those too — not a concern for this Tracker specifically,
+    which has no other automated or manual conditional formatting."""
+    metadata = worksheet.spreadsheet.fetch_sheet_metadata()
+    sheet_meta = next((s for s in metadata.get("sheets", [])
+                        if s.get("properties", {}).get("sheetId") == worksheet.id), {})
+    existing_rule_count = len(sheet_meta.get("conditionalFormats", []))
+
+    delete_requests = [
+        {"deleteConditionalFormatRule": {"sheetId": worksheet.id, "index": idx}}
+        for idx in range(existing_rule_count - 1, -1, -1)
+    ]
+    add_requests = [
+        {
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [{
+                        "sheetId": worksheet.id,
+                        "startRowIndex": 1,
+                        "endRowIndex": last_data_row + _RANGE_LOOKAHEAD_ROWS,
+                        "startColumnIndex": COL_STATUS - 1,
+                        "endColumnIndex": COL_STATUS,
+                    }],
+                    "booleanRule": {
+                        "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": status}]},
+                        "format": {"backgroundColor": STATUS_COLORS[status]},
+                    },
+                },
+                "index": 0,
+            },
+        }
+        for status in STATUS_OPTIONS
+    ]
+    worksheet.spreadsheet.batch_update({"requests": delete_requests + add_requests})
 
 
 def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: str,
@@ -385,10 +449,9 @@ def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: 
     shared_drive_id is optional — see list_drive_folder_items for why
     it exists and when it's worth providing."""
     rights_secured = extract_rights_secured_tasks(asana_tasks)
-    created_header = ensure_tracker_header(worksheet)
+    created_header, header_row_number = ensure_tracker_header(worksheet)
     if created_header:
         print_fn("No header row found — this looks like a brand new Tracker sheet. Created the header row.")
-    ensure_status_dropdown(worksheet)
     tracker_rows = read_tracker_rows(worksheet)
     already_synced = existing_task_gids(tracker_rows)
 
@@ -417,6 +480,16 @@ def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: 
 
     if new_rows:
         worksheet.append_rows(new_rows, value_input_option="USER_ENTERED")
+
+    # The actual last row with real data right now — existing rows'
+    # own sheet positions if there were any, else just the header row
+    # itself — plus however many were just appended. Used for both
+    # calls below so the dropdown and the color coding only ever cover
+    # real (or soon-to-be-real) rows, never a blanket thousand empty
+    # ones a real reported concern flagged directly.
+    last_data_row = (max(r["_row"] for r in tracker_rows) if tracker_rows else header_row_number) + len(new_rows)
+    ensure_status_dropdown(worksheet, last_data_row)
+    ensure_status_colors(worksheet, last_data_row)
 
     filled_in = 0
     for row in tracker_rows:
