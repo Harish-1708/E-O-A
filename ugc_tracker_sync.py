@@ -118,6 +118,26 @@ def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = Fa
             return items
 
 
+def ensure_tracker_header(worksheet) -> bool:
+    """If the Tracker sheet has no row starting with "Creator" yet —
+    a brand new, empty sheet being used for this automation for the
+    first time — creates the header row automatically, matching
+    SHEET_COLUMNS exactly, rather than requiring someone to type it in
+    by hand first. Does nothing, and never touches anything, if a
+    header row already exists ANYWHERE in the sheet — including the
+    agency's existing Tracker, with its own title/description/stats
+    rows above the header, which this must never disturb.
+
+    Returns True if it created the header, False if one already
+    existed (useful for logging, not required by the caller)."""
+    all_values = worksheet.get_all_values()
+    for row in all_values:
+        if row and row[0].strip() == "Creator":
+            return False
+    worksheet.insert_row(SHEET_COLUMNS, index=1, value_input_option="RAW")
+    return True
+
+
 def read_tracker_rows(worksheet) -> List[Dict]:
     """Every data row currently in the Tracker, as {column_name:
     value}, plus its own 1-indexed sheet row number under "_row" — the
@@ -207,6 +227,9 @@ def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: 
     identify real internal company resources. main() sources both from
     GitHub Actions secrets, never from committed code."""
     rights_secured = extract_rights_secured_tasks(asana_tasks)
+    created_header = ensure_tracker_header(worksheet)
+    if created_header:
+        print_fn("No header row found — this looks like a brand new Tracker sheet. Created the header row.")
     tracker_rows = read_tracker_rows(worksheet)
     already_synced = existing_task_gids(tracker_rows)
 
