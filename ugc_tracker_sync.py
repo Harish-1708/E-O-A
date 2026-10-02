@@ -70,6 +70,23 @@ class _DriveListRequest:
             headers={"Authorization": f"Bearer {self._access_token}"},
             params=self._params, timeout=30,
         )
+        if response.status_code == 403:
+            # A service account has ZERO Drive access to anything not
+            # explicitly shared with its own email address — sharing a
+            # PARENT folder does not implicitly grant access to a child
+            # folder queried directly by its own ID the way a human
+            # user's own folder hierarchy would suggest. Each folder
+            # this script reads needs its own, separate share. The
+            # folder id is pulled back out of the query string here
+            # purely so this message can name exactly which one failed,
+            # rather than requiring someone to decode a raw 403 first.
+            folder_id = self._params.get("q", "").split("'")[1] if "'" in self._params.get("q", "") else "?"
+            raise PermissionError(
+                f"Google Drive refused to list folder {folder_id} (403 Forbidden). This almost always means "
+                f"the service account hasn't been shared this folder directly — sharing a PARENT folder is "
+                f"not enough; share this exact folder with the service account's own email address (the "
+                f"\"client_email\" field inside GOOGLE_SERVICE_ACCOUNT_JSON) with at least Viewer access."
+            )
         response.raise_for_status()
         return response.json()
 
