@@ -113,6 +113,38 @@ RAW_FOLDER_ID = "fake-raw-folder-id"
 TIKTOK_FOLDER_ID = "fake-tiktok-folder-id"
 
 
+# ---------- Shared Drive support: the actual reported root cause ----------
+
+def test_drive_list_request_always_includes_shared_drive_parameters():
+    """The actual reported production error, root-caused properly:
+    "Contributor" is a role name that only exists for Google Workspace
+    Shared Drives — its presence in the report meant this folder lives
+    in one, and the Drive API silently excludes Shared Drive items
+    from files.list unless the request explicitly opts in, regardless
+    of how correctly the folder was shared. Every request this script
+    makes must always include both flags — harmless for a regular "My
+    Drive" folder, required for a Shared Drive one, and there's no way
+    to know in advance which kind any given folder id is."""
+    request = _DriveListRequest("fake-token", q="'somefolder' in parents and trashed = false",
+                                 fields="files(id,name)", pageToken=None, pageSize=1000)
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"files": []}
+
+    with patch("ugc_tracker_sync.requests.get", return_value=FakeResponse()) as mock_get:
+        request.execute()
+
+    _, kwargs = mock_get.call_args
+    assert kwargs["params"]["supportsAllDrives"] == "true"
+    assert kwargs["params"]["includeItemsFromAllDrives"] == "true"
+
+
 # ---------- the actual reported production error: a 403 from Drive ----------
 
 def test_drive_list_request_403_names_the_specific_folder_and_explains_sharing():
