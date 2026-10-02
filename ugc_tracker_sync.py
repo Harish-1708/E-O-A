@@ -53,13 +53,57 @@ SHEET_COLUMNS = [
 COL_CREATOR, COL_BRAND, COL_TIKTOK, COL_RAW, COL_RIGHTS_EXP = 1, 2, 3, 4, 5
 COL_STATUS, COL_EDITED_FOLDER, COL_NOTES, COL_TASK_GID = 6, 7, 8, 9
 
+def _extract_folder_id_from_query(q: str) -> str:
+    return q.split("'")[1] if "'" in q else "?"
+
+
+def _raise_clear_403(folder_id: str) -> None:
+    # A service account has ZERO Drive access to anything not
+    # explicitly shared with its own email address — sharing a PARENT
+    # folder does not implicitly grant access to a child folder
+    # queried directly by its own ID the way a human user's own folder
+    # hierarchy would suggest. Each folder this script reads needs its
+    # own, separate share.
+    raise PermissionError(
+        f"Google Drive refused to access folder {folder_id} (403 Forbidden). If this folder's sharing has "
+        f"already been confirmed correct (both service accounts have Writer access, directly on this exact "
+        f"folder, not just a parent), this is more likely a Shared Drive query configuration issue than a "
+        f"sharing one — but sharing is the first, cheaper thing to rule out: share this exact folder with "
+        f"the service account's own email address (the \"client_email\" field inside "
+        f"GOOGLE_SERVICE_ACCOUNT_JSON) with at least Viewer access."
+    )
+
+
+class _DriveGetRequest:
+    """One prepared Drive files.get call (fetching one file/folder's
+    own metadata, not its children) — used only to look up which
+    Shared Drive a folder belongs to, if any."""
+
+    def __init__(self, access_token: str, file_id: str, fields: str):
+        self._access_token = access_token
+        self._file_id = file_id
+        self._params = {"fields": fields, "supportsAllDrives": "true"}
+
+    def execute(self) -> Dict:
+        response = requests.get(
+            f"https://www.googleapis.com/drive/v3/files/{self._file_id}",
+            headers={"Authorization": f"Bearer {self._access_token}"},
+            params=self._params, timeout=30,
+        )
+        if response.status_code == 403:
+            _raise_clear_403(self._file_id)
+        response.raise_for_status()
+        return response.json()
+
+
 class _DriveListRequest:
     """One prepared Drive files.list call — .execute() is what
     actually makes the HTTP request, mirroring googleapiclient's own
     lazy-request shape closely enough that list_drive_folder_items,
     and every test's FakeDriveService, need no changes at all."""
 
-    def __init__(self, access_token: str, q: str, fields: str, pageToken, pageSize: int):
+    def __init__(self, access_token: str, q: str, fields: str, pageToken, pageSize: int,
+                 drive_id: Optional[str] = None):
         self._access_token = access_token
         self._params = {
             "q": q, "fields": fields, "pageSize": pageSize,
@@ -68,12 +112,26 @@ class _DriveListRequest:
             # these two, the Drive API silently excludes Shared Drive
             # items from a files.list call entirely, which surfaces as
             # a 403 even when the folder genuinely has been shared with
-            # the service account ("Contributor" is a Shared-Drive-only
-            # role name — its presence is itself the signal this is a
-            # Shared Drive, not a regular folder). Harmless no-ops for
-            # anything in a regular "My Drive", so always sent.
+            # the service account ("organizer"/"fileOrganizer" are
+            # Shared-Drive-only role names — their presence is itself
+            # the signal this is a Shared Drive, not a regular folder).
+            # Harmless no-ops for anything in a regular "My Drive", so
+            # always sent, whether or not drive_id below is known.
             "supportsAllDrives": "true", "includeItemsFromAllDrives": "true",
         }
+        if drive_id:
+            # The piece supportsAllDrives/includeItemsFromAllDrives
+            # alone turned out NOT to be sufficient for — confirmed
+            # directly, after those two were already in place and a
+            # 403 still happened, with sharing independently confirmed
+            # correct on both the folder and both service accounts.
+            # Scopes the search to this specific Shared Drive, which
+            # list_drive_folder_items discovers by looking up the
+            # folder's own metadata first. Omitted entirely for a
+            # folder NOT in a Shared Drive at all, since corpora/driveId
+            # are meaningless (and can themselves cause errors) there.
+            self._params["corpora"] = "drive"
+            self._params["driveId"] = drive_id
         if pageToken:
             self._params["pageToken"] = pageToken
 
@@ -84,33 +142,18 @@ class _DriveListRequest:
             params=self._params, timeout=30,
         )
         if response.status_code == 403:
-            # A service account has ZERO Drive access to anything not
-            # explicitly shared with its own email address — sharing a
-            # PARENT folder does not implicitly grant access to a child
-            # folder queried directly by its own ID the way a human
-            # user's own folder hierarchy would suggest. Each folder
-            # this script reads needs its own, separate share. The
-            # folder id is pulled back out of the query string here
-            # purely so this message can name exactly which one failed,
-            # rather than requiring someone to decode a raw 403 first.
-            folder_id = self._params.get("q", "").split("'")[1] if "'" in self._params.get("q", "") else "?"
-            raise PermissionError(
-                f"Google Drive refused to list folder {folder_id} (403 Forbidden). This almost always means "
-                f"the service account hasn't been shared this folder directly — sharing a PARENT folder is "
-                f"not enough; share this exact folder with the service account's own email address (the "
-                f"\"client_email\" field inside GOOGLE_SERVICE_ACCOUNT_JSON) with at least Viewer access."
-            )
+            _raise_clear_403(_extract_folder_id_from_query(self._params.get("q", "")))
         response.raise_for_status()
         return response.json()
 
 
 class _DriveService:
     """A minimal stand-in for googleapiclient's Drive service object —
-    just enough of its .files().list(...).execute() shape to avoid
-    depending on the (fairly heavy) google-api-python-client library,
-    which nothing else in this codebase uses; everywhere else talks to
-    its APIs directly over requests, including this module's own
-    Asana client."""
+    just enough of its .files().list(...)/.files().get(...).execute()
+    shape to avoid depending on the (fairly heavy) google-api-python-client
+    library, which nothing else in this codebase uses; everywhere else
+    talks to its APIs directly over requests, including this module's
+    own Asana client."""
 
     def __init__(self, credentials: Credentials):
         # Refreshed once, up front, rather than per-call — a single
@@ -122,8 +165,23 @@ class _DriveService:
     def files(self):
         return self
 
-    def list(self, q, fields, pageToken=None, pageSize=100) -> _DriveListRequest:
-        return _DriveListRequest(self._access_token, q, fields, pageToken, pageSize)
+    def list(self, q, fields, pageToken=None, pageSize=100, driveId=None) -> _DriveListRequest:
+        return _DriveListRequest(self._access_token, q, fields, pageToken, pageSize, drive_id=driveId)
+
+    def get(self, fileId, fields) -> _DriveGetRequest:
+        return _DriveGetRequest(self._access_token, fileId, fields)
+
+
+def _discover_drive_id(drive_service, folder_id: str) -> Optional[str]:
+    """Which Shared Drive, if any, a folder belongs to — looked up
+    fresh each call rather than hardcoded or passed in as another
+    secret, so this keeps working correctly even if a folder ever
+    moves between drives. Returns None for an ordinary "My Drive"
+    folder (the common case for anyone NOT using Shared Drives at
+    all), in which case the caller correctly omits corpora/driveId
+    from the actual listing query entirely."""
+    metadata = drive_service.files().get(fileId=folder_id, fields="driveId").execute()
+    return metadata.get("driveId")
 
 
 def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = False) -> List[Dict]:
@@ -132,6 +190,7 @@ def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = Fa
     exhausted. files_only=True for Tiktok Contents, which by design
     never needs folder matching (TikTok content is always a single
     direct link, never multiple clips)."""
+    drive_id = _discover_drive_id(drive_service, folder_id)
     query = f"'{folder_id}' in parents and trashed = false"
     if files_only:
         query += " and mimeType != 'application/vnd.google-apps.folder'"
@@ -140,7 +199,7 @@ def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = Fa
     while True:
         response = drive_service.files().list(
             q=query, fields="nextPageToken, files(id, name, mimeType, webViewLink)",
-            pageToken=page_token, pageSize=1000,
+            pageToken=page_token, pageSize=1000, driveId=drive_id,
         ).execute()
         items.extend(response.get("files", []))
         page_token = response.get("nextPageToken")
