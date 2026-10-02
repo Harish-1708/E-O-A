@@ -184,13 +184,23 @@ def _discover_drive_id(drive_service, folder_id: str) -> Optional[str]:
     return metadata.get("driveId")
 
 
-def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = False) -> List[Dict]:
+def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = False,
+                             shared_drive_id: Optional[str] = None) -> List[Dict]:
     """Every file (and, unless files_only, folder) directly inside one
     Drive folder — name/id/mimeType/webViewLink only, paginated until
     exhausted. files_only=True for Tiktok Contents, which by design
     never needs folder matching (TikTok content is always a single
-    direct link, never multiple clips)."""
-    drive_id = _discover_drive_id(drive_service, folder_id)
+    direct link, never multiple clips).
+
+    shared_drive_id, when given, is used directly, skipping
+    _discover_drive_id's own files.get lookup entirely — a real
+    reported case had that specific lookup call 403 on its own, even
+    with the folder's sharing and the service account identity both
+    independently confirmed correct, so bypassing it with a known-good
+    value sidesteps whatever that call-specific issue actually was.
+    Falls back to discovering it automatically when not given, for
+    setups where that already works fine."""
+    drive_id = shared_drive_id or _discover_drive_id(drive_service, folder_id)
     query = f"'{folder_id}' in parents and trashed = false"
     if files_only:
         query += " and mimeType != 'application/vnd.google-apps.folder'"
@@ -305,7 +315,7 @@ def build_new_row(task: Dict, creator_label: str, match: Dict[str, Optional[str]
 
 
 def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: str,
-              tiktok_folder_id: str, print_fn=print) -> Dict[str, int]:
+              tiktok_folder_id: str, print_fn=print, shared_drive_id: Optional[str] = None) -> Dict[str, int]:
     """The whole sync, one pass. Returns a small summary dict (counts)
     for the caller to log. Pure orchestration — every actual decision
     (matching, dedup labeling, date formatting) is delegated to
@@ -314,7 +324,10 @@ def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: 
     raw_folder_id/tiktok_folder_id are passed in explicitly rather than
     hardcoded — deliberately, since this repo is public and these IDs
     identify real internal company resources. main() sources both from
-    GitHub Actions secrets, never from committed code."""
+    GitHub Actions secrets, never from committed code.
+
+    shared_drive_id is optional — see list_drive_folder_items for why
+    it exists and when it's worth providing."""
     rights_secured = extract_rights_secured_tasks(asana_tasks)
     created_header = ensure_tracker_header(worksheet)
     if created_header:
@@ -324,8 +337,10 @@ def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: 
 
     # Fetched ONCE for the whole run — every task's match check below
     # reuses these same two lists rather than re-listing Drive per task.
-    raw_items = list_drive_folder_items(drive_service, raw_folder_id, files_only=False)
-    tiktok_items = list_drive_folder_items(drive_service, tiktok_folder_id, files_only=True)
+    raw_items = list_drive_folder_items(drive_service, raw_folder_id, files_only=False,
+                                         shared_drive_id=shared_drive_id)
+    tiktok_items = list_drive_folder_items(drive_service, tiktok_folder_id, files_only=True,
+                                            shared_drive_id=shared_drive_id)
 
     new_tasks = [t for t in rights_secured if t["task_gid"] not in already_synced]
     # Dedup labels are computed across ALL Rights Secured tasks sharing
@@ -448,6 +463,11 @@ def main():
 
     sheet_id = _require_env("UGC_TRACKER_SHEET_ID")
     raw_folder_id = _require_env("UGC_TRACKER_RAW_FOLDER_ID")
+    # Optional — only needed for a setup where discovering this
+    # automatically (via a files.get lookup) 403s on its own, even
+    # with everything else confirmed correct. When unset, falls back
+    # to automatic discovery, which is fine for most setups.
+    shared_drive_id = os.environ.get("UGC_TRACKER_SHARED_DRIVE_ID", "").strip() or None
     tiktok_folder_id = _require_env("UGC_TRACKER_TIKTOK_FOLDER_ID")
     asana_project_gid = _require_env("UGC_TRACKER_ASANA_PROJECT_GID")
 
@@ -475,7 +495,8 @@ def main():
         worksheet = spreadsheet.worksheet(args.worksheet_name)
         import asana_client  # thin wrapper, kept separate so this stays testable without a real Asana token
         asana_tasks = asana_client.get_all_project_tasks(asana_project_gid, asana_token)
-        return sync_once(asana_tasks, worksheet, drive_service, raw_folder_id, tiktok_folder_id)
+        return sync_once(asana_tasks, worksheet, drive_service, raw_folder_id, tiktok_folder_id,
+                          shared_drive_id=shared_drive_id)
 
     summary = _call_with_transient_retries(_connect_and_sync)
     print(f"New rows: {summary['new_rows']}. Links filled in on existing rows: {summary['filled_in']}. "
