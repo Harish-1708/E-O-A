@@ -37,10 +37,11 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           # Reuses the SAME Asana token the Creator Outreach Asana sync
-          # already uses elsewhere in this repo — if that secret has a
-          # different name there, use that exact name here instead of
-          # adding a second Asana secret.
-          ASANA_TOKEN: ${{ secrets.ASANA_TOKEN }}
+          # already uses elsewhere in this repo (ASANA_ACCESS_TOKEN) —
+          # the script's own env var is still named ASANA_TOKEN
+          # internally, mapped from that existing secret here rather
+          # than adding a second Asana secret.
+          ASANA_TOKEN: ${{ secrets.ASANA_ACCESS_TOKEN }}
           # Every one of these identifies a real, private company
           # resource (a specific Sheet, specific Drive folders, a
           # specific Asana project) — this repo is public, so none of
