@@ -39,7 +39,6 @@ from ugc_tracker_logic import (
     assign_duplicate_suffixes, rights_expiration_to_sheet_date,
 )
 
-ASANA_PROJECT_GID = "1217878903062923"  # Creator Outreach
 
 # Column order exactly as it exists in the real Sheet today, plus the
 # hidden Task GID column appended at the end for dedup. Status and
@@ -52,10 +51,6 @@ SHEET_COLUMNS = [
 ]
 COL_CREATOR, COL_BRAND, COL_TIKTOK, COL_RAW, COL_RIGHTS_EXP = 1, 2, 3, 4, 5
 COL_STATUS, COL_EDITED_FOLDER, COL_NOTES, COL_TASK_GID = 6, 7, 8, 9
-
-DRIVE_RAW_FOLDER_ID = "1CU4ZVPWp8enP4RCnESk_anUhCqhJJXpc"
-DRIVE_TIKTOK_FOLDER_ID = "10tDm_qgNZ_9PmklmJyFHyYDoNor2Htvf"
-
 
 class _DriveListRequest:
     """One prepared Drive files.list call — .execute() is what
@@ -200,19 +195,25 @@ def build_new_row(task: Dict, creator_label: str, match: Dict[str, Optional[str]
     return row
 
 
-def sync_once(asana_tasks: List[Dict], worksheet, drive_service, print_fn=print) -> Dict[str, int]:
+def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: str,
+              tiktok_folder_id: str, print_fn=print) -> Dict[str, int]:
     """The whole sync, one pass. Returns a small summary dict (counts)
     for the caller to log. Pure orchestration — every actual decision
     (matching, dedup labeling, date formatting) is delegated to
-    ugc_tracker_logic, so this function stays thin and easy to trust."""
+    ugc_tracker_logic, so this function stays thin and easy to trust.
+
+    raw_folder_id/tiktok_folder_id are passed in explicitly rather than
+    hardcoded — deliberately, since this repo is public and these IDs
+    identify real internal company resources. main() sources both from
+    GitHub Actions secrets, never from committed code."""
     rights_secured = extract_rights_secured_tasks(asana_tasks)
     tracker_rows = read_tracker_rows(worksheet)
     already_synced = existing_task_gids(tracker_rows)
 
     # Fetched ONCE for the whole run — every task's match check below
     # reuses these same two lists rather than re-listing Drive per task.
-    raw_items = list_drive_folder_items(drive_service, DRIVE_RAW_FOLDER_ID, files_only=False)
-    tiktok_items = list_drive_folder_items(drive_service, DRIVE_TIKTOK_FOLDER_ID, files_only=True)
+    raw_items = list_drive_folder_items(drive_service, raw_folder_id, files_only=False)
+    tiktok_items = list_drive_folder_items(drive_service, tiktok_folder_id, files_only=True)
 
     new_tasks = [t for t in rights_secured if t["task_gid"] not in already_synced]
     # Dedup labels are computed across ALL Rights Secured tasks sharing
@@ -274,21 +275,39 @@ def _connect_sheets(sheet_id: str, service_account_info: Dict):
     return gc.open_by_key(sheet_id), _DriveService(drive_creds)
 
 
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Required environment variable {name} is not set — see the workflow's "
+                            f"'env:' block and the repo's Settings → Secrets and variables → Actions.")
+    return value
+
+
 def main():
+    # Deliberately no --sheet-id or --folder-id CLI arguments: this
+    # repo is public, and a value passed on the command line in a
+    # workflow file is just as visible there as a hardcoded constant
+    # would be in this script. Every identifying ID comes from an
+    # environment variable instead, which the workflow sources from
+    # GitHub Actions secrets — never committed anywhere.
     parser = argparse.ArgumentParser(description="Sync Asana Rights Secured into the UGC Video Edits Tracker.")
-    parser.add_argument("--sheet-id", required=True)
-    parser.add_argument("--worksheet-name", default="Tracker")
+    parser.add_argument("--worksheet-name", default="Tracker")  # not identifying — safe as a plain argument
     args = parser.parse_args()
 
+    sheet_id = _require_env("UGC_TRACKER_SHEET_ID")
+    raw_folder_id = _require_env("UGC_TRACKER_RAW_FOLDER_ID")
+    tiktok_folder_id = _require_env("UGC_TRACKER_TIKTOK_FOLDER_ID")
+    asana_project_gid = _require_env("UGC_TRACKER_ASANA_PROJECT_GID")
+
     import json
-    service_account_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    spreadsheet, drive_service = _connect_sheets(args.sheet_id, service_account_info)
+    service_account_info = json.loads(_require_env("GOOGLE_SERVICE_ACCOUNT_JSON"))
+    spreadsheet, drive_service = _connect_sheets(sheet_id, service_account_info)
     worksheet = spreadsheet.worksheet(args.worksheet_name)
 
     import asana_client  # thin wrapper, kept separate so this stays testable without a real Asana token
-    asana_tasks = asana_client.get_all_project_tasks(ASANA_PROJECT_GID, os.environ["ASANA_TOKEN"])
+    asana_tasks = asana_client.get_all_project_tasks(asana_project_gid, _require_env("ASANA_TOKEN"))
 
-    summary = sync_once(asana_tasks, worksheet, drive_service)
+    summary = sync_once(asana_tasks, worksheet, drive_service, raw_folder_id, tiktok_folder_id)
     print(f"New rows: {summary['new_rows']}. Links filled in on existing rows: {summary['filled_in']}. "
           f"Ambiguous (not written): {summary['ambiguous']}.")
     return 0
