@@ -9,22 +9,39 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import requests
 
 from ugc_tracker_sync import (
-    sync_once, ensure_tracker_header, ensure_status_dropdown, SHEET_COLUMNS, STATUS_OPTIONS, COL_STATUS,
+    sync_once, ensure_tracker_header, ensure_status_dropdown, ensure_status_colors,
+    SHEET_COLUMNS, STATUS_OPTIONS, STATUS_COLORS, COL_STATUS,
     _DriveListRequest, _call_with_transient_retries, _discover_drive_id, list_drive_folder_items,
 )
 
 
 class FakeSpreadsheetForWorksheet:
     """Just enough of gspread's Spreadsheet shape for
-    ensure_status_dropdown's batch_update call — records every request
-    body it's given so a test can assert on it, without touching any
-    real API."""
+    ensure_status_dropdown/ensure_status_colors. Records every request
+    body it's given, AND simulates how Sheets itself would actually
+    apply add/delete conditional-format-rule requests — so a test can
+    genuinely verify "calling this twice doesn't stack duplicates,"
+    not just that delete requests were present in the request body."""
 
-    def __init__(self):
+    def __init__(self, sheet_id):
         self.batch_update_calls = []
+        self._sheet_id = sheet_id
+        self._conditional_formats = []  # simulates the real sheet's own current state
 
     def batch_update(self, body):
         self.batch_update_calls.append(body)
+        for request in body.get("requests", []):
+            if "deleteConditionalFormatRule" in request:
+                idx = request["deleteConditionalFormatRule"]["index"]
+                del self._conditional_formats[idx]
+            elif "addConditionalFormatRule" in request:
+                rule = request["addConditionalFormatRule"]["rule"]
+                index = request["addConditionalFormatRule"].get("index", len(self._conditional_formats))
+                self._conditional_formats.insert(index, rule)
+
+    def fetch_sheet_metadata(self):
+        return {"sheets": [{"properties": {"sheetId": self._sheet_id},
+                             "conditionalFormats": list(self._conditional_formats)}]}
 
 
 class FakeWorksheet:
@@ -39,7 +56,7 @@ class FakeWorksheet:
         self.appended = []
         self.updated_cells = []  # list of (row, col, value)
         self.id = 123456789  # arbitrary fake sheetId
-        self.spreadsheet = FakeSpreadsheetForWorksheet()
+        self.spreadsheet = FakeSpreadsheetForWorksheet(self.id)
 
     def get_all_values(self):
         return [list(row) for row in self._grid]
@@ -344,7 +361,7 @@ def test_ensure_status_dropdown_sets_the_right_options_on_the_right_column():
     three documented options, scoped to the Status column specifically
     — not some other column shifted by the recent reorder."""
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
-    ensure_status_dropdown(ws)
+    ensure_status_dropdown(ws, last_data_row=5)
 
     assert len(ws.spreadsheet.batch_update_calls) == 1
     request = ws.spreadsheet.batch_update_calls[0]["requests"][0]["setDataValidation"]
@@ -354,21 +371,78 @@ def test_ensure_status_dropdown_sets_the_right_options_on_the_right_column():
     assert values == STATUS_OPTIONS
 
 
+def test_ensure_status_dropdown_range_covers_real_data_plus_a_small_lookahead_not_thousands_of_rows():
+    """The actual reported concern: a blanket range covering hundreds
+    or thousands of empty rows is wasteful and unnecessary. The range
+    must track the real last-data-row, with a small, bounded lookahead
+    — nowhere near 1000."""
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
+    ensure_status_dropdown(ws, last_data_row=5)
+    request = ws.spreadsheet.batch_update_calls[0]["requests"][0]["setDataValidation"]
+    assert request["range"]["endRowIndex"] < 100
+    assert request["range"]["endRowIndex"] > 5  # still covers a handful of rows ahead
+
+
 def test_ensure_status_dropdown_is_safe_to_call_repeatedly():
     """Unlike ensure_tracker_header, this has no "already exists" check
     at all — re-setting the same validation rule must be harmless, not
     something that needs guarding against."""
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
-    ensure_status_dropdown(ws)
-    ensure_status_dropdown(ws)
+    ensure_status_dropdown(ws, last_data_row=5)
+    ensure_status_dropdown(ws, last_data_row=6)
     assert len(ws.spreadsheet.batch_update_calls) == 2  # both succeed, neither raises
 
 
-def test_sync_once_sets_the_status_dropdown_on_every_run():
+# ---------- ensure_status_colors: the actual requested color-coding ----------
+
+def test_ensure_status_colors_adds_three_rules_with_the_right_colors():
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
+    ensure_status_colors(ws, last_data_row=5)
+
+    rules = ws.spreadsheet._conditional_formats
+    assert len(rules) == 3
+    by_status = {r["booleanRule"]["condition"]["values"][0]["userEnteredValue"]: r for r in rules}
+    assert by_status["Not edited"]["booleanRule"]["format"]["backgroundColor"] == STATUS_COLORS["Not edited"]
+    assert by_status["Edited"]["booleanRule"]["format"]["backgroundColor"] == STATUS_COLORS["Edited"]
+    assert by_status["Live"]["booleanRule"]["format"]["backgroundColor"] == STATUS_COLORS["Live"]
+
+
+def test_ensure_status_colors_never_stacks_duplicates_on_repeated_calls():
+    """The real risk with conditional format rules specifically —
+    unlike data validation, re-adding without first deleting would
+    pile up duplicate rules indefinitely, one set per sync run."""
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
+    ensure_status_colors(ws, last_data_row=5)
+    ensure_status_colors(ws, last_data_row=10)
+    ensure_status_colors(ws, last_data_row=15)
+    assert len(ws.spreadsheet._conditional_formats) == 3  # still exactly 3, not 9
+
+
+def test_ensure_status_colors_updates_the_range_on_a_later_call():
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
+    ensure_status_colors(ws, last_data_row=5)
+    ensure_status_colors(ws, last_data_row=50)
+    ranges = [r["ranges"][0]["endRowIndex"] for r in ws.spreadsheet._conditional_formats]
+    assert all(end_row > 50 for end_row in ranges)
+
+
+def test_sync_once_sets_both_the_dropdown_and_the_colors_on_every_run():
     tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
     sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
-    assert len(ws.spreadsheet.batch_update_calls) == 1
+    assert len(ws.spreadsheet.batch_update_calls) == 2
+    assert len(ws.spreadsheet._conditional_formats) == 3
+
+
+def test_sync_once_range_covers_only_real_rows_not_a_blanket_thousand():
+    """End-to-end version of the reported concern: a brand new sheet
+    with one new row must get a dropdown/color range sized to that one
+    row plus a small lookahead, not a fixed 1000+."""
+    tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
+    ws = FakeWorksheet([])
+    sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
+    dropdown_request = ws.spreadsheet.batch_update_calls[0]["requests"][0]["setDataValidation"]
+    assert dropdown_request["range"]["endRowIndex"] < 50
 
 
 # ---------- ensure_tracker_header: the actual reported bug ----------
@@ -378,8 +452,9 @@ def test_ensure_tracker_header_creates_it_on_a_brand_new_empty_sheet():
     up for the first time with nothing in it at all, crashed instead
     of being usable. Must create the header automatically."""
     ws = FakeWorksheet([])
-    created = ensure_tracker_header(ws)
+    created, header_row = ensure_tracker_header(ws)
     assert created is True
+    assert header_row == 1
     assert ws.get_all_values()[0] == SHEET_COLUMNS
 
 
@@ -389,8 +464,9 @@ def test_ensure_tracker_header_does_nothing_when_one_already_exists():
     this check runs on every sync."""
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
     original = ws.get_all_values()
-    created = ensure_tracker_header(ws)
+    created, header_row = ensure_tracker_header(ws)
     assert created is False
+    assert header_row == len(_SHEET_PREAMBLE) + 1  # the real header position, after the preamble rows
     assert ws.get_all_values() == original
 
 
