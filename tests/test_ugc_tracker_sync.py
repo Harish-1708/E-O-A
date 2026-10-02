@@ -10,6 +10,7 @@ import requests
 
 from ugc_tracker_sync import (
     sync_once, ensure_tracker_header, SHEET_COLUMNS, _DriveListRequest, _call_with_transient_retries,
+    _discover_drive_id, list_drive_folder_items,
 )
 
 
@@ -56,11 +57,24 @@ class FakeFilesList:
         return {"files": self._items, "nextPageToken": None}
 
 
-class FakeFiles:
-    def __init__(self, items_by_folder):
-        self._items_by_folder = items_by_folder
+class FakeFilesGet:
+    def __init__(self, drive_id):
+        self._drive_id = drive_id
 
-    def list(self, q, fields, pageToken, pageSize):
+    def execute(self):
+        return {"driveId": self._drive_id} if self._drive_id else {}
+
+
+class FakeFiles:
+    def __init__(self, items_by_folder, drive_ids_by_folder=None):
+        self._items_by_folder = items_by_folder
+        # Defaults every folder to "not in a Shared Drive" (no driveId)
+        # unless a test specifically says otherwise — matching what
+        # every existing test here was written against, since none of
+        # them are testing Shared Drive discovery itself.
+        self._drive_ids_by_folder = drive_ids_by_folder or {}
+
+    def list(self, q, fields, pageToken, pageSize, driveId=None):
         # Extract the folder id from the query string the real code builds.
         folder_id = q.split("'")[1]
         items = self._items_by_folder.get(folder_id, [])
@@ -68,10 +82,13 @@ class FakeFiles:
             items = [i for i in items if i.get("mimeType") != "application/vnd.google-apps.folder"]
         return FakeFilesList(items)
 
+    def get(self, fileId, fields):
+        return FakeFilesGet(self._drive_ids_by_folder.get(fileId))
+
 
 class FakeDriveService:
-    def __init__(self, items_by_folder):
-        self._files = FakeFiles(items_by_folder)
+    def __init__(self, items_by_folder, drive_ids_by_folder=None):
+        self._files = FakeFiles(items_by_folder, drive_ids_by_folder)
 
     def files(self):
         return self._files
@@ -115,6 +132,58 @@ def _drive_item(name, item_id, is_folder=False):
 # committed code (this repo is public).
 RAW_FOLDER_ID = "fake-raw-folder-id"
 TIKTOK_FOLDER_ID = "fake-tiktok-folder-id"
+
+
+# ---------- Shared Drive ID discovery: supportsAllDrives/includeItemsFromAllDrives alone wasn't enough ----------
+
+def test_discover_drive_id_finds_it_when_folder_is_in_a_shared_drive():
+    ds = FakeDriveService({}, drive_ids_by_folder={"folder123": "shared-drive-abc"})
+    assert _discover_drive_id(ds, "folder123") == "shared-drive-abc"
+
+
+def test_discover_drive_id_returns_none_for_an_ordinary_my_drive_folder():
+    ds = FakeDriveService({})  # no drive_ids_by_folder at all
+    assert _discover_drive_id(ds, "folder123") is None
+
+
+def test_list_drive_folder_items_passes_the_discovered_drive_id_into_the_actual_query():
+    """The real reported production fix: supportsAllDrives and
+    includeItemsFromAllDrives alone were already in place and a 403
+    still happened, with sharing independently confirmed correct. The
+    missing piece was corpora=drive + driveId, scoped to the SPECIFIC
+    Shared Drive this folder lives in — discovered here, not
+    hardcoded, so this keeps working if a folder ever moves drives."""
+    ds = FakeDriveService({"folder123": []}, drive_ids_by_folder={"folder123": "shared-drive-abc"})
+    original_list = ds.files().list
+    captured = {}
+
+    def spy_list(**kwargs):
+        captured.update(kwargs)
+        return original_list(**kwargs)
+
+    with patch.object(ds.files(), "list", side_effect=spy_list):
+        list_drive_folder_items(ds, "folder123")
+
+    assert captured.get("driveId") == "shared-drive-abc"
+
+
+def test_list_drive_folder_items_omits_drive_id_for_an_ordinary_folder():
+    """Must never pass a meaningless driveId for a regular "My Drive"
+    folder — doing so could itself cause a different error, and the
+    vast majority of setups that don't use Shared Drives at all must
+    see no behavior change from any of this."""
+    ds = FakeDriveService({"folder123": []})  # no Shared Drive at all
+    captured = {}
+    original_list = ds.files().list
+
+    def spy_list(**kwargs):
+        captured.update(kwargs)
+        return original_list(**kwargs)
+
+    with patch.object(ds.files(), "list", side_effect=spy_list):
+        list_drive_folder_items(ds, "folder123")
+
+    assert captured.get("driveId") is None
 
 
 # ---------- transient network retry: the actual reported production error ----------
