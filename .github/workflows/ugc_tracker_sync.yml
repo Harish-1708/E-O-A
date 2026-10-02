@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --break-system-packages \
-            gspread==6.1.2 google-auth==2.34.0 google-api-python-client==2.149.0 requests>=2.31
+            gspread==6.1.2 google-auth==2.34.0 requests>=2.31
 
       - name: Run sync
         env:
@@ -41,12 +41,23 @@ jobs:
           # different name there, use that exact name here instead of
           # adding a second Asana secret.
           ASANA_TOKEN: ${{ secrets.ASANA_TOKEN }}
+          # Every one of these identifies a real, private company
+          # resource (a specific Sheet, specific Drive folders, a
+          # specific Asana project) — this repo is public, so none of
+          # these are ever hardcoded in the script or written as a
+          # literal argument here. Add all four under this repo's
+          # Settings → Secrets and variables → Actions before the
+          # first run:
+          UGC_TRACKER_SHEET_ID: ${{ secrets.UGC_TRACKER_SHEET_ID }}
+          UGC_TRACKER_RAW_FOLDER_ID: ${{ secrets.UGC_TRACKER_RAW_FOLDER_ID }}
+          UGC_TRACKER_TIKTOK_FOLDER_ID: ${{ secrets.UGC_TRACKER_TIKTOK_FOLDER_ID }}
+          # If other scripts in this repo already hardcode the Creator
+          # Outreach project's GID, set this secret to that same value
+          # rather than changing anything else.
+          UGC_TRACKER_ASANA_PROJECT_GID: ${{ secrets.UGC_TRACKER_ASANA_PROJECT_GID }}
         run: |
           set -o pipefail
-          python ugc_tracker_sync.py \
-            --sheet-id 17X75uLx57Y5Ii5ruGbpEuk2iXcdWRxJi7FQ2Qz9az3I \
-            --worksheet-name Tracker \
-            | tee ugc_sync_output.txt
+          python ugc_tracker_sync.py --worksheet-name Tracker | tee ugc_sync_output.txt
 
       - name: Add to job summary
         if: always()
