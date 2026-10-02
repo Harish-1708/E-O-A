@@ -60,7 +60,19 @@ class _DriveListRequest:
 
     def __init__(self, access_token: str, q: str, fields: str, pageToken, pageSize: int):
         self._access_token = access_token
-        self._params = {"q": q, "fields": fields, "pageSize": pageSize}
+        self._params = {
+            "q": q, "fields": fields, "pageSize": pageSize,
+            # Required for anything living in a Google Workspace Shared
+            # Drive (as opposed to a personal "My Drive") — without
+            # these two, the Drive API silently excludes Shared Drive
+            # items from a files.list call entirely, which surfaces as
+            # a 403 even when the folder genuinely has been shared with
+            # the service account ("Contributor" is a Shared-Drive-only
+            # role name — its presence is itself the signal this is a
+            # Shared Drive, not a regular folder). Harmless no-ops for
+            # anything in a regular "My Drive", so always sent.
+            "supportsAllDrives": "true", "includeItemsFromAllDrives": "true",
+        }
         if pageToken:
             self._params["pageToken"] = pageToken
 
