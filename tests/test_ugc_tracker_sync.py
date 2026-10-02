@@ -9,9 +9,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import requests
 
 from ugc_tracker_sync import (
-    sync_once, ensure_tracker_header, SHEET_COLUMNS, _DriveListRequest, _call_with_transient_retries,
-    _discover_drive_id, list_drive_folder_items,
+    sync_once, ensure_tracker_header, ensure_status_dropdown, SHEET_COLUMNS, STATUS_OPTIONS, COL_STATUS,
+    _DriveListRequest, _call_with_transient_retries, _discover_drive_id, list_drive_folder_items,
 )
+
+
+class FakeSpreadsheetForWorksheet:
+    """Just enough of gspread's Spreadsheet shape for
+    ensure_status_dropdown's batch_update call — records every request
+    body it's given so a test can assert on it, without touching any
+    real API."""
+
+    def __init__(self):
+        self.batch_update_calls = []
+
+    def batch_update(self, body):
+        self.batch_update_calls.append(body)
 
 
 class FakeWorksheet:
@@ -25,6 +38,8 @@ class FakeWorksheet:
         self._grid = [list(row) for row in header_and_rows]
         self.appended = []
         self.updated_cells = []  # list of (row, col, value)
+        self.id = 123456789  # arbitrary fake sheetId
+        self.spreadsheet = FakeSpreadsheetForWorksheet()
 
     def get_all_values(self):
         return [list(row) for row in self._grid]
@@ -321,6 +336,41 @@ def test_drive_list_request_403_names_the_specific_folder_and_explains_sharing()
     assert "parent" in message.lower()  # the specific misunderstanding this is clarifying
 
 
+# ---------- ensure_status_dropdown: the reported missing dropdown ----------
+
+def test_ensure_status_dropdown_sets_the_right_options_on_the_right_column():
+    """The actual reported gap: a new Tracker sheet had no dropdown on
+    Status at all. Must set ONE_OF_LIST validation, with exactly the
+    three documented options, scoped to the Status column specifically
+    — not some other column shifted by the recent reorder."""
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
+    ensure_status_dropdown(ws)
+
+    assert len(ws.spreadsheet.batch_update_calls) == 1
+    request = ws.spreadsheet.batch_update_calls[0]["requests"][0]["setDataValidation"]
+    assert request["range"]["startColumnIndex"] == COL_STATUS - 1
+    assert request["range"]["endColumnIndex"] == COL_STATUS
+    values = [v["userEnteredValue"] for v in request["rule"]["condition"]["values"]]
+    assert values == STATUS_OPTIONS
+
+
+def test_ensure_status_dropdown_is_safe_to_call_repeatedly():
+    """Unlike ensure_tracker_header, this has no "already exists" check
+    at all — re-setting the same validation rule must be harmless, not
+    something that needs guarding against."""
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
+    ensure_status_dropdown(ws)
+    ensure_status_dropdown(ws)
+    assert len(ws.spreadsheet.batch_update_calls) == 2  # both succeed, neither raises
+
+
+def test_sync_once_sets_the_status_dropdown_on_every_run():
+    tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
+    sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
+    assert len(ws.spreadsheet.batch_update_calls) == 1
+
+
 # ---------- ensure_tracker_header: the actual reported bug ----------
 
 def test_ensure_tracker_header_creates_it_on_a_brand_new_empty_sheet():
@@ -359,7 +409,7 @@ def test_sync_once_works_end_to_end_starting_from_a_completely_empty_sheet():
     assert summary["new_rows"] == 1
     grid = ws.get_all_values()
     assert grid[0] == SHEET_COLUMNS
-    assert grid[1][0] == "@newcreator"
+    assert grid[1][1] == "@newcreator"  # column 0 is now Asana Task GID
     assert any("brand new Tracker sheet" in line for line in logged)
 
 
@@ -376,10 +426,10 @@ def test_sync_once_creates_a_new_row_for_a_rights_secured_task_not_yet_in_tracke
     assert summary["new_rows"] == 1
     assert len(ws.appended) == 1
     row = ws.appended[0]
-    assert row[0] == "@newcreator"
-    assert row[1] == "DudeRobe"
-    assert row[4] == "4/1/2027"
-    assert row[8] == "111"  # Asana Task GID
+    assert row[0] == "'111"  # Asana Task GID — apostrophe-prefixed to force text, never scientific notation
+    assert row[1] == "@newcreator"
+    assert row[2] == "DudeRobe"
+    assert row[5] == "4/1/2027"
 
 
 def test_sync_once_leaves_status_edited_folder_and_notes_blank_on_a_new_row():
@@ -390,15 +440,15 @@ def test_sync_once_leaves_status_edited_folder_and_notes_blank_on_a_new_row():
     summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     row = ws.appended[0]
-    assert row[5] == ""  # Status
-    assert row[6] == ""  # Edited folder
-    assert row[7] == ""  # Notes
+    assert row[6] == ""  # Status
+    assert row[7] == ""  # Edited folder
+    assert row[8] == ""  # Notes
 
 
 def test_sync_once_skips_a_task_already_in_the_tracker():
     tasks = [_asana_task("111", "Rights Secured", creator="@existing", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["@existing", "DudeRobe", "", "", "3/1/2027", "Not edited", "", "", "111"]])
+                        ["111", "@existing", "DudeRobe", "", "", "3/1/2027", "Not edited", "", ""]])
     summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 0
     assert ws.appended == []
@@ -423,11 +473,11 @@ def test_sync_once_fills_tiktok_and_raw_when_exact_id_match_found():
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     row = ws.appended[0]
-    assert "HYPERLINK" in row[2]  # Tiktok
-    assert "@x_Tiktok" in row[2]
-    assert "raw1" in row[2] or "drive.google.com/file/d/tt1" in row[2]
-    assert "HYPERLINK" in row[3]  # Raw
-    assert "@x_Raw" in row[3]
+    assert "HYPERLINK" in row[3]  # Tiktok
+    assert "@x_Tiktok" in row[3]
+    assert "raw1" in row[3] or "drive.google.com/file/d/tt1" in row[3]
+    assert "HYPERLINK" in row[4]  # Raw
+    assert "@x_Raw" in row[4]
 
 
 def test_sync_once_leaves_tiktok_and_raw_blank_when_nothing_matches():
@@ -435,8 +485,8 @@ def test_sync_once_leaves_tiktok_and_raw_blank_when_nothing_matches():
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
     summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     row = ws.appended[0]
-    assert row[2] == ""
     assert row[3] == ""
+    assert row[4] == ""
     assert summary["ambiguous"] == 0
 
 
@@ -454,7 +504,7 @@ def test_sync_once_the_real_ksmshaw_ambiguous_case_leaves_raw_blank_and_logs_it(
     logged = []
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID, print_fn=logged.append)
     row = ws.appended[0]
-    assert row[3] == ""  # Raw stays blank
+    assert row[4] == ""  # Raw stays blank
     assert summary["ambiguous"] == 1
     assert any("AMBIGUOUS" in line and "ksmshaw" in line for line in logged)
 
@@ -470,7 +520,7 @@ def test_sync_once_tiktok_folder_never_matches_a_folder_even_if_one_existed():
     }
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
-    assert ws.appended[0][2] == ""  # Tiktok stays blank — the folder must be excluded
+    assert ws.appended[0][3] == ""  # Tiktok stays blank — the folder must be excluded
 
 
 def test_sync_once_raw_folder_does_match_a_folder_for_multi_clip_creators():
@@ -481,7 +531,7 @@ def test_sync_once_raw_folder_does_match_a_folder_for_multi_clip_creators():
     }
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
-    assert "folder1" in ws.appended[0][3]  # Raw
+    assert "folder1" in ws.appended[0][4]  # Raw
 
 
 # ---------- duplicate creator handling ----------
@@ -493,7 +543,7 @@ def test_sync_once_assigns_suffix_for_a_creator_with_two_rights_secured_tasks_in
     ]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
     sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
-    labels = sorted(r[0] for r in ws.appended)
+    labels = sorted(r[1] for r in ws.appended)  # column 1 = Creator (GID now leads at column 0)
     assert labels == ["@ksmshaw", "@ksmshaw_2"]
 
 
@@ -508,10 +558,10 @@ def test_sync_once_new_task_for_a_creator_already_in_tracker_gets_suffix_not_bla
         _asana_task("200", "Rights Secured", creator="@2.fit.bros", product="DudeRobe"),
     ]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["@2.fit.bros", "DudeRobe", "", "", "3/1/2027", "", "", "", "100"]])
+                        ["100", "@2.fit.bros", "DudeRobe", "", "", "3/1/2027", "", "", ""]])
     summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
-    assert ws.appended[0][0] == "@2.fit.bros_2"
+    assert ws.appended[0][1] == "@2.fit.bros_2"
 
 
 # ---------- filling in blank cells on existing rows ----------
@@ -519,14 +569,14 @@ def test_sync_once_new_task_for_a_creator_already_in_tracker_gets_suffix_not_bla
 def test_sync_once_fills_in_raw_for_an_existing_row_once_content_appears_later():
     tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["@x", "DudeRobe", "", "", "3/1/2027", "Not edited", "", "", "111"]])
+                        ["111", "@x", "DudeRobe", "", "", "3/1/2027", "Not edited", "", ""]])
     items_by_folder = {RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "raw1")]}
 
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
 
     assert summary["new_rows"] == 0
     assert summary["filled_in"] == 1
-    assert ws.updated_cells == [(6, 4, ws.updated_cells[0][2])]  # row 6 (header is row 5), col 4 = Raw
+    assert ws.updated_cells == [(6, 5, ws.updated_cells[0][2])]  # row 6 (header is row 5), col 5 = Raw
     assert "HYPERLINK" in ws.updated_cells[0][2]
     assert "@x_Raw" in ws.updated_cells[0][2]
 
@@ -538,7 +588,7 @@ def test_sync_once_never_overwrites_a_cell_that_already_has_a_link():
     existing_link = '=HYPERLINK("https://drive.google.com/file/d/old/view", "@x_Raw")'
     tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["@x", "DudeRobe", "", existing_link, "3/1/2027", "", "", "", "111"]])
+                        ["111", "@x", "DudeRobe", "", existing_link, "3/1/2027", "", "", ""]])
     items_by_folder = {RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "new_raw")]}
 
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
@@ -550,7 +600,7 @@ def test_sync_once_never_overwrites_a_cell_that_already_has_a_link():
 def test_sync_once_never_touches_status_or_edited_folder_on_an_existing_row():
     tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["@x", "DudeRobe", "", "", "3/1/2027", "Edited", "some-link", "a note", "111"]])
+                        ["111", "@x", "DudeRobe", "", "", "3/1/2027", "Edited", "some-link", "a note"]])
     items_by_folder = {RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "raw1")]}
 
     sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
