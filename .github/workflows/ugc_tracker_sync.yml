@@ -1,0 +1,56 @@
+name: UGC Tracker Sync
+
+# Deliberately its own workflow, its own concurrency group, its own
+# schedule slot — entirely separate from the email outreach pipeline's
+# "google-sheets-api" group, so this can never queue behind (or be
+# queued behind by) auto-send, check-replies, dashboard, or the Asana
+# sync those already use. A failure or slowdown here cannot affect
+# that pipeline, and vice versa.
+on:
+  schedule:
+    - cron: "*/30 * * * *"  # every 30 minutes — change to "0 * * * *" for hourly if preferred
+  workflow_dispatch: {}
+
+concurrency:
+  group: ugc-tracker-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --break-system-packages \
+            gspread==6.1.2 google-auth==2.34.0 google-api-python-client==2.149.0 requests>=2.31
+
+      - name: Run sync
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # Reuses the SAME Asana token the Creator Outreach Asana sync
+          # already uses elsewhere in this repo — if that secret has a
+          # different name there, use that exact name here instead of
+          # adding a second Asana secret.
+          ASANA_TOKEN: ${{ secrets.ASANA_TOKEN }}
+        run: |
+          set -o pipefail
+          python ugc_tracker_sync.py \
+            --sheet-id 17X75uLx57Y5Ii5ruGbpEuk2iXcdWRxJi7FQ2Qz9az3I \
+            --worksheet-name Tracker \
+            | tee ugc_sync_output.txt
+
+      - name: Add to job summary
+        if: always()
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat ugc_sync_output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
