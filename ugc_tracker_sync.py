@@ -453,6 +453,15 @@ def main():
 
     import json
     service_account_info = json.loads(_require_env("GOOGLE_SERVICE_ACCOUNT_JSON"))
+    # Safe to print — an email address, not a secret value (the
+    # private key itself is never touched here) — specifically to let
+    # this be cross-checked directly against whichever account(s) have
+    # actually been shared on the Sheet and both Drive folders, since
+    # a persistent 403 across every kind of Drive call despite several
+    # correct parameter fixes is also consistent with this secret
+    # simply containing a different service account than the one(s)
+    # that were shared.
+    print(f"Authenticating as service account: {service_account_info.get('client_email', '(not found in JSON)')}")
     asana_token = _require_env("ASANA_TOKEN")
 
     def _connect_and_sync():
