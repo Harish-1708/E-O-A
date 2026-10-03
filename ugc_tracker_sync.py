@@ -49,13 +49,22 @@ from ugc_tracker_logic import (
 # afterward. _HEADER_FIRST_CELL derives from this list rather than
 # being a separate hardcoded string, so the header-detection logic
 # below can never drift out of sync with the actual column order.
+# Brand is a FIXED constant — "DudeRobe" is the overall client this
+# whole Asana project is for, regardless of which specific product
+# line (DudeRobe/BroThrow/SheRobe) a given task is actually under.
+# Product is the real, varying value from Asana's own "Product"
+# custom field. These are two genuinely different things, confirmed
+# directly — Brand never changes, Product almost always says
+# "DudeRobe" too but occasionally says "SheRobe" or "BroThrow".
+BRAND_NAME = "DudeRobe"
+
 SHEET_COLUMNS = [
-    "Asana Task GID", "Creator", "Brand", "Tiktok", "Raw", "Rights expiration",
+    "Asana Task GID", "Creator", "Brand", "Product", "Tiktok", "Raw", "Rights expiration",
     "Status", "Edited folder", "Notes",
 ]
 COL_TASK_GID = 1
-COL_CREATOR, COL_BRAND, COL_TIKTOK, COL_RAW, COL_RIGHTS_EXP = 2, 3, 4, 5, 6
-COL_STATUS, COL_EDITED_FOLDER, COL_NOTES = 7, 8, 9
+COL_CREATOR, COL_BRAND, COL_PRODUCT, COL_TIKTOK, COL_RAW, COL_RIGHTS_EXP = 2, 3, 4, 5, 6, 7
+COL_STATUS, COL_EDITED_FOLDER, COL_NOTES = 8, 9, 10
 _HEADER_FIRST_CELL = SHEET_COLUMNS[0]
 
 def _extract_folder_id_from_query(q: str) -> str:
@@ -222,6 +231,42 @@ def list_drive_folder_items(drive_service, folder_id: str, files_only: bool = Fa
             return items
 
 
+def ensure_product_column(worksheet, header_row_number: int) -> bool:
+    """If the header row doesn't already have "Product" at its
+    expected position (immediately after Brand), inserts a genuinely
+    new, blank column there via a proper Sheets insertDimension
+    request — which correctly SHIFTS every existing column's data
+    rightward, preserving it exactly as-is, rather than overwriting
+    anything already in those cells in place. Critical here
+    specifically: this sheet already carries real, manually-entered
+    Status/Edited folder/Notes values that must never be disturbed by
+    a structural change like this.
+
+    Idempotent — does nothing once the column already exists in the
+    right place, safe to call on every run. Returns True if it just
+    inserted the column, False if one was already there (so the
+    caller knows whether a backfill pass over existing rows is
+    needed)."""
+    header_row = worksheet.row_values(header_row_number)
+    if len(header_row) >= COL_PRODUCT and header_row[COL_PRODUCT - 1].strip() == "Product":
+        return False
+    worksheet.spreadsheet.batch_update({
+        "requests": [{
+            "insertDimension": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "dimension": "COLUMNS",
+                    "startIndex": COL_PRODUCT - 1,  # 0-indexed: right after Brand, before whatever followed it
+                    "endIndex": COL_PRODUCT,
+                },
+                "inheritFromBefore": False,
+            },
+        }],
+    })
+    worksheet.update_cell(header_row_number, COL_PRODUCT, "Product")
+    return True
+
+
 def ensure_tracker_header(worksheet) -> Tuple[bool, int]:
     """If the Tracker sheet has no row starting with its own first
     column name (SHEET_COLUMNS[0], currently "Asana Task GID") yet —
@@ -325,7 +370,8 @@ def build_new_row(task: Dict, creator_label: str, match: Dict[str, Optional[str]
     # existing_task_gids() always compares against the real, exact GID.
     row[COL_TASK_GID - 1] = f"'{task['task_gid']}"
     row[COL_CREATOR - 1] = creator_label
-    row[COL_BRAND - 1] = task["product"]
+    row[COL_BRAND - 1] = BRAND_NAME  # always constant — the overall client, not the specific product line
+    row[COL_PRODUCT - 1] = task["product"]  # the actual, varying Asana field: DudeRobe/BroThrow/SheRobe
     if match.get("tiktok_url"):
         row[COL_TIKTOK - 1] = build_hyperlink_formula(match["tiktok_url"], f"{creator_label}_Tiktok")
     if match.get("raw_url"):
@@ -452,6 +498,8 @@ def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: 
     created_header, header_row_number = ensure_tracker_header(worksheet)
     if created_header:
         print_fn("No header row found — this looks like a brand new Tracker sheet. Created the header row.")
+    if ensure_product_column(worksheet, header_row_number):
+        print_fn("Added the missing 'Product' column (existing rows will be backfilled where blank).")
     tracker_rows = read_tracker_rows(worksheet)
     already_synced = existing_task_gids(tracker_rows)
 
@@ -498,11 +546,21 @@ def sync_once(asana_tasks: List[Dict], worksheet, drive_service, raw_folder_id: 
             continue
         raw_blank = not (row.get("Raw", "") or "").strip()
         tiktok_blank = not (row.get("Tiktok", "") or "").strip()
-        if not raw_blank and not tiktok_blank:
+        # Covers the actual reported gap too: a row written before the
+        # Product column existed has this blank even though Tiktok/Raw
+        # are both already filled in — must still be backfilled, not
+        # skipped just because the OTHER two cells are already done.
+        product_blank = not (row.get("Product", "") or "").strip()
+        if not raw_blank and not tiktok_blank and not product_blank:
             continue
         task = next((t for t in rights_secured if t["task_gid"] == task_gid), None)
         if task is None:
             continue
+        if product_blank:
+            worksheet.update_cell(row["_row"], COL_PRODUCT, task["product"])
+            filled_in += 1
+        if not raw_blank and not tiktok_blank:
+            continue  # nothing left to match against Drive for this row
         match = find_match_for_task(raw_items, tiktok_items, task_gid, task["creator"], task["product"], ambiguous)
         label = row.get("Creator", task["creator"])
         if tiktok_blank and match.get("tiktok_url"):
