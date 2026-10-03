@@ -9,8 +9,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import requests
 
 from ugc_tracker_sync import (
-    sync_once, ensure_tracker_header, ensure_status_dropdown, ensure_status_colors,
-    SHEET_COLUMNS, STATUS_OPTIONS, STATUS_COLORS, COL_STATUS,
+    sync_once, ensure_tracker_header, ensure_status_dropdown, ensure_status_colors, ensure_product_column,
+    build_new_row, SHEET_COLUMNS, STATUS_OPTIONS, STATUS_COLORS,
+    COL_BRAND, COL_PRODUCT, COL_CREATOR, COL_STATUS, COL_EDITED_FOLDER, COL_NOTES,
     _DriveListRequest, _call_with_transient_retries, _discover_drive_id, list_drive_folder_items,
 )
 
@@ -23,9 +24,10 @@ class FakeSpreadsheetForWorksheet:
     genuinely verify "calling this twice doesn't stack duplicates,"
     not just that delete requests were present in the request body."""
 
-    def __init__(self, sheet_id):
+    def __init__(self, sheet_id, worksheet=None):
         self.batch_update_calls = []
         self._sheet_id = sheet_id
+        self._worksheet = worksheet  # set after construction — see FakeWorksheet.__init__
         self._conditional_formats = []  # simulates the real sheet's own current state
 
     def batch_update(self, body):
@@ -38,6 +40,10 @@ class FakeSpreadsheetForWorksheet:
                 rule = request["addConditionalFormatRule"]["rule"]
                 index = request["addConditionalFormatRule"].get("index", len(self._conditional_formats))
                 self._conditional_formats.insert(index, rule)
+            elif "insertDimension" in request:
+                rng = request["insertDimension"]["range"]
+                assert rng["dimension"] == "COLUMNS"
+                self._worksheet.insert_column_at(rng["startIndex"] + 1)  # 0-indexed -> 1-indexed
 
     def fetch_sheet_metadata(self):
         return {"sheets": [{"properties": {"sheetId": self._sheet_id},
@@ -56,10 +62,23 @@ class FakeWorksheet:
         self.appended = []
         self.updated_cells = []  # list of (row, col, value)
         self.id = 123456789  # arbitrary fake sheetId
-        self.spreadsheet = FakeSpreadsheetForWorksheet(self.id)
+        self.spreadsheet = FakeSpreadsheetForWorksheet(self.id, worksheet=self)
 
     def get_all_values(self):
         return [list(row) for row in self._grid]
+
+    def row_values(self, row_number):
+        row_idx = row_number - 1
+        return list(self._grid[row_idx]) if row_idx < len(self._grid) else []
+
+    def insert_column_at(self, index_1indexed):
+        """Simulates insertDimension's real effect — a genuinely new,
+        blank column, with every existing cell to its right shifted
+        over by one, not overwritten in place."""
+        for row in self._grid:
+            while len(row) < index_1indexed - 1:
+                row.append("")
+            row.insert(index_1indexed - 1, "")
 
     def append_rows(self, rows, value_input_option="RAW"):
         self.appended.extend(rows)
@@ -353,6 +372,128 @@ def test_drive_list_request_403_names_the_specific_folder_and_explains_sharing()
     assert "parent" in message.lower()  # the specific misunderstanding this is clarifying
 
 
+# ---------- ensure_product_column: the actual reported missing column ----------
+
+# The OLD 9-column header, exactly matching what's live on the real
+# sheet right now — no Product column at all.
+_OLD_HEADER_ROW = ["Asana Task GID", "Creator", "Brand", "Tiktok", "Raw", "Rights expiration",
+                   "Status", "Edited folder", "Notes"]
+
+
+def test_ensure_product_column_inserts_it_on_an_old_style_sheet():
+    """The actual reported production gap: the live sheet has no
+    Product column at all. Must detect this and insert one, named
+    correctly, at the expected position."""
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_OLD_HEADER_ROW])
+    header_row_number = len(_SHEET_PREAMBLE) + 1
+    inserted = ensure_product_column(ws, header_row_number)
+    assert inserted is True
+    new_header = ws.get_all_values()[header_row_number - 1]
+    assert new_header[COL_PRODUCT - 1] == "Product"
+    assert new_header == SHEET_COLUMNS
+
+
+def test_ensure_product_column_preserves_every_existing_cell_in_its_correct_shifted_position():
+    """The critical safety property explicitly requested: inserting
+    the column must never disturb existing data — especially manually
+    entered Status/Edited folder/Notes values — it must correctly
+    shift everything from Tiktok onward one column to the right,
+    exactly as a real Sheets column insert would."""
+    existing_row = ["1218941738388881", "@ksmshaw", "DudeRobe", "@ksmshaw_Tiktok",
+                    "@ksmshaw_Raw", "3/28/2027", "Edited", "https://drive/some-folder", "a manual note"]
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_OLD_HEADER_ROW, existing_row])
+    header_row_number = len(_SHEET_PREAMBLE) + 1
+    ensure_product_column(ws, header_row_number)
+
+    migrated_row = ws.get_all_values()[header_row_number]  # the data row, right after the header
+    assert migrated_row[0] == "1218941738388881"  # GID untouched
+    assert migrated_row[1] == "@ksmshaw"           # Creator untouched
+    assert migrated_row[2] == "DudeRobe"           # Brand untouched
+    assert migrated_row[3] == ""                   # brand new Product cell — blank, to be backfilled
+    assert migrated_row[4] == "@ksmshaw_Tiktok"    # Tiktok correctly SHIFTED right, not overwritten
+    assert migrated_row[5] == "@ksmshaw_Raw"       # Raw correctly shifted
+    assert migrated_row[6] == "3/28/2027"          # Rights expiration correctly shifted
+    assert migrated_row[7] == "Edited"             # the manually-set Status — preserved exactly
+    assert migrated_row[8] == "https://drive/some-folder"  # the manual Edited folder link — preserved exactly
+    assert migrated_row[9] == "a manual note"      # the manual Note — preserved exactly
+
+
+def test_ensure_product_column_does_nothing_once_already_present():
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
+    original = ws.get_all_values()
+    inserted = ensure_product_column(ws, len(_SHEET_PREAMBLE) + 1)
+    assert inserted is False
+    assert ws.get_all_values() == original
+
+
+# ---------- Brand is a fixed constant, Product is the real Asana value ----------
+
+def test_build_new_row_brand_is_always_the_constant_regardless_of_actual_product():
+    """The actual clarified requirement: Brand never varies — it's
+    always "DudeRobe", the overall client — even for the one real task
+    whose Product is genuinely "SheRobe"."""
+    task = {"task_gid": "111", "creator": "@jo.vall", "product": "SheRobe",
+            "rights_expiration": "2027-03-28T00:00:00.000Z"}
+    row = build_new_row(task, "@jo.vall", {"raw_url": None, "tiktok_url": None})
+    assert row[COL_BRAND - 1] == "DudeRobe"
+    assert row[COL_PRODUCT - 1] == "SheRobe"  # the real, varying value — correctly NOT overwritten
+
+
+def test_sync_once_backfills_product_for_an_existing_row_missing_it():
+    """The actual reported end-to-end scenario: an existing row,
+    written before the Product column existed, has it blank even
+    though Tiktok is already filled in — must still get backfilled,
+    not skipped just because the other automation-owned cells are
+    already done."""
+    tasks = [_asana_task("111", "Rights Secured", creator="@x", product="SheRobe")]
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
+                        ["111", "@x", "DudeRobe", "", "@x_Tiktok", "@x_Raw", "3/1/2027", "Edited", "link", "note"]])
+
+    summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
+
+    assert summary["filled_in"] == 1
+    assert ws.updated_cells == [(6, COL_PRODUCT, "SheRobe")]
+    # Confirms the untouched columns stayed exactly as they were — the
+    # manual Status/Edited folder/Notes values specifically.
+    final_row = ws.get_all_values()[5]
+    assert final_row[COL_STATUS - 1] == "Edited"
+    assert final_row[COL_EDITED_FOLDER - 1] == "link"
+    assert final_row[COL_NOTES - 1] == "note"
+
+
+def test_sync_once_migrates_and_backfills_an_old_style_sheet_end_to_end():
+    """The full, real-world migration path in one pass: an old-style
+    sheet with no Product column, one existing row with real manual
+    data, and one brand new Rights Secured task. Must insert the
+    column, preserve the existing row's manual data exactly, backfill
+    its Product cell, AND append the new row correctly — all without
+    corrupting anything, in a single sync_once call."""
+    existing_row = ["1218941738388881", "@ksmshaw", "DudeRobe", "@ksmshaw_Tiktok",
+                    "@ksmshaw_Raw", "3/28/2027", "Edited", "https://drive/some-folder", "do not touch this"]
+    ws = FakeWorksheet(_SHEET_PREAMBLE + [_OLD_HEADER_ROW, existing_row])
+    tasks = [
+        _asana_task("1218941738388881", "Rights Secured", creator="@ksmshaw", product="DudeRobe"),
+        _asana_task("222", "Rights Secured", creator="@newperson", product="DudeRobe",
+                    rights_expiration="2027-05-01T00:00:00.000Z"),
+    ]
+
+    summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
+
+    assert summary["new_rows"] == 1
+    assert summary["filled_in"] == 1  # the existing row's blank Product
+    grid = ws.get_all_values()
+    header_row_idx = len(_SHEET_PREAMBLE)
+    migrated_existing = grid[header_row_idx + 1]
+    assert migrated_existing[COL_PRODUCT - 1] == "DudeRobe"
+    assert migrated_existing[COL_STATUS - 1] == "Edited"          # manual data, untouched
+    assert migrated_existing[COL_EDITED_FOLDER - 1] == "https://drive/some-folder"
+    assert migrated_existing[COL_NOTES - 1] == "do not touch this"
+    new_row = ws.appended[0]
+    assert new_row[COL_CREATOR - 1] == "@newperson"
+    assert new_row[COL_BRAND - 1] == "DudeRobe"
+    assert new_row[COL_PRODUCT - 1] == "DudeRobe"
+
+
 # ---------- ensure_status_dropdown: the reported missing dropdown ----------
 
 def test_ensure_status_dropdown_sets_the_right_options_on_the_right_column():
@@ -505,7 +646,7 @@ def test_sync_once_creates_a_new_row_for_a_rights_secured_task_not_yet_in_tracke
     assert row[0] == "'111"  # Asana Task GID — apostrophe-prefixed to force text, never scientific notation
     assert row[1] == "@newcreator"
     assert row[2] == "DudeRobe"
-    assert row[5] == "4/1/2027"
+    assert row[6] == "4/1/2027"
 
 
 def test_sync_once_leaves_status_edited_folder_and_notes_blank_on_a_new_row():
@@ -516,15 +657,15 @@ def test_sync_once_leaves_status_edited_folder_and_notes_blank_on_a_new_row():
     summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     row = ws.appended[0]
-    assert row[6] == ""  # Status
-    assert row[7] == ""  # Edited folder
-    assert row[8] == ""  # Notes
+    assert row[7] == ""  # Status
+    assert row[8] == ""  # Edited folder
+    assert row[9] == ""  # Notes
 
 
 def test_sync_once_skips_a_task_already_in_the_tracker():
     tasks = [_asana_task("111", "Rights Secured", creator="@existing", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["111", "@existing", "DudeRobe", "", "", "3/1/2027", "Not edited", "", ""]])
+                        ["111", "@existing", "DudeRobe", "DudeRobe", "", "", "3/1/2027", "Not edited", "", ""]])
     summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 0
     assert ws.appended == []
@@ -549,11 +690,11 @@ def test_sync_once_fills_tiktok_and_raw_when_exact_id_match_found():
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     row = ws.appended[0]
-    assert "HYPERLINK" in row[3]  # Tiktok
-    assert "@x_Tiktok" in row[3]
-    assert "raw1" in row[3] or "drive.google.com/file/d/tt1" in row[3]
-    assert "HYPERLINK" in row[4]  # Raw
-    assert "@x_Raw" in row[4]
+    assert "HYPERLINK" in row[4]  # Tiktok
+    assert "@x_Tiktok" in row[4]
+    assert "raw1" in row[4] or "drive.google.com/file/d/tt1" in row[4]
+    assert "HYPERLINK" in row[5]  # Raw
+    assert "@x_Raw" in row[5]
 
 
 def test_sync_once_leaves_tiktok_and_raw_blank_when_nothing_matches():
@@ -561,8 +702,8 @@ def test_sync_once_leaves_tiktok_and_raw_blank_when_nothing_matches():
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row()])
     summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     row = ws.appended[0]
-    assert row[3] == ""
     assert row[4] == ""
+    assert row[5] == ""
     assert summary["ambiguous"] == 0
 
 
@@ -580,7 +721,7 @@ def test_sync_once_the_real_ksmshaw_ambiguous_case_leaves_raw_blank_and_logs_it(
     logged = []
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID, print_fn=logged.append)
     row = ws.appended[0]
-    assert row[4] == ""  # Raw stays blank
+    assert row[5] == ""  # Raw stays blank
     assert summary["ambiguous"] == 1
     assert any("AMBIGUOUS" in line and "ksmshaw" in line for line in logged)
 
@@ -596,7 +737,7 @@ def test_sync_once_tiktok_folder_never_matches_a_folder_even_if_one_existed():
     }
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
-    assert ws.appended[0][3] == ""  # Tiktok stays blank — the folder must be excluded
+    assert ws.appended[0][4] == ""  # Tiktok stays blank — the folder must be excluded
 
 
 def test_sync_once_raw_folder_does_match_a_folder_for_multi_clip_creators():
@@ -607,7 +748,7 @@ def test_sync_once_raw_folder_does_match_a_folder_for_multi_clip_creators():
     }
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
-    assert "folder1" in ws.appended[0][4]  # Raw
+    assert "folder1" in ws.appended[0][5]  # Raw
 
 
 # ---------- duplicate creator handling ----------
@@ -634,7 +775,7 @@ def test_sync_once_new_task_for_a_creator_already_in_tracker_gets_suffix_not_bla
         _asana_task("200", "Rights Secured", creator="@2.fit.bros", product="DudeRobe"),
     ]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["100", "@2.fit.bros", "DudeRobe", "", "", "3/1/2027", "", "", ""]])
+                        ["100", "@2.fit.bros", "DudeRobe", "DudeRobe", "", "", "3/1/2027", "", "", ""]])
     summary = sync_once(tasks, ws, FakeDriveService({}), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
     assert summary["new_rows"] == 1
     assert ws.appended[0][1] == "@2.fit.bros_2"
@@ -645,14 +786,14 @@ def test_sync_once_new_task_for_a_creator_already_in_tracker_gets_suffix_not_bla
 def test_sync_once_fills_in_raw_for_an_existing_row_once_content_appears_later():
     tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["111", "@x", "DudeRobe", "", "", "3/1/2027", "Not edited", "", ""]])
+                        ["111", "@x", "DudeRobe", "DudeRobe", "", "", "3/1/2027", "Not edited", "", ""]])
     items_by_folder = {RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "raw1")]}
 
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
 
     assert summary["new_rows"] == 0
     assert summary["filled_in"] == 1
-    assert ws.updated_cells == [(6, 5, ws.updated_cells[0][2])]  # row 6 (header is row 5), col 5 = Raw
+    assert ws.updated_cells == [(6, 6, ws.updated_cells[0][2])]  # row 6 (header is row 5), col 6 = Raw
     assert "HYPERLINK" in ws.updated_cells[0][2]
     assert "@x_Raw" in ws.updated_cells[0][2]
 
@@ -664,7 +805,7 @@ def test_sync_once_never_overwrites_a_cell_that_already_has_a_link():
     existing_link = '=HYPERLINK("https://drive.google.com/file/d/old/view", "@x_Raw")'
     tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["111", "@x", "DudeRobe", "", existing_link, "3/1/2027", "", "", ""]])
+                        ["111", "@x", "DudeRobe", "DudeRobe", "", existing_link, "3/1/2027", "", "", ""]])
     items_by_folder = {RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "new_raw")]}
 
     summary = sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
@@ -676,12 +817,12 @@ def test_sync_once_never_overwrites_a_cell_that_already_has_a_link():
 def test_sync_once_never_touches_status_or_edited_folder_on_an_existing_row():
     tasks = [_asana_task("111", "Rights Secured", creator="@x", product="DudeRobe")]
     ws = FakeWorksheet(_SHEET_PREAMBLE + [_header_row(),
-                        ["111", "@x", "DudeRobe", "", "", "3/1/2027", "Edited", "some-link", "a note"]])
+                        ["111", "@x", "DudeRobe", "DudeRobe", "", "", "3/1/2027", "Edited", "some-link", "a note"]])
     items_by_folder = {RAW_FOLDER_ID: [_drive_item("DudeRobe - @x – DudeRobe [111].mov", "raw1")]}
 
     sync_once(tasks, ws, FakeDriveService(items_by_folder), RAW_FOLDER_ID, TIKTOK_FOLDER_ID)
 
     touched_cols = {col for (_row, col, _val) in ws.updated_cells}
-    assert 6 not in touched_cols  # Status
-    assert 7 not in touched_cols  # Edited folder
-    assert 8 not in touched_cols  # Notes
+    assert 7 not in touched_cols  # Status
+    assert 8 not in touched_cols  # Edited folder
+    assert 9 not in touched_cols  # Notes
