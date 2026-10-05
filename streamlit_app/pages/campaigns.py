@@ -58,6 +58,7 @@ from responses_reply_logic import (  # noqa: E402
     build_reply_payload, reply_payload_path, build_attachment_entries, total_attachment_size_bytes,
 )
 from responses_hub_logic import group_responses_by_lead, sort_conversation_groups_newest_first  # noqa: E402
+from parallel_logic import run_in_parallel  # noqa: E402
 from conversation_logic import build_conversation_thread, filter_responses_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
     compute_campaign_status, compute_campaign_readiness, status_label,
@@ -100,8 +101,12 @@ def _get_connector() -> ReadOnlySheetsConnector:
     return ReadOnlySheetsConnector(service_account_info=sa_info, sheet_id=sheet_id)
 
 
-def _fetch_sheet_data(campaign_cfg):
-    connector = _get_connector()
+def _fetch_sheet_data(campaign_cfg, connector=None):
+    # connector is passed in by callers that run this on a worker thread
+    # (see _load_hub_rows): the cached connector is resolved once on the
+    # normal script thread and handed over, so no worker thread ever
+    # calls into Streamlit's cache itself.
+    connector = connector or _get_connector()
     leads = connector.get_all_leads(campaign_cfg["master_tab"])
     responses = connector.get_all_responses(campaign_cfg["responses_tab"])
     send_log = connector.get_all_send_log(campaign_cfg["send_log_tab"])
@@ -128,8 +133,21 @@ def _fetch_full_campaign_data_cached(campaign_name: str):
     matter how long real time passes; a visible timestamp is what makes
     that fact obvious instead of confusing."""
     campaign_cfg = get_campaign_cfg(campaign_name)
-    leads, responses, send_log = _fetch_sheet_data(campaign_cfg)
-    error_log = _get_connector().get_all_error_log(campaign_cfg["error_log_tab"])
+    connector = _get_connector()
+    # The four tabs are independent, so read them at the same time rather
+    # than one after another (previously ~8 Google requests in a row).
+    # If any fail, the FIRST failure in the original order is re-raised,
+    # exactly the error the old sequential code would have surfaced.
+    results = run_in_parallel([
+        lambda: connector.get_all_leads(campaign_cfg["master_tab"]),
+        lambda: connector.get_all_responses(campaign_cfg["responses_tab"]),
+        lambda: connector.get_all_send_log(campaign_cfg["send_log_tab"]),
+        lambda: connector.get_all_error_log(campaign_cfg["error_log_tab"]),
+    ], max_workers=4)
+    for ok, value in results:
+        if not ok:
+            raise value
+    leads, responses, send_log, error_log = (value for _, value in results)
     fetched_at = datetime.now().strftime("%H:%M:%S")
     return leads, responses, send_log, error_log, fetched_at
 
@@ -162,7 +180,22 @@ def _get_campaign_cfg_live(campaign_name: str):
 @st.cache_data(ttl=30, show_spinner=False)
 def _load_hub_rows():
     campaign_names = list_campaigns_live(_safe_github_client())
-    return build_campaigns_hub(campaign_names, _get_campaign_cfg_live, _fetch_sheet_data)
+    # Resolved here, on the script thread, then handed to the worker
+    # threads that fetch each campaign's Sheets in parallel. If it can't
+    # be built, every active campaign reports that error individually —
+    # exactly what happened before, when each fetch built it itself.
+    try:
+        connector = _get_connector()
+        connector_error = None
+    except Exception as exc:  # noqa: BLE001
+        connector, connector_error = None, exc
+
+    def _fetch_for_hub(campaign_cfg):
+        if connector_error is not None:
+            raise connector_error
+        return _fetch_sheet_data(campaign_cfg, connector=connector)
+
+    return build_campaigns_hub(campaign_names, _get_campaign_cfg_live, _fetch_for_hub, max_workers=6)
 
 
 def _relative_time(timestamp_str: str) -> str:
