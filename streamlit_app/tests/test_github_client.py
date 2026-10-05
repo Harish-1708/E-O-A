@@ -403,3 +403,238 @@ def test_delete_secret_raises_on_other_failure(monkeypatch):
     monkeypatch.setattr(github_client.requests, "delete", lambda *a, **kw: _fake_response(403, text="Forbidden"))
     with pytest.raises(GitHubActionsError, match="Failed to delete secret"):
         _client().delete_secret("EMAIL_ACCOUNT_SLOT_3")
+
+
+# ---------- SHA-keyed read cache (opt-in via cache_reads=True) ----------
+
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+
+
+class _FakeGitHub:
+    """Routes requests.get by URL, tracks every call, and lets a test
+    move 'main' to a new commit (changing what content it serves) just
+    like a real push would."""
+
+    def __init__(self):
+        self.head = SHA_A
+        self.files_by_sha = {SHA_A: {"templates/C/intro_A.txt": b"Subject: v1\n\nbody v1"}}
+        self.calls = []   # (kind, path_or_none, ref_param)
+        self.head_fails = False
+        self.head_text_override = None   # what the commits endpoint SAYS, if different from reality
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        if url.endswith("/commits/main"):
+            self.calls.append(("head", None, None))
+            if self.head_fails:
+                raise github_client.requests.ConnectionError("down")
+            return _fake_response(200, text=self.head_text_override or self.head)
+        path = url.split("/contents/", 1)[1]
+        ref = (params or {}).get("ref")
+        self.calls.append(("contents", path, ref))
+        sha = self.head if ref == "main" else ref
+        files = self.files_by_sha.get(sha, {})
+        if path in files:
+            return _fake_response(200, {"content": base64.b64encode(files[path]).decode()})
+        # directory listing
+        prefix = path.rstrip("/") + "/"
+        names = sorted({p[len(prefix):].split("/")[0] for p in files if p.startswith(prefix)})
+        if names:
+            return _fake_response(200, [{"name": n, "type": "file"} for n in names])
+        return _fake_response(404)
+
+    def content_calls(self):
+        return [c for c in self.calls if c[0] == "contents"]
+
+    def head_calls(self):
+        return [c for c in self.calls if c[0] == "head"]
+
+
+def _cached_client():
+    return GitHubClient(token="tok", owner="acme", repo="outreach", cache_reads=True)
+
+
+def test_cache_is_off_by_default_so_every_read_still_hits_github(monkeypatch):
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    client = _client()  # no cache_reads
+    client.get_file_content("templates/C/intro_A.txt")
+    client.get_file_content("templates/C/intro_A.txt")
+    assert len(fake.content_calls()) == 2
+    assert fake.head_calls() == []
+
+
+def test_cached_client_reads_the_same_file_from_github_only_once(monkeypatch):
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    client = _cached_client()
+    first = client.get_file_content("templates/C/intro_A.txt")
+    second = client.get_file_content("templates/C/intro_A.txt")
+    assert first == second == b"Subject: v1\n\nbody v1"
+    assert len(fake.content_calls()) == 1
+    assert len(fake.head_calls()) == 1
+
+
+def test_cached_reads_are_fetched_at_the_resolved_sha_not_the_moving_main_ref(monkeypatch):
+    """What gets cached under a SHA must genuinely be that commit's
+    content even if main moves between the head lookup and the read."""
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    _cached_client().get_file_content("templates/C/intro_A.txt")
+    assert fake.content_calls()[0][2] == SHA_A
+
+
+def test_a_new_commit_is_never_served_stale_content(monkeypatch):
+    """THE guarantee this whole cache depends on: once main moves, the
+    next read (after the brief head-lookup window) returns the NEW
+    content, never the cached old copy."""
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(github_client.time, "monotonic", lambda: clock["t"])
+    client = _cached_client()
+
+    assert client.get_file_content("templates/C/intro_A.txt") == b"Subject: v1\n\nbody v1"
+
+    # Someone (an Actions workflow, a teammate) commits a change.
+    fake.head = SHA_B
+    fake.files_by_sha[SHA_B] = {"templates/C/intro_A.txt": b"Subject: v2\n\nbody v2"}
+    clock["t"] += github_client._HEAD_SHA_TTL_SECONDS + 0.1
+
+    assert client.get_file_content("templates/C/intro_A.txt") == b"Subject: v2\n\nbody v2"
+
+
+def test_entries_from_a_superseded_commit_are_dropped_not_accumulated(monkeypatch):
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(github_client.time, "monotonic", lambda: clock["t"])
+    client = _cached_client()
+    client.get_file_content("templates/C/intro_A.txt")
+    fake.head = SHA_B
+    fake.files_by_sha[SHA_B] = {"templates/C/intro_A.txt": b"Subject: v2\n\nbody v2"}
+    clock["t"] += github_client._HEAD_SHA_TTL_SECONDS + 0.1
+    client.get_file_content("templates/C/intro_A.txt")
+    assert all(key[2] == SHA_B for key in github_client._READ_ENTRIES)
+
+
+def test_any_write_through_the_app_invalidates_the_cache_immediately(monkeypatch):
+    """The app must never show its OWN change late — even inside the
+    head-SHA TTL window, a write must force the next read to refetch."""
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    put_resp = _fake_response(200)
+    monkeypatch.setattr(github_client.requests, "put", lambda *a, **kw: put_resp)
+    client = _cached_client()
+    client.get_file_content("templates/C/intro_A.txt")
+    assert len(fake.content_calls()) == 1
+
+    # The write itself commits a new head.
+    fake.head = SHA_B
+    fake.files_by_sha[SHA_B] = {"templates/C/intro_A.txt": b"Subject: v2\n\nbody v2"}
+    client.create_file("templates/C/intro_A.txt", b"Subject: v2\n\nbody v2", "edit")
+
+    # No clock advance at all — still well inside the TTL.
+    assert client.get_file_content("templates/C/intro_A.txt") == b"Subject: v2\n\nbody v2"
+
+
+def test_a_write_by_one_client_invalidates_reads_cached_through_another(monkeypatch):
+    """Several pages each hold their own client — the cache is shared
+    on purpose, so a write through one can't leave another stale."""
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    monkeypatch.setattr(github_client.requests, "put", lambda *a, **kw: _fake_response(200))
+    reader, writer = _cached_client(), _cached_client()
+    assert reader.get_file_content("templates/C/intro_A.txt") == b"Subject: v1\n\nbody v1"
+    fake.head = SHA_B
+    fake.files_by_sha[SHA_B] = {"templates/C/intro_A.txt": b"Subject: v2\n\nbody v2"}
+    writer.create_file("templates/C/intro_A.txt", b"x", "edit")
+    assert reader.get_file_content("templates/C/intro_A.txt") == b"Subject: v2\n\nbody v2"
+
+
+def test_a_failed_write_still_invalidates_the_cache(monkeypatch):
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    monkeypatch.setattr(github_client.requests, "put", lambda *a, **kw: _fake_response(500, text="boom"))
+    client = _cached_client()
+    client.get_file_content("templates/C/intro_A.txt")
+    with pytest.raises(GitHubActionsError):
+        client.create_file("templates/C/intro_A.txt", b"x", "edit")
+    assert github_client._READ_ENTRIES == {} and github_client._HEAD_SHAS == {}
+
+
+def test_head_lookup_failure_falls_back_to_a_plain_direct_read(monkeypatch):
+    """A failed lookup must never make anything worse than before the
+    cache existed — just the old, direct read of main, uncached."""
+    fake = _FakeGitHub()
+    fake.head_fails = True
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    client = _cached_client()
+    assert client.get_file_content("templates/C/intro_A.txt") == b"Subject: v1\n\nbody v1"
+    assert fake.content_calls()[0][2] == "main"
+    client.get_file_content("templates/C/intro_A.txt")
+    assert len(fake.content_calls()) == 2  # nothing got cached on the failure path
+
+
+def test_a_garbage_head_response_is_treated_as_a_failed_lookup(monkeypatch):
+    fake = _FakeGitHub()
+    fake.head_text_override = "not-a-sha"
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    client = _cached_client()
+    assert client.get_file_content("templates/C/intro_A.txt") == b"Subject: v1\n\nbody v1"
+    assert fake.content_calls()[0][2] == "main"
+
+
+def test_cached_directory_listings_are_copies_callers_cannot_poison(monkeypatch):
+    fake = _FakeGitHub()
+    fake.files_by_sha[SHA_A] = {"templates/C/intro_A.txt": b"x", "templates/C/intro_B.txt": b"y"}
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    client = _cached_client()
+    client.list_directory_files("templates/C")            # miss — populates the cache
+    from_cache = client.list_directory_files("templates/C")  # hit — this one CAME FROM the cache
+    from_cache.append("INJECTED.txt")                      # a caller mutating what it was handed
+    third = client.list_directory_files("templates/C")
+    assert third == ["intro_A.txt", "intro_B.txt"]         # the cached copy must be untouched
+    assert len(fake.content_calls()) == 1
+
+
+def test_an_explicit_non_main_ref_always_bypasses_the_cache(monkeypatch):
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    client = _cached_client()
+    client.get_file_content("templates/C/intro_A.txt", ref=SHA_A)
+    client.get_file_content("templates/C/intro_A.txt", ref=SHA_A)
+    assert len(fake.content_calls()) == 2
+    assert fake.head_calls() == []
+
+
+def test_get_file_sha_is_never_cached_because_writes_depend_on_it_being_fresh(monkeypatch):
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    client = _cached_client()
+    client.get_file_sha("templates/C/intro_A.txt")
+    client.get_file_sha("templates/C/intro_A.txt")
+    assert len(fake.content_calls()) == 2
+
+
+def test_warm_file_cache_makes_later_individual_reads_free(monkeypatch):
+    fake = _FakeGitHub()
+    paths = [f"templates/C/intro_{v}.txt" for v in "ABCD"]
+    fake.files_by_sha[SHA_A] = {p: f"Subject: {p}\n\nb".encode() for p in paths}
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    client = _cached_client()
+    client.warm_file_cache(paths)
+    assert len(fake.content_calls()) == 4
+    before = len(fake.content_calls())
+    for p in paths:
+        client.get_file_content(p)
+    assert len(fake.content_calls()) == before  # all served from cache
+
+
+def test_warm_file_cache_is_a_no_op_when_caching_is_off_and_never_raises(monkeypatch):
+    fake = _FakeGitHub()
+    monkeypatch.setattr(github_client.requests, "get", fake.get)
+    _client().warm_file_cache(["templates/C/intro_A.txt"])
+    assert fake.calls == []
+    # A path that doesn't exist must be swallowed, not raised.
+    _cached_client().warm_file_cache(["templates/C/does_not_exist.txt"])
