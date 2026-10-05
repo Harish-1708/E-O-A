@@ -12,7 +12,8 @@ Everything else (column names, record shapes) intentionally matches
 outreach.py's own get_all_leads/get_all_responses/etc. exactly, so the
 dashboard math functions imported from outreach.py work unmodified.
 """
-from typing import Dict, List
+import threading
+from typing import Callable, Dict, List
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -29,6 +30,10 @@ class ReadOnlySheetsConnector:
                  _spreadsheet=None):
         """Pass _spreadsheet directly (a gspread-like Spreadsheet object) in
         tests to skip real Google auth entirely."""
+        # Worksheet objects by tab title, so each tab is looked up at most
+        # once instead of before every single read — see _ws.
+        self._worksheet_cache: Dict[str, object] = {}
+        self._worksheet_cache_lock = threading.Lock()
         if _spreadsheet is not None:
             self._spreadsheet = _spreadsheet
             return
@@ -40,18 +45,61 @@ class ReadOnlySheetsConnector:
         client = gspread.authorize(creds)
         self._spreadsheet = client.open_by_key(sheet_id)
 
-    def _ws(self, title: str):
+    def _ws(self, title: str, refresh: bool = False):
+        """The worksheet for `title`, looked up from Google at most once
+        and then reused.
+
+        The real reason this exists: in the gspread version this app
+        runs, Spreadsheet.worksheet(title) silently makes its OWN full
+        API request (fetching the whole spreadsheet's metadata) every
+        single time it's called, before any data is read — so every tab
+        read cost two Google requests, all running one after another,
+        and a page loading several campaigns made dozens. A Worksheet
+        object read this way is safe to keep: reads go through one
+        values request keyed by the tab's TITLE and never consult any
+        cached sheet properties, so there's no stale state in it that
+        could produce wrong data.
+
+        refresh=True forces a fresh lookup — used by _read after a read
+        fails, so a tab that was deleted or renamed behaves exactly as
+        it always did (the same "doesn't exist yet" error) instead of
+        failing on a stale cached object."""
+        if not refresh:
+            with self._worksheet_cache_lock:
+                cached = self._worksheet_cache.get(title)
+            if cached is not None:
+                return cached
         try:
-            return self._spreadsheet.worksheet(title)
+            ws = self._spreadsheet.worksheet(title)
         except gspread.exceptions.WorksheetNotFound:
+            with self._worksheet_cache_lock:
+                self._worksheet_cache.pop(title, None)
             raise ReadOnlySheetsError(
                 f"Tab '{title}' doesn't exist yet. It's created automatically the first "
                 "time Preview, Send, or Check Replies actually runs for this campaign — "
                 "run one of those first."
             )
+        with self._worksheet_cache_lock:
+            self._worksheet_cache[title] = ws
+        return ws
+
+    def _read(self, title: str, reader: Callable[[object], object]):
+        """reader(worksheet), retried exactly once with a freshly looked-up
+        worksheet if the first attempt fails because the tab no longer
+        exists as cached (Google answers 400/404 for a range on a tab
+        that was deleted or renamed). Any other failure — notably a 429
+        quota error, where an immediate retry would only add load —
+        propagates untouched, as it always did."""
+        try:
+            return reader(self._ws(title))
+        except gspread.exceptions.APIError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status not in (400, 404):
+                raise
+        return reader(self._ws(title, refresh=True))
 
     def get_all_leads(self, master_tab: str) -> List[Dict]:
-        records = self._ws(master_tab).get_all_records()
+        records = self._read(master_tab, lambda ws: ws.get_all_records())
         leads = []
         for i, record in enumerate(records, start=2):  # row 1 is header
             record["_row"] = i
@@ -59,13 +107,13 @@ class ReadOnlySheetsConnector:
         return leads
 
     def get_all_responses(self, responses_tab: str) -> List[Dict]:
-        return self._ws(responses_tab).get_all_records()
+        return self._read(responses_tab, lambda ws: ws.get_all_records())
 
     def get_all_send_log(self, send_log_tab: str) -> List[Dict]:
-        return self._ws(send_log_tab).get_all_records()
+        return self._read(send_log_tab, lambda ws: ws.get_all_records())
 
     def get_all_error_log(self, error_log_tab: str) -> List[Dict]:
-        return self._ws(error_log_tab).get_all_records()
+        return self._read(error_log_tab, lambda ws: ws.get_all_records())
 
     def get_header(self, tab_name: str) -> List[str]:
         """The tab's actual header row — used to discover custom trailing
@@ -73,7 +121,7 @@ class ReadOnlySheetsConnector:
         Sheet but aren't part of outreach.MASTER_COLUMNS, so the Data
         tab's column-mapping UI can offer them as valid targets without
         guessing."""
-        return self._ws(tab_name).row_values(1)
+        return self._read(tab_name, lambda ws: ws.row_values(1))
 
     def get_account_health(self, tab_name: str = "Email Accounts Health") -> List[Dict]:
         """The shared (not per-campaign) account connectivity snapshot
@@ -83,6 +131,6 @@ class ReadOnlySheetsConnector:
         the Streamlit side, so a brand new deployment shouldn't show an
         error here before the periodic workflow has ever run once."""
         try:
-            return self._ws(tab_name).get_all_records()
+            return self._read(tab_name, lambda ws: ws.get_all_records())
         except ReadOnlySheetsError:
             return []
