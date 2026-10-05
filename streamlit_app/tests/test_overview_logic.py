@@ -65,3 +65,53 @@ def test_build_all_campaigns_overview_empty_list_returns_empty():
     rows, errors = build_all_campaigns_overview([], lambda name: (None, [], [], []))
     assert rows == []
     assert errors == []
+
+
+# ---------- max_workers: concurrent Sheet reads without changing any output ----------
+
+import threading
+
+
+def _overview_fetch(fixture_cfg, fail_for=()):
+    def fetch(name):
+        if name in fail_for:
+            raise RuntimeError(f"{name}: tab doesn't exist yet")
+        return fixture_cfg, _leads(), [], []
+    return fetch
+
+
+def test_parallel_overview_matches_sequential_exactly_and_keeps_order(fixture_repo):
+    cfg = get_campaign_cfg(FIXTURE_CAMPAIGN)
+    names = ["One", "Two", "Three"]
+    sequential = build_all_campaigns_overview(names, _overview_fetch(cfg), max_workers=1)
+    parallel = build_all_campaigns_overview(names, _overview_fetch(cfg), max_workers=6)
+    assert parallel == sequential
+    assert len(parallel[0]) == 3
+
+
+def test_parallel_overview_one_failing_campaign_is_isolated(fixture_repo):
+    cfg = get_campaign_cfg(FIXTURE_CAMPAIGN)
+    rows, errors = build_all_campaigns_overview(
+        ["Good1", "Bad", "Good2"], _overview_fetch(cfg, fail_for={"Bad"}), max_workers=3)
+    assert len(rows) == 2
+    assert errors == [("Bad", "Bad: tab doesn't exist yet")]
+
+
+def test_parallel_overview_campaigns_are_really_read_at_the_same_time(fixture_repo):
+    cfg = get_campaign_cfg(FIXTURE_CAMPAIGN)
+    barrier = threading.Barrier(3, timeout=5)
+    def fetch(name):
+        barrier.wait()
+        return cfg, _leads(), [], []
+    rows, errors = build_all_campaigns_overview(["A", "B", "C"], fetch, max_workers=6)
+    assert errors == [] and len(rows) == 3
+
+
+def test_default_overview_behavior_is_still_strictly_sequential(fixture_repo):
+    cfg = get_campaign_cfg(FIXTURE_CAMPAIGN)
+    barrier = threading.Barrier(2, timeout=0.3)
+    def fetch(name):
+        barrier.wait()
+        return cfg, _leads(), [], []
+    _rows, errors = build_all_campaigns_overview(["A", "B"], fetch)  # max_workers omitted
+    assert len(errors) == 2
