@@ -74,3 +74,14 @@ def fixture_repo(monkeypatch):
     monkeypatch.setattr(config, "EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH",
                          os.path.join(FIXTURE_REPO, "config", "email_account_slots.yaml"))
     return FIXTURE_REPO
+
+
+@pytest.fixture(autouse=True)
+def _reset_github_read_cache():
+    """github_client's SHA-keyed read cache is module-level state shared
+    by every client; without resetting it, one test's cached reads could
+    leak into the next and make results depend on test order."""
+    import github_client
+    github_client._invalidate_read_cache()
+    yield
+    github_client._invalidate_read_cache()
