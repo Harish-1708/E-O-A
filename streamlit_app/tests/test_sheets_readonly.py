@@ -124,3 +124,132 @@ def test_get_account_health_respects_custom_tab_name():
     connector = ReadOnlySheetsConnector(_spreadsheet=FakeSpreadsheet({"Custom Tab Name": ws}))
     records = connector.get_account_health(tab_name="Custom Tab Name")
     assert len(records) == 1
+
+
+# ---------- worksheet lookup caching (a lookup used to cost a full extra Google request per read) ----------
+
+class CountingSpreadsheet(FakeSpreadsheet):
+    """Counts worksheet() calls — in real gspread each one is its own
+    full API request, made before any data is read."""
+
+    def __init__(self, worksheets):
+        super().__init__(worksheets)
+        self.lookup_calls = []
+
+    def worksheet(self, title):
+        self.lookup_calls.append(title)
+        return super().worksheet(title)
+
+
+def _api_error(status):
+    from unittest.mock import MagicMock
+    resp = MagicMock()
+    resp.status_code = status
+    resp.text = "boom"
+    resp.json.return_value = {"error": {"code": status, "message": "boom", "status": "X"}}
+    return gspread.exceptions.APIError(resp)
+
+
+def test_repeated_reads_of_the_same_tab_look_it_up_only_once():
+    """The actual reported slowness: every read re-fetched the whole
+    spreadsheet's metadata first, doubling every page's Google requests."""
+    ss = CountingSpreadsheet({"Master": FakeWorksheet([{"Email": "a@abc.com"}])})
+    connector = ReadOnlySheetsConnector(_spreadsheet=ss)
+    for _ in range(5):
+        connector.get_all_leads("Master")
+    assert ss.lookup_calls == ["Master"]
+
+
+def test_different_read_methods_on_the_same_tab_share_one_lookup():
+    ss = CountingSpreadsheet({"Master": FakeWorksheet([{"Email": "a@abc.com"}])})
+    connector = ReadOnlySheetsConnector(_spreadsheet=ss)
+    connector.get_all_leads("Master")
+    connector.get_header("Master")
+    assert ss.lookup_calls == ["Master"]
+
+
+def test_each_distinct_tab_is_looked_up_once_each():
+    ss = CountingSpreadsheet({"A": FakeWorksheet([{"x": 1}]), "B": FakeWorksheet([{"x": 2}])})
+    connector = ReadOnlySheetsConnector(_spreadsheet=ss)
+    connector.get_all_responses("A"); connector.get_all_responses("B")
+    connector.get_all_responses("A"); connector.get_all_responses("B")
+    assert sorted(ss.lookup_calls) == ["A", "B"]
+
+
+def test_cached_reads_still_return_fresh_data_every_time():
+    """Only the LOOKUP is cached — never the data. A row added to the
+    tab between two reads must show up in the second one."""
+    ws = FakeWorksheet([{"Email": "a@abc.com"}])
+    connector = ReadOnlySheetsConnector(_spreadsheet=CountingSpreadsheet({"Master": ws}))
+    assert len(connector.get_all_leads("Master")) == 1
+    ws._records.append({"Email": "b@abc.com"})
+    assert len(connector.get_all_leads("Master")) == 2
+
+
+def test_a_missing_tab_still_raises_the_same_friendly_error_and_is_never_cached():
+    ss = CountingSpreadsheet({})
+    connector = ReadOnlySheetsConnector(_spreadsheet=ss)
+    with pytest.raises(ReadOnlySheetsError, match="doesn't exist yet"):
+        connector.get_all_leads("Master")
+    # The tab gets created later (first Send/Preview run) — the very next
+    # read must find it, not keep reporting "doesn't exist" from a cache.
+    ss._worksheets["Master"] = FakeWorksheet([{"Email": "a@abc.com"}])
+    assert connector.get_all_leads("Master")[0]["Email"] == "a@abc.com"
+
+
+def test_a_tab_deleted_after_being_cached_gives_the_same_friendly_error_not_a_raw_api_error():
+    class DeletedTabWorksheet(FakeWorksheet):
+        def get_all_records(self):
+            raise _api_error(400)  # Google's answer for a range on a tab that no longer exists
+    ss = CountingSpreadsheet({"Master": FakeWorksheet([{"Email": "a@abc.com"}])})
+    connector = ReadOnlySheetsConnector(_spreadsheet=ss)
+    connector.get_all_leads("Master")                       # populates the cache
+    ss._worksheets["Master"] = DeletedTabWorksheet([])      # same cached object now reads as deleted...
+    connector._worksheet_cache["Master"] = ss._worksheets["Master"]
+    del ss._worksheets["Master"]                            # ...and a fresh lookup finds nothing
+    with pytest.raises(ReadOnlySheetsError, match="doesn't exist yet"):
+        connector.get_all_leads("Master")
+    assert "Master" not in connector._worksheet_cache
+
+
+def test_a_tab_replaced_after_being_cached_is_picked_up_by_one_retry():
+    class StaleWorksheet(FakeWorksheet):
+        def get_all_records(self):
+            raise _api_error(400)
+    ss = CountingSpreadsheet({"Master": FakeWorksheet([{"Email": "old@abc.com"}])})
+    connector = ReadOnlySheetsConnector(_spreadsheet=ss)
+    connector.get_all_leads("Master")
+    connector._worksheet_cache["Master"] = StaleWorksheet([])   # the cached object has gone stale
+    ss._worksheets["Master"] = FakeWorksheet([{"Email": "new@abc.com"}])
+    assert connector.get_all_leads("Master")[0]["Email"] == "new@abc.com"
+    assert ss.lookup_calls == ["Master", "Master"]  # exactly one refresh
+
+
+def test_a_quota_error_is_not_retried_and_propagates_untouched():
+    """A 429 means "too many requests" — an immediate retry would only
+    add load. It must surface exactly as it always did."""
+    class QuotaWorksheet(FakeWorksheet):
+        def get_all_records(self):
+            raise _api_error(429)
+    ss = CountingSpreadsheet({"Master": QuotaWorksheet([])})
+    connector = ReadOnlySheetsConnector(_spreadsheet=ss)
+    with pytest.raises(gspread.exceptions.APIError):
+        connector.get_all_leads("Master")
+    assert ss.lookup_calls == ["Master"]  # no refresh attempted
+
+
+def test_concurrent_reads_through_one_connector_are_safe():
+    import threading
+    ss = CountingSpreadsheet({"Master": FakeWorksheet([{"Email": "a@abc.com"}])})
+    connector = ReadOnlySheetsConnector(_spreadsheet=ss)
+    results, errors = [], []
+    def read():
+        try:
+            results.append(connector.get_all_leads("Master")[0]["Email"])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+    threads = [threading.Thread(target=read) for _ in range(12)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert errors == [] and results == ["a@abc.com"] * 12
+    assert len(ss.lookup_calls) <= 12  # racing first lookups are fine; it never grows per read afterward
