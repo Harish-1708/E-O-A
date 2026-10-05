@@ -55,7 +55,7 @@ def _get_connector() -> ReadOnlySheetsConnector:
 @st.cache_resource(show_spinner=False)
 def _get_github_client() -> GitHubClient:
     gh = st.secrets["github"]
-    return GitHubClient(token=gh["token"], owner=gh["owner"], repo=gh["repo"])
+    return GitHubClient(token=gh["token"], owner=gh["owner"], repo=gh["repo"], cache_reads=True)
 
 
 def _safe_github_client():
