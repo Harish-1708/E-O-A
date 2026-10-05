@@ -79,7 +79,7 @@ if not login_gate():
 @st.cache_resource(show_spinner=False)
 def _get_github_client() -> GitHubClient:
     gh = st.secrets["github"]
-    return GitHubClient(token=gh["token"], owner=gh["owner"], repo=gh["repo"])
+    return GitHubClient(token=gh["token"], owner=gh["owner"], repo=gh["repo"], cache_reads=True)
 
 
 def _safe_github_client():
@@ -809,6 +809,15 @@ def _render_sequences_tab(campaign_cfg, leads):
     except Exception as exc:  # noqa: BLE001
         st.error(f"Couldn't read templates for '{campaign_name}': {exc}")
         return
+
+    # Pre-load every template file in parallel so the per-variant reads
+    # further down (unchanged, one at a time) find them already cached,
+    # instead of each costing its own sequential round trip. Best-effort
+    # and a no-op when caching is off — see GitHubClient.warm_file_cache.
+    client.warm_file_cache([
+        f"templates/{campaign_name}/{s['template_prefix']}_{v}.txt"
+        for s in stages for v in existing_variants
+    ])
 
     sample_lead = leads[0] if leads else {}
 
