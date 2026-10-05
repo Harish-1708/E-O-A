@@ -12,12 +12,48 @@ Token scope needed:
   can and can't do)
 """
 import base64
-from typing import Dict, List, Optional
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Dict, List, Optional
 
 import requests
 
 GITHUB_API = "https://api.github.com"
 DEFAULT_TIMEOUT = 20
+
+# ---------------------------------------------------------------------------
+# Optional, SHA-keyed read cache (opt-in per client via cache_reads=True).
+#
+# Every live read this app makes asks GitHub for "main" — a moving target —
+# so nothing about it could safely be cached, and a single campaign page
+# load (which re-runs on every click) made dozens of sequential API calls.
+# The cache below is safe specifically because it is keyed by COMMIT SHA:
+# the contents of a file at a given commit can never change, so an entry
+# can never be stale for that commit, and a new commit simply has a new
+# SHA that misses the cache and reads fresh. Staleness is therefore
+# bounded only by how recently the head SHA itself was looked up
+# (_HEAD_SHA_TTL_SECONDS — a few seconds), never by how old a cached file
+# is — and every write this app makes through GitHubClient invalidates the
+# whole thing immediately, so the app never shows its OWN changes late.
+#
+# Module-level (not per-instance) on purpose: several pages each hold
+# their own client, and a write through one must invalidate reads cached
+# through another.
+# ---------------------------------------------------------------------------
+_HEAD_SHA_TTL_SECONDS = 3.0
+_READ_CACHE_LOCK = threading.Lock()
+_HEAD_SHAS: Dict[tuple, tuple] = {}   # (owner, repo, branch) -> (sha, fetched_at_monotonic)
+_READ_ENTRIES: Dict[tuple, object] = {}  # (owner, repo, sha, kind, path) -> value
+
+
+def _invalidate_read_cache() -> None:
+    """Drops every cached head SHA and every cached read. Called after
+    any write this app makes, so a change it just committed is always
+    visible on the very next read, never hidden behind a cached head."""
+    with _READ_CACHE_LOCK:
+        _HEAD_SHAS.clear()
+        _READ_ENTRIES.clear()
 
 
 class GitHubActionsError(Exception):
@@ -25,10 +61,15 @@ class GitHubActionsError(Exception):
 
 
 class GitHubClient:
-    def __init__(self, token: str, owner: str, repo: str, timeout: int = DEFAULT_TIMEOUT):
+    def __init__(self, token: str, owner: str, repo: str, timeout: int = DEFAULT_TIMEOUT,
+                 cache_reads: bool = False):
         self.owner = owner
         self.repo = repo
         self.timeout = timeout
+        # Off by default — every existing caller and test behaves exactly
+        # as before. See the module-level comment above for what turning
+        # this on does and why it can't serve stale data.
+        self.cache_reads = cache_reads
         self._headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -83,6 +124,85 @@ class GitHubClient:
     # remaining safety net is the in-app confirmation the Streamlit page
     # requires before calling this — see campaign_builder.py.
 
+    # ---------- SHA-keyed read cache helpers (see module comment) ----------
+
+    def _head_sha(self, branch: str = "main") -> Optional[str]:
+        """The current head commit SHA of `branch`, from one very small
+        request (the sha media type returns just the SHA text), reused
+        for a few seconds so a single page render's many reads share one
+        lookup. Returns None on ANY failure — callers then fall back to
+        the exact same direct read this client always did, so a failed
+        lookup can make things no slower or less correct than before."""
+        key = (self.owner, self.repo, branch)
+        now = time.monotonic()
+        with _READ_CACHE_LOCK:
+            cached = _HEAD_SHAS.get(key)
+            if cached and now - cached[1] < _HEAD_SHA_TTL_SECONDS:
+                return cached[0]
+        try:
+            resp = requests.get(
+                f"{GITHUB_API}/repos/{self.owner}/{self.repo}/commits/{branch}",
+                headers={**self._headers, "Accept": "application/vnd.github.sha"},
+                timeout=self.timeout,
+            )
+        except requests.RequestException:
+            return None
+        sha = (resp.text or "").strip() if resp.status_code == 200 else ""
+        if len(sha) != 40 or any(ch not in "0123456789abcdef" for ch in sha):
+            return None
+        with _READ_CACHE_LOCK:
+            previous = _HEAD_SHAS.get(key)
+            if previous and previous[0] != sha:
+                # A new commit landed — everything cached at the old one
+                # is now just dead weight, so drop it rather than let
+                # entries accumulate forever.
+                for entry_key in [k for k in _READ_ENTRIES if k[0] == self.owner and k[1] == self.repo
+                                  and k[2] == previous[0]]:
+                    del _READ_ENTRIES[entry_key]
+            _HEAD_SHAS[key] = (sha, now)
+        return sha
+
+    def _cached_read(self, kind: str, path: str, ref: str, fetch: Callable[[str], object]):
+        """Runs fetch(ref_to_use), through the SHA-keyed cache when this
+        client has caching on and the read is for the moving "main"
+        ref; otherwise exactly fetch(ref), unchanged. The actual fetch
+        is made AT the resolved SHA, not "main", so what's cached under
+        a SHA is always genuinely that commit's content even if main
+        moves between the lookup and the read."""
+        if not self.cache_reads or ref != "main":
+            return fetch(ref)
+        sha = self._head_sha(ref)
+        if sha is None:
+            return fetch(ref)
+        key = (self.owner, self.repo, sha, kind, path)
+        with _READ_CACHE_LOCK:
+            if key in _READ_ENTRIES:
+                value = _READ_ENTRIES[key]
+                return list(value) if isinstance(value, list) else value
+        value = fetch(sha)
+        with _READ_CACHE_LOCK:
+            _READ_ENTRIES[key] = list(value) if isinstance(value, list) else value
+        return value
+
+    def warm_file_cache(self, paths: List[str], ref: str = "main", max_workers: int = 8) -> None:
+        """Reads several files at once so the page code that then reads
+        them one by one (unchanged) finds every one already cached. A
+        no-op when caching is off, and never raises — a path that fails
+        to read here just gets read (and fails, or not) normally later."""
+        if not self.cache_reads or ref != "main" or not paths:
+            return
+        if self._head_sha(ref) is None:
+            return
+
+        def _one(path: str) -> None:
+            try:
+                self.get_file_content(path, ref)
+            except Exception:  # noqa: BLE001 - warming is best-effort only
+                pass
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            list(pool.map(_one, paths))
+
     def get_file_sha(self, path: str, ref: str = "main") -> Optional[str]:
         """Current SHA of the file at `path` on `ref`, or None if it
         doesn't exist yet. GitHub's contents API requires this SHA when
@@ -109,14 +229,17 @@ class GitHubClient:
         campaign_builder.build_campaign_duplication_files, which refuses
         to proceed on an empty result rather than silently creating a
         duplicate with nothing in it)."""
-        url = f"{GITHUB_API}/repos/{self.owner}/{self.repo}/contents/{path}"
-        resp = requests.get(url, headers=self._headers, params={"ref": ref}, timeout=self.timeout)
-        if resp.status_code == 404:
-            return []
-        if resp.status_code != 200:
-            raise GitHubActionsError(f"Failed to list '{path}': {resp.status_code} {resp.text[:300]}")
-        entries = resp.json()
-        return [entry["name"] for entry in entries if entry.get("type") == "file"]
+        def _fetch(read_ref: str) -> List[str]:
+            url = f"{GITHUB_API}/repos/{self.owner}/{self.repo}/contents/{path}"
+            resp = requests.get(url, headers=self._headers, params={"ref": read_ref}, timeout=self.timeout)
+            if resp.status_code == 404:
+                return []
+            if resp.status_code != 200:
+                raise GitHubActionsError(f"Failed to list '{path}': {resp.status_code} {resp.text[:300]}")
+            entries = resp.json()
+            return [entry["name"] for entry in entries if entry.get("type") == "file"]
+
+        return self._cached_read("files", path, ref, _fetch)
 
     def list_subdirectories(self, path: str, ref: str = "main") -> List[str]:
         """Directory names directly inside a repo directory, read fresh
@@ -131,24 +254,30 @@ class GitHubClient:
 
         Returns [] if the directory doesn't exist, matching
         list_directory_files' contract."""
-        url = f"{GITHUB_API}/repos/{self.owner}/{self.repo}/contents/{path}"
-        resp = requests.get(url, headers=self._headers, params={"ref": ref}, timeout=self.timeout)
-        if resp.status_code == 404:
-            return []
-        if resp.status_code != 200:
-            raise GitHubActionsError(f"Failed to list '{path}': {resp.status_code} {resp.text[:300]}")
-        entries = resp.json()
-        return [entry["name"] for entry in entries if entry.get("type") == "dir"]
+        def _fetch(read_ref: str) -> List[str]:
+            url = f"{GITHUB_API}/repos/{self.owner}/{self.repo}/contents/{path}"
+            resp = requests.get(url, headers=self._headers, params={"ref": read_ref}, timeout=self.timeout)
+            if resp.status_code == 404:
+                return []
+            if resp.status_code != 200:
+                raise GitHubActionsError(f"Failed to list '{path}': {resp.status_code} {resp.text[:300]}")
+            entries = resp.json()
+            return [entry["name"] for entry in entries if entry.get("type") == "dir"]
+
+        return self._cached_read("dirs", path, ref, _fetch)
 
     def get_file_content(self, path: str, ref: str = "main") -> bytes:
         """Raw bytes of one file's current content, read fresh from
         GitHub — same "authoritative, never the local checkout" reason
         as list_directory_files. Raises if the file doesn't exist."""
-        url = f"{GITHUB_API}/repos/{self.owner}/{self.repo}/contents/{path}"
-        resp = requests.get(url, headers=self._headers, params={"ref": ref}, timeout=self.timeout)
-        if resp.status_code != 200:
-            raise GitHubActionsError(f"Failed to read '{path}': {resp.status_code} {resp.text[:300]}")
-        return base64.b64decode(resp.json()["content"])
+        def _fetch(read_ref: str) -> bytes:
+            url = f"{GITHUB_API}/repos/{self.owner}/{self.repo}/contents/{path}"
+            resp = requests.get(url, headers=self._headers, params={"ref": read_ref}, timeout=self.timeout)
+            if resp.status_code != 200:
+                raise GitHubActionsError(f"Failed to read '{path}': {resp.status_code} {resp.text[:300]}")
+            return base64.b64decode(resp.json()["content"])
+
+        return self._cached_read("content", path, ref, _fetch)
 
     def create_file(self, path: str, content_bytes: bytes, message: str, branch: str = "main") -> None:
         """Creates OR updates a file at `path`. Every write in this app —
@@ -164,7 +293,14 @@ class GitHubClient:
         }
         if existing_sha:
             payload["sha"] = existing_sha
-        resp = requests.put(url, json=payload, headers=self._headers, timeout=self.timeout)
+        try:
+            resp = requests.put(url, json=payload, headers=self._headers, timeout=self.timeout)
+        finally:
+            # Invalidated whether or not the write succeeded — a failed
+            # attempt may still have partially landed, and the one thing
+            # that must never happen is a later read serving a cached
+            # copy from before this call.
+            _invalidate_read_cache()
         if resp.status_code not in (200, 201):
             raise GitHubActionsError(f"Failed to create/update file '{path}': {resp.status_code} {resp.text[:300]}")
 
@@ -179,7 +315,10 @@ class GitHubClient:
             return
         url = f"{GITHUB_API}/repos/{self.owner}/{self.repo}/contents/{path}"
         payload = {"message": message, "sha": existing_sha, "branch": branch}
-        resp = requests.delete(url, json=payload, headers=self._headers, timeout=self.timeout)
+        try:
+            resp = requests.delete(url, json=payload, headers=self._headers, timeout=self.timeout)
+        finally:
+            _invalidate_read_cache()
         if resp.status_code not in (200, 204):
             raise GitHubActionsError(f"Failed to delete file '{path}': {resp.status_code} {resp.text[:300]}")
 
