@@ -34,8 +34,10 @@ def _get_connector() -> ReadOnlySheetsConnector:
     return ReadOnlySheetsConnector(service_account_info=sa_info, sheet_id=sheet_id)
 
 
-def _fetch_campaign_data(campaign_name: str):
-    connector = _get_connector()
+def _fetch_campaign_data(campaign_name: str, connector=None):
+    # connector is passed in when this runs on a worker thread (see
+    # _load_overview) so no worker thread calls into Streamlit's cache.
+    connector = connector or _get_connector()
     campaign_cfg = get_campaign_cfg(campaign_name)
     leads = connector.get_all_leads(campaign_cfg["master_tab"])
     responses = connector.get_all_responses(campaign_cfg["responses_tab"])
@@ -47,7 +49,21 @@ def _fetch_campaign_data(campaign_name: str):
 def _load_overview():
     # Local listing — see note in dashboard.py; read-only page.
     campaign_names = list_campaigns()
-    return build_all_campaigns_overview(campaign_names, _fetch_campaign_data)
+    # Resolved on the script thread, then handed to the worker threads
+    # that read each campaign's Sheets at the same time. If it can't be
+    # built, every campaign reports that error individually — what
+    # happened before, when each fetch built it itself.
+    try:
+        connector, connector_error = _get_connector(), None
+    except Exception as exc:  # noqa: BLE001
+        connector, connector_error = None, exc
+
+    def _fetch(name):
+        if connector_error is not None:
+            raise connector_error
+        return _fetch_campaign_data(name, connector=connector)
+
+    return build_all_campaigns_overview(campaign_names, _fetch, max_workers=6)
 
 
 if st.button("🔄 Refresh now"):
