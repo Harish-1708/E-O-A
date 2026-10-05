@@ -10,6 +10,7 @@ from auth import login_gate  # noqa: E402
 from config import REPO_ROOT, SETTINGS_PATH  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector, ReadOnlySheetsError  # noqa: E402
 from preview_logic import get_campaign_cfg, list_campaigns  # noqa: E402
+from parallel_logic import run_in_parallel  # noqa: E402
 
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -47,10 +48,19 @@ def _sheet_id_from_settings() -> str:
 def _load_campaign_data(campaign_name: str):
     connector = _get_connector()
     campaign_cfg = get_campaign_cfg(campaign_name)
-    leads = connector.get_all_leads(campaign_cfg["master_tab"])
-    responses = connector.get_all_responses(campaign_cfg["responses_tab"])
-    send_log = connector.get_all_send_log(campaign_cfg["send_log_tab"])
-    error_log = connector.get_all_error_log(campaign_cfg["error_log_tab"])
+    # Four independent tabs — read at the same time, not one after
+    # another. The first failure in the original order is re-raised, the
+    # same error the old sequential code would have surfaced.
+    results = run_in_parallel([
+        lambda: connector.get_all_leads(campaign_cfg["master_tab"]),
+        lambda: connector.get_all_responses(campaign_cfg["responses_tab"]),
+        lambda: connector.get_all_send_log(campaign_cfg["send_log_tab"]),
+        lambda: connector.get_all_error_log(campaign_cfg["error_log_tab"]),
+    ], max_workers=4)
+    for ok, value in results:
+        if not ok:
+            raise value
+    leads, responses, send_log, error_log = (value for _, value in results)
     return campaign_cfg, leads, responses, send_log, error_log
 
 
