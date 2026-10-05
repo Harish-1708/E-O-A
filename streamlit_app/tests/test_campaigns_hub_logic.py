@@ -183,3 +183,97 @@ def test_filter_by_search_empty_query_returns_all():
 def test_filter_by_search_no_match_returns_empty():
     rows = [{"name": "A"}]
     assert filter_campaigns_by_search(rows, "zzz") == []
+
+
+# ---------- max_workers: concurrent Sheet fetches without changing any output ----------
+
+import threading
+
+
+def _hub(names, cfgs, fetch, max_workers=1):
+    return build_campaigns_hub(names, lambda n: cfgs[n], fetch, max_workers=max_workers)
+
+
+def test_parallel_hub_keeps_rows_in_campaign_order_even_when_a_later_fetch_finishes_first():
+    """Rows must come out in campaign_names order, never completion
+    order — the Campaigns list's visible ordering depends on it."""
+    import time
+    names = ["First", "Second", "Third"]
+    cfgs = {n: _cfg(n) for n in names}
+    def fetch(cfg):
+        if cfg["_campaign_name"] == "First":
+            time.sleep(0.2)   # the first campaign is the SLOWEST
+        return [_lead()], [], []
+    rows, deleted, errors = _hub(names, cfgs, fetch, max_workers=3)
+    assert [r["name"] for r in rows] == names
+    assert errors == []
+
+
+def test_parallel_hub_matches_the_sequential_result_exactly():
+    names = ["A", "B", "C", "D"]
+    cfgs = {"A": _cfg("A"), "B": _cfg("B", "draft"), "C": _cfg("C"), "D": _cfg("D", "deleted")}
+    fetch = lambda cfg: ([_lead(), _lead(Email="b@abc.com")], [], [])  # noqa: E731
+    sequential = _hub(names, cfgs, fetch, max_workers=1)
+    parallel = _hub(names, cfgs, fetch, max_workers=6)
+    assert parallel == sequential
+
+
+def test_parallel_hub_never_fetches_sheets_for_draft_or_deleted_campaigns():
+    names = ["Active", "Draft", "Deleted"]
+    cfgs = {"Active": _cfg("Active"), "Draft": _cfg("Draft", "draft"), "Deleted": _cfg("Deleted", "deleted")}
+    fetched = []
+    def fetch(cfg):
+        fetched.append(cfg["_campaign_name"])
+        return [], [], []
+    _hub(names, cfgs, fetch, max_workers=6)
+    assert fetched == ["Active"]
+
+
+def test_parallel_hub_one_failing_campaign_is_isolated_and_the_rest_still_load():
+    names = ["Good1", "Broken", "Good2"]
+    cfgs = {n: _cfg(n) for n in names}
+    def fetch(cfg):
+        if cfg["_campaign_name"] == "Broken":
+            raise RuntimeError("Tab doesn't exist yet")
+        return [_lead()], [], []
+    rows, _deleted, errors = _hub(names, cfgs, fetch, max_workers=3)
+    assert [r["name"] for r in rows] == ["Good1", "Good2"]
+    assert errors == [("Broken", "Tab doesn't exist yet")]
+
+
+def test_parallel_hub_a_campaign_whose_config_cannot_load_is_reported_not_fetched():
+    def get_cfg(name):
+        if name == "NoConfig":
+            raise FileNotFoundError("no templates folder")
+        return _cfg(name)
+    fetched = []
+    rows, _d, errors = build_campaigns_hub(
+        ["Ok", "NoConfig"], get_cfg, lambda cfg: (fetched.append(cfg["_campaign_name"]) or ([_lead()], [], [])),
+        max_workers=4)
+    assert [r["name"] for r in rows] == ["Ok"]
+    assert errors == [("NoConfig", "no templates folder")] and fetched == ["Ok"]
+
+
+def test_parallel_hub_campaigns_are_really_fetched_at_the_same_time():
+    """The actual reported slowness: N campaigns used to cost N full
+    Sheet loads in a row. Three fetches that each wait for the other
+    two can only all complete if they genuinely overlap."""
+    barrier = threading.Barrier(3, timeout=5)
+    names = ["A", "B", "C"]
+    cfgs = {n: _cfg(n) for n in names}
+    def fetch(cfg):
+        barrier.wait()
+        return [_lead()], [], []
+    rows, _d, errors = _hub(names, cfgs, fetch, max_workers=6)
+    assert errors == [] and len(rows) == 3
+
+
+def test_default_hub_behavior_is_still_strictly_sequential():
+    barrier = threading.Barrier(2, timeout=0.3)
+    names = ["A", "B"]
+    cfgs = {n: _cfg(n) for n in names}
+    def fetch(cfg):
+        barrier.wait()
+        return [_lead()], [], []
+    _rows, _d, errors = build_campaigns_hub(names, lambda n: cfgs[n], fetch)  # max_workers omitted
+    assert len(errors) == 2  # one-at-a-time, so neither could ever meet the other
