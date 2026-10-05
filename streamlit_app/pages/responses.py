@@ -10,7 +10,8 @@ from page_state import mark_active_page  # noqa: E402
 from auth import login_gate, current_user  # noqa: E402
 from config import REPO_ROOT, WORKFLOW_CHECK_REPLIES, WORKFLOW_SEND_REPLY, WORKFLOW_MARK_RESPONSES_READ  # noqa: E402
 from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
-from sheets_readonly import ReadOnlySheetsConnector, ReadOnlySheetsError  # noqa: E402
+from parallel_logic import run_in_parallel  # noqa: E402
+from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from send_logic import build_check_replies_inputs  # noqa: E402
 from responses_hub_logic import (  # noqa: E402
@@ -71,14 +72,28 @@ def _load_all_responses(campaign_names):
     connector = _get_connector()
     all_responses = []
     unavailable = []
+    # Each campaign's tab is an independent Google round trip — read them
+    # at the same time instead of one campaign after another. Configs are
+    # loaded here first (local, instant); any campaign whose config can't
+    # be loaded is unavailable exactly as before, and results are still
+    # assembled in campaign_names order.
+    configs = {}
     for name in campaign_names:
         try:
-            campaign_cfg = get_campaign_cfg(name)
-            raw = connector.get_all_responses(campaign_cfg["responses_tab"])
-            all_responses.extend(tag_responses_with_campaign(raw, name))
-        except ReadOnlySheetsError:
-            unavailable.append(name)
+            configs[name] = get_campaign_cfg(name)
         except Exception:  # noqa: BLE001 - a campaign missing config shouldn't sink the whole page
+            unavailable.append(name)
+    readable = [n for n in campaign_names if n in configs]
+    results = run_in_parallel(
+        [(lambda n=n: connector.get_all_responses(configs[n]["responses_tab"])) for n in readable])
+    result_by_name = dict(zip(readable, results))
+    for name in campaign_names:
+        if name not in configs:
+            continue
+        ok, value = result_by_name[name]
+        if ok:
+            all_responses.extend(tag_responses_with_campaign(value, name))
+        else:  # ReadOnlySheetsError or anything else — this campaign alone is unavailable
             unavailable.append(name)
     return all_responses, unavailable
 
@@ -90,13 +105,18 @@ def _load_all_leads(campaign_names):
     just across every campaign here instead of one."""
     connector = _get_connector()
     leads_by_campaign = {}
+    configs = {}
     for name in campaign_names:
         try:
-            campaign_cfg = get_campaign_cfg(name)
-            leads_by_campaign[name] = connector.get_all_leads(campaign_cfg["master_tab"])
+            configs[name] = get_campaign_cfg(name)
         except Exception:  # noqa: BLE001
             leads_by_campaign[name] = []
-    return leads_by_campaign
+    readable = [n for n in campaign_names if n in configs]
+    results = run_in_parallel(
+        [(lambda n=n: connector.get_all_leads(configs[n]["master_tab"])) for n in readable])
+    for name, (ok, value) in zip(readable, results):
+        leads_by_campaign[name] = value if ok else []
+    return {name: leads_by_campaign[name] for name in campaign_names}
 
 
 try:
