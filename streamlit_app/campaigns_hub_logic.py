@@ -12,6 +12,7 @@ if _REPO_ROOT not in sys.path:
 
 import outreach  # noqa: E402
 from campaign_status_logic import compute_campaign_status, status_label  # noqa: E402
+from parallel_logic import run_in_parallel  # noqa: E402
 
 
 def compute_last_activity_timestamp(send_log: List[Dict]) -> str:
@@ -67,6 +68,7 @@ def build_campaigns_hub(
     campaign_names: List[str],
     get_campaign_cfg: Callable[[str], Dict],
     fetch_sheet_data: Callable[[Dict], Tuple[List[Dict], List[Dict], List[Dict]]],
+    max_workers: int = 1,
 ) -> Tuple[List[Dict], List[Dict], List[Tuple[str, str]]]:
     """get_campaign_cfg(name) -> campaign_cfg (local, no network — never
     fails for a missing Sheet tab, only a missing templates folder).
@@ -80,31 +82,58 @@ def build_campaigns_hub(
     non-draft, non-deleted campaign whose Sheet data couldn't be read
     (e.g. a race right after creation, before its tabs exist yet) — those
     are skipped from rows rather than failing the page.
+
+    max_workers > 1 fetches the active campaigns' sheet data at the same
+    time instead of one campaign after another — the whole point, since
+    each fetch is several slow Google round trips and a list of N
+    campaigns used to cost N times that in a row. Output is unchanged:
+    rows still come out in campaign_names order (never completion
+    order), drafts and deleted campaigns are still never fetched, and a
+    campaign whose fetch fails is still skipped into `errors` alone
+    without affecting any other. The default of 1 is exactly the old
+    sequential behavior.
     """
     rows: List[Dict] = []
     deleted_rows: List[Dict] = []
     errors: List[Tuple[str, str]] = []
+
+    # Pass 1 — classify every campaign, in order, without touching any
+    # Sheet. Only "active" entries need slow Sheet data.
+    entries: List[Tuple] = []
     for name in campaign_names:
         try:
             campaign_cfg = get_campaign_cfg(name)
         except Exception as exc:  # noqa: BLE001
-            errors.append((name, str(exc)))
+            entries.append(("error", name, str(exc)))
             continue
-
         raw_status = campaign_cfg.get("status") or "active"
         if raw_status == "deleted":
-            deleted_rows.append(build_deleted_campaign_row(campaign_cfg))
-            continue
-        if raw_status == "draft":
-            rows.append(build_draft_campaign_row(campaign_cfg))
-            continue
+            entries.append(("deleted", name, campaign_cfg))
+        elif raw_status == "draft":
+            entries.append(("draft", name, campaign_cfg))
+        else:
+            entries.append(("active", name, campaign_cfg))
 
-        try:
-            leads, responses, send_log = fetch_sheet_data(campaign_cfg)
-        except Exception as exc:  # noqa: BLE001
-            errors.append((name, str(exc)))
-            continue
-        rows.append(build_campaign_hub_row(campaign_cfg, leads, responses, send_log))
+    # Pass 2 — fetch every active campaign's Sheet data together.
+    active_entries = [e for e in entries if e[0] == "active"]
+    fetched = run_in_parallel([(lambda cfg=e[2]: fetch_sheet_data(cfg)) for e in active_entries], max_workers)
+    fetch_result_by_name = {e[1]: result for e, result in zip(active_entries, fetched)}
+
+    # Pass 3 — assemble in the original order.
+    for kind, name, payload in entries:
+        if kind == "error":
+            errors.append((name, payload))
+        elif kind == "deleted":
+            deleted_rows.append(build_deleted_campaign_row(payload))
+        elif kind == "draft":
+            rows.append(build_draft_campaign_row(payload))
+        else:
+            ok, value = fetch_result_by_name[name]
+            if not ok:
+                errors.append((name, str(value)))
+                continue
+            leads, responses, send_log = value
+            rows.append(build_campaign_hub_row(payload, leads, responses, send_log))
     return rows, deleted_rows, errors
 
 
