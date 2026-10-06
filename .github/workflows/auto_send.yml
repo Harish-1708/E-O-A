@@ -15,12 +15,22 @@ name: Auto Send
 on:
   workflow_dispatch: {}
   schedule:
-    # Every 30 minutes, by request — tighter catches a window opening
-    # sooner; looser uses fewer Actions minutes. GitHub Actions cron has
-    # its own scheduling delay (typically a few minutes under load), so
-    # treat "every 30" as "within roughly 30-40 minutes of the window
-    # opening", not to-the-minute precision.
-    - cron: "5,35 * * * *"
+    # Every 30 minutes, but ONLY between 5:00 PM and 5:00 AM IST — the
+    # window that covers US business hours. GitHub cron is always UTC
+    # and IST is UTC+5:30, so 5 PM-5 AM IST is 11:30-23:30 UTC (the
+    # window never crosses midnight in UTC). The three lines below
+    # make 24 runs a day, from 5:13 PM to 4:43 AM IST, and nothing
+    # outside that. Manual "Run workflow" / in-app buttons are unaffected.
+    # Auto Send runs at IST :13 and :43.
+    # Minutes are staggered and kept off :00/:30 on purpose: GitHub's
+    # own docs say scheduled runs are delayed (and some dropped) under
+    # load, worst at the start of the hour. Cycle order each half hour,
+    # IST: Check Replies :07, Auto Send :13, Sync Asana :19, Dashboard
+    # :25 (UGC Tracker Sync :04, separate lock) — replies first, so a
+    # reply is recorded before the next send decides who is due.
+    - cron: "43 11 * * *"        # 5:13 PM IST
+    - cron: "13,43 12-22 * * *"  # every half hour after that
+    - cron: "13 23 * * *"             # 4:43 AM IST (last run of the night)
 
 # Two overlapping runs must never happen here specifically: send_batch
 # reads "how many sent today" ONCE at the start of a run to compute the
@@ -35,7 +45,13 @@ on:
 # only stopped a workflow overlapping ITSELF — two DIFFERENT workflows could
 # still hit Sheets simultaneously and blow the quota, which is what produced
 # the intermittent 429s. A shared group serialises them instead.
-# cancel-in-progress: false so a queued run still happens, just not at once.
+# cancel-in-progress: false means a run that is already going is NEVER killed.
+# The limit that comes with it: GitHub keeps at most ONE run waiting per group.
+# If another run queues while one is already waiting, the older waiting run is
+# dropped (it shows as "Cancelled" — not an error) and the newer one takes its
+# place. That is safe here because every scheduled run is a full sweep of what
+# is due right now: a dropped run's work is picked up by the next one, and two
+# runs still never overlap.
 concurrency:
   group: google-sheets-api
   cancel-in-progress: false
@@ -43,6 +59,12 @@ concurrency:
 jobs:
   auto-send:
     runs-on: ubuntu-latest
+    # Deliberately long, NOT short: sending is paced with 3-7 minute pauses
+    # between rounds, so a big batch legitimately runs for an hour or more.
+    # Force-stopping a run mid-round could leave an email sent but not yet
+    # recorded, and the next run would send it again. 360 is GitHub's own
+    # maximum, stated explicitly so it's visible here, not hidden.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
