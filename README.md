@@ -1,638 +1,233 @@
-# Outreach Control Panel (Streamlit)
+# Email Outreach Automation
 
-A control surface on top of `outreach.py` + GitHub Actions — not a second
-sending system. Preview runs the exact same code in-app (read-only, no
-SMTP credentials involved). Send, Check Replies, and the Backfill tool
-trigger the real GitHub Actions workflows, with the same typed-`SEND`
-confirmation gate Send always had. New Campaign / Add Stage commits
-directly — no GitHub trip, no pull request to approve.
+Sends personalised cold-email sequences to creators, notices when they reply, stops the sequence for anyone who answers, keeps Asana and the tracking sheets in step, and gives the team a web control panel to run all of it.
 
-## What each page does
+> **Last checked against the code: 6 October 2026.** If something here disagrees with the code or with what you see on screen, the code is right — please fix the README. Volatile details (test counts, campaign names) are deliberately left out so this stays true longer.
 
-- **🗂️ Campaigns** — the everyday view, and the only page you need for
-  day-to-day work. Every phase (A–H) is now real: search, create a
-  campaign inline, "⧉ Duplicate" any campaign under a brand new name
-  (every template file copied as a genuinely independent file — editing
-  or deleting one on the duplicate can never touch the original; leads,
-  sends, and replies are never copied, and the duplicate always starts
-  as a Draft regardless of the source's status), see status at a
-  glance, Launch/Pause/Resume, a "🗑️ Deleted Campaigns" section to
-  Restore anything temporarily removed, and inside a campaign:
-  Analytics, Data, Sequences (+ Delete Variant, Delete Stage, and
-  ThreadSubject Maintenance — all near the bottom), Schedule, Settings
-  (+ Asana Sync, + Send, only available while the campaign is actually
-  Running, and a Danger Zone with two tiers — Temporarily Remove, which
-  just hides it and can be undone, and Permanently Delete, which can't
-  be — neither ever touches the Sheet, only templates), and Responses
-  (+ Check Replies at the top, reply directly from the app — Cc/Bcc,
-  file attachments, correctly threaded into the same conversation).
-  Each action lives with the thing it's most related to, rather than
-  grouped into its own separate tab — Send sits with sending config,
-  Check Replies sits with the replies themselves. A single-lead
-  template preview already lives inline in Sequences, so there's no
-  separate Preview tab. A fuller quoted-thread view and scheduling a
-  reply for later are deliberately not built yet — see below.
-- **💬 Responses** — every reply across every campaign in one place, not
-  scoped to one campaign like the tab above. Filter by status — sales
-  intent (Interested / Not Interested / Lead-Needs-Follow-up / Unclear,
-  optional, see Known limitations) alongside the system's own mechanical
-  classifications (Genuine Reply, Auto-Reply, Out of Office, Bounce
-  Hard/Soft) — by campaign, or to unread only — plus free-text search.
-  Click "💬 View full conversation" on any response for the real thread:
-  every stage actually sent, re-rendered live from your templates, and
-  every reply, in order. Reply directly from here too. Unread tracking
-  persists (an explicit "Mark as read" + batched sync) — see Known
-  limitations for exactly how.
-- **📈 Overview** — every campaign at a glance: total leads, pending,
-  sent, replies, reply rate.
-- **📊 Dashboard** — read-only deep-dive into one campaign. Uses a
-  Viewer-scoped Google credential and the exact same
-  `outreach.compute_campaign_dashboard` math the Sheet's own Dashboard tab
-  uses, so the two always agree.
-- **📧 Email Accounts** — which sender accounts are configured, how much
-  each has sent today across all campaigns, and their live connection
-  status (🟢 Connected / 🔴 Disconnected with a reason / ⚪ Unknown before
-  the first check). **Add, edit, and remove accounts directly here** —
-  no more editing `EMAIL_ACCOUNTS_JSON` by hand. Supports Gmail (address +
-  app password) and any custom SMTP/IMAP provider (Hostinger, etc. — its
-  own host, port, and username, plus a separate IMAP password if the
-  provider issues one). Manage one account at a time, or add many at
-  once with a CSV upload (an in-app example shows the exact columns).
-  A password only ever passes through this app's memory for the instant
-  it takes to encrypt and send it to GitHub; it's never stored, logged,
-  or displayed. See "Email account management" below for the one-time
-  setup this needs.
+## Contents
 
-## One-time setup
+- [The 60-second picture](#the-60-second-picture)
+- [What happens to a lead](#what-happens-to-a-lead)
+- [Repository layout](#repository-layout)
+- [The pieces](#the-pieces) — [engine](#the-engine-outreachpy) · [workflows](#github-actions-workflows) · [control panel](#the-streamlit-control-panel) · [Google Sheets](#google-sheets) · [templates](#templates) · [Asana](#asana) · [Creator Tracker](#creator-tracker-sheet) · [UGC tracker](#ugc-video-edits-tracker)
+- [Schedule: when things run](#schedule-when-things-run)
+- [Configuration reference](#configuration-reference)
+- [Setup from scratch](#setup-from-scratch)
+- [Day-to-day use](#day-to-day-use)
+- [Safety design](#safety-design)
+- [Privacy and security](#privacy-and-security)
+- [Testing and CI](#testing-and-ci)
+- [Troubleshooting](#troubleshooting)
+- [Known limitations](#known-limitations)
 
-### 1. Deploy
+---
 
-Push this repo (must stay **private**) to GitHub, then on
-[Streamlit Community Cloud](https://share.streamlit.io):
-- New app → pick this repo → main file path: `streamlit_app/app.py`
-- Deployed from a private repo, the app is private by default. Add
-  colleagues as viewers under the app's "Share" menu if you also want
-  GitHub/Google-identity gating in addition to the username/password login
-  below (defense in depth, not required).
+## The 60-second picture
 
-Free tier note: one private app, ~1GB memory, sleeps after 12h idle (next
-visitor waits ~30s). Fine for occasional internal use; upgrade if that
-becomes annoying.
-
-### 2. Create a read-only Google service account
-
-Separate from the one `GOOGLE_SERVICE_ACCOUNT_JSON` (GitHub Actions) uses.
-
-1. In Google Cloud Console, create a second service account (e.g.
-   `streamlit-readonly`).
-2. Download its JSON key.
-3. Open your Google Sheet → Share → paste that service account's
-   `client_email` → give it **Viewer** access (not Editor).
-
-### 3. Create a fine-grained GitHub token
-
-Settings → Developer settings → Fine-grained personal access tokens → New
-token, scoped to **only this repository**:
-- `Actions`: Read and write (Send, Check Replies, Backfill, status
-  polling)
-- `Contents`: Read and write (New Campaign / Add Stage, template edits,
-  campaign settings — all commit files directly)
-- `Secrets`: Read and write — **only if you want the Email Accounts
-  page's Add/Edit/Remove buttons to work.** This is a materially bigger
-  grant than the other two: it lets the token overwrite or delete your
-  sending accounts' credentials (it still can't ever read an existing
-  one back — GitHub Secrets don't support that for any token). Skip this
-  scope entirely if you'd rather keep managing `EMAIL_ACCOUNTS_JSON` by
-  hand; everything else in this app works fine without it.
-
-No `Pull requests` permission needed — campaign creation no longer opens
-one.
-
-### 4. Set up login credentials
-
-For each colleague:
-
-```bash
-python streamlit_app/tools/generate_password_hash.py
+```
+                     ┌───────────────────────────┐
+   You ─────────────►│  Streamlit control panel  │   reads Google Sheets (read-only account)
+                     │  streamlit_app/           │   never holds an email password
+                     └─────────────┬─────────────┘
+                commits files, or  │
+                starts a workflow  ▼
+                     ┌───────────────────────────┐
+                     │  GitHub Actions           │   scheduled + on demand
+                     │  .github/workflows/       │   holds every real credential
+                     └─────────────┬─────────────┘
+                                   ▼
+                     ┌───────────────────────────┐        ┌──────────────────────────────┐
+                     │  outreach.py  (engine)    │───────►│ Google Sheets (source of     │
+                     └───┬───────────────┬───────┘        │ truth, one set per campaign) │
+                         │               │                └──────────────────────────────┘
+        email accounts   ▼               ▼   Asana · Creator Tracker sheet · Claude API (optional)
+        SMTP send / IMAP read
 ```
 
-Paste the printed `[auth_users.<name>]` block into Streamlit Secrets. No
-plaintext password is ever stored — only a salted PBKDF2 hash.
-
-### 5. Fill in Streamlit Secrets
-
-Copy `secrets.toml.example`, fill in real values, paste into the app's
-Secrets settings in Streamlit Community Cloud (never commit a real
-secrets.toml to the repo). Includes an optional `[email_accounts_directory]`
-block (names + addresses only, no passwords) — only needed for accounts
-still managed the legacy way; accounts added through the app's own Add
-Account button need nothing added here.
-
-### 6. Email account management (optional)
-
-Skip this entirely if you're fine managing `EMAIL_ACCOUNTS_JSON` by hand
-— everything else in this app works without it. To use the Add/Edit/
-Remove buttons on the Email Accounts page instead:
-
-1. Add the `Secrets: Read and write` scope to your GitHub token (see
-   step 3 above) — this is the only setup step; nothing extra goes in
-   Streamlit Secrets or `EMAIL_ACCOUNTS_JSON`.
-2. That's it. Each account you add through the app lives in its own
-   `EMAIL_ACCOUNT_SLOT_N` secret (10 slots by default —
-   `outreach.EMAIL_ACCOUNT_SLOT_COUNT`), tracked by name/slot/address in
-   a small, non-secret file the app commits itself
-   (`config/email_account_slots.yaml`) — never a password in that file,
-   only in the actual encrypted secret.
-3. **Migrating an existing account** already in `EMAIL_ACCOUNTS_JSON`:
-   use Add Account with the *same name*. A slot always takes precedence
-   over a same-named `EMAIL_ACCOUNTS_JSON` entry, so this adopts it under
-   the app's management immediately — remove the old entry from
-   `EMAIL_ACCOUNTS_JSON` whenever you're ready; there's no rush, and
-   nothing breaks either way in the meantime.
-
-## Status controls were the third consumer missed
-
-Settings and Schedule were fixed to read the live override. Status
-controls — the actual Pause/Resume buttons — were not, because the live
-overlay was being applied separately inside each tab function instead of
-once at the source. Pausing committed correctly to GitHub every time;
-the page just never looked at GitHub to check.
-
-Consolidated to a SINGLE overlay point, applied once immediately after
-`campaign_cfg` is first built on the campaign detail page, before the
-Draft banner, before Status controls, before any tab. Every future
-consumer of `campaign_cfg` on this page inherits live data automatically
-— there is no longer a second or third place this can be forgotten.
-Reproduced the exact bug at the full-page level (stale disk showing
-"active", live GitHub showing "paused") and confirmed the Status
-controls now show Paused / offer Resume correctly; sabotage-verified by
-removing the overlay and confirming the test fails.
-
-## Git push races on payload cleanup — reproduced and fixed
-
-`remove_leads.yml`, `import_leads.yml`, `mark_responses_read.yml`, and
-`send_reply.yml` each delete their processed payload file with a bare
-`git commit && git push` as their final step. With enough scheduled and
-manual workflows writing to the same `main` branch, two pushes landing
-close together is routine, not a hypothetical — reproduced by literally
-simulating two concurrent clones racing to push, which reliably produces
-the exact `[rejected] ... (fetch first)` error.
-
-The underlying data operation (the actual removal, import, mark-read, or
-reply-send) always happens in an earlier step against the Sheet directly
-and is unaffected by this — only the payload-file cleanup was ever at
-risk of being lost, leaving a processed file behind and the job
-reporting a false failure.
-
-Fixed with a retry-with-rebase loop (5 attempts, jittered), verified
-against a real simulated git race, not just reasoned about: attempt 1
-reproduces the exact rejection, rebase succeeds, attempt 2 pushes
-cleanly, with no data lost and the concurrent commit preserved in
-history. If all 5 attempts are exhausted, the step logs a `::warning::`
-annotation and exits 0 — a cleanup step failing must never make the job
-report failure when the actual work already succeeded.
-
-## Asana network timeouts weren't retried at all
-
-Reported as intermittent Asana sync failures (~1 in 10 runs), always a
-different lead each time: `HTTPSConnectionPool(...): Read timed out
-(read timeout=20)`. The existing `_call_with_asana_retries` already
-retried a 429 or 5xx correctly — but only by checking `resp.status_code`
-on whatever the request function returned. A read timeout or connection
-error never returns anything at all; `requests` raises
-`requests.exceptions.Timeout` / `ConnectionError` directly, so that
-check was never reached. One transient ~20-second hiccup — ordinary
-network jitter across the 150+ Asana calls a single sync run makes
-(several calls per lead × 30-40 leads) — permanently failed that one
-lead for the entire run with zero retry, even though the identical
-request almost always succeeds moments later.
-
-Fixed: the wrapper now also catches `Timeout` and `ConnectionError` and
-retries them on the same exponential backoff as a 429/5xx. A genuine
-HTTP error (403, 404, a real auth problem) is still never retried or
-confused with a network failure — verified with a dedicated test that
-asserts `time.sleep` is never even called for a definitive 404.
-Sabotage-verified against the exact reported stack trace: reverting the
-fix reproduces `requests.exceptions.ReadTimeout: simulated` propagating
-straight through, uncaught, matching the production log precisely.
-
-## "auto-send only processes one campaign" — not hardcoded, but silent
-
-Reported as: manual auto-send only ever touches one campaign, while the
-scheduled run "works fine". Traced the actual code: `cmd_auto_send_all`
-correctly loops over every campaign from `discover_campaign_names()` —
-nothing is hardcoded, and both the scheduled and manual triggers call
-the exact same `auto-send-all` command with zero campaign-specific
-inputs (confirmed directly in `auto_send.yml`).
-
-The real cause: a campaign whose status isn't `active` (Paused, Draft,
-Deleted) is correctly excluded, but the `continue` that excluded it
-printed nothing at all — it simply vanished from the log with zero
-explanation. A second campaign sitting in Paused looked indistinguishable
-from a second campaign never being considered in the first place. Now
-prints `<name>: skipped (status is '<status>', not active).` for each
-excluded campaign, so it's immediately clear whether a campaign is
-missing from a run because of its own status or because of a real bug.
-
-This surfaced the fourth missed consumer of the same live-status problem
-below: the resumed campaign didn't actually resolve as expected in this
-specific case, because the campaigns HUB LIST — not the detail page —
-was showing it as still paused.
-
-## The campaigns hub list — a fourth missed consumer
-
-Settings, Schedule, and the detail page's own Status controls were all
-fixed to read the live GitHub override. The campaigns HUB LIST (the "all
-campaigns" overview) was not — `_load_hub_rows` built every row straight
-from `get_campaign_cfg`, which is local-disk only. Resuming a campaign
-showed correctly on that campaign's own detail page; the hub row for the
-exact same campaign kept showing "⏸ Paused" indefinitely, regardless of
-how long you waited, because nothing about waiting re-reads the
-repository.
-
-Fixed with a new `_get_campaign_cfg_live()` — the same overlay used
-everywhere else — injected into `build_campaigns_hub` via its existing
-dependency-injection parameter, so `build_campaigns_hub` itself needed
-no changes at all. Reproduced the exact bug at the full-page level
-(stale disk saying "paused", live GitHub saying "active") and confirmed
-the hub row now shows "🟢 Running"; sabotage-verified by reverting to
-the disk-only getter and confirming the test fails.
-
-## Manual Asana edits during Negotiating no longer get overwritten
-
-Reported directly: once a lead reaches Negotiating, manually setting a
-field directly in Asana (a Rights Expiration date being the concrete
-example) kept reverting back to the Sheet's older value on the next
-sync, every single run. Custom-field sync previously always pushed
-every matching Sheet column onto the Asana task on every update — no
-distinction between a field that had never been set and one a human had
-just deliberately typed in.
-
-Once a task's LIVE section is Negotiating or later (Negotiating, Rights
-Secured, Declined / Dead), custom-field sync switches to fill-blanks-
-only: a field the task already has ANY value for — from an earlier
-sync, or typed directly into Asana by a human — is left completely
-untouched, never overwritten and never cleared. A field that's
-genuinely still blank still gets filled in normally, so new information
-(from the Sheet) can keep flowing in — only an existing value is ever
-protected. Earlier stages (Sourced, Outreach Sent, Follow-up) are
-unaffected and keep syncing exactly as before.
-
-Deliberately efficient: the extra live lookup needed to know which
-fields are currently blank only happens for a lead whose task is
-already in Negotiating+, so this doesn't add an API call for the
-majority of leads on any given run that haven't reached that stage yet.
-
-Reproduced the exact reported case end-to-end (a task live in
-Negotiating with a human-set Rights Expiration, syncing a lead whose
-Sheet has an older value for that same field) and confirmed the human's
-value survives the sync untouched; sabotage-verified by disabling the
-protection and confirming the test fails with the field overwritten.
-
-## Follow-up cadence and count — extended from 4 to 10, on request
-
-Requested: a uniform 2-day cadence between stages (intro Monday ->
-followup1 Wednesday), and at least 10 follow-ups instead of 4.
-
-**The cap was governed by exactly one list.** `CANONICAL_STAGE_ORDER`
-(now `intro` + `followup1`..`followup10`, 11 stages total) is the single
-source every other piece derives its own notion of "how many stages
-exist" from — `discover_stages_and_variants`, `stage_field_names`, the
-Sequences tab's Add Stage flow, and the Send tab's stage picker in both
-`campaigns.py` and `controls.py`. Extending that one list was the actual
-fix for most of this.
-
-**One real, separate bug found and fixed during the audit:**
-`_most_recent_send_at` hardcoded exactly Intro + FollowUp1-4 — any lead
-that progressed further would get a stale, too-early "most recent send"
-timestamp back, since the true latest lived in a FollowUp5+ field this
-never checked. That silently undermined the chronological sanity check
-used to judge whether an inbound message could plausibly be a genuine
-reply. Now derives from `CANONICAL_STAGE_ORDER`'s own length, so it
-can't go stale again if the cap changes further. Sabotage-verified: the
-old hardcoded version returns Aug 15 (FollowUp4) instead of the true
-Sep 1 (FollowUp7) in the regression test built for this.
-
-**Two hardcoded, duplicate copies of the stage list** existed in
-`controls.py` and `campaigns.py` (a second `STAGES = [...]` completely
-independent of `CANONICAL_STAGE_ORDER`) — these fed the Send tab's stage
-picker and would have silently capped manual sends at FollowUp4 forever
-regardless of how many stages a campaign actually had. Both now
-reference `outreach.CANONICAL_STAGE_ORDER` directly.
-
-**Cadence:** `config/settings.yaml`'s `stage_wait_days` now sets every
-follow-up (1 through 10) to `2`, replacing the old escalating 3/4/5/5
-pattern. Verified against `_compute_next_eligible_at` directly: the wait
-is measured from each stage's own send timestamp, not from intro, so a
-uniform `2` produces exactly the requested Mon -> Wed -> Fri -> Sun...
-cadence regardless of how many stages a lead has already been through.
-
-**Test fixtures — deliberately NOT all bumped to 11 stages.** The
-shared `Sample_Campaign` fixture stays at 5 stages, because a large
-number of existing tests are legitimately coupled to that specific
-count for reasons unrelated to this change (checking exact expander
-counts, "campaign already has all N stages" text, etc. — see
-`conftest.py`'s own note on why fixtures exist at all). Bumping the
-shared fixture to 11 would have meant updating every one of those for
-no benefit. Instead, the one test that genuinely needs to verify the
-real, current cap (`test_get_next_stage_for_fully_built_campaign_returns_none`)
-now builds its own dynamically-sized fixture from
-`CANONICAL_STAGE_ORDER` directly in `tmp_path`, so it can never itself
-go stale the way the production "already has all 5 stages" text did.
-
-Two other tests broke as a direct, expected consequence of the fixture
-no longer being "fully built" at 5 stages once the cap became 11 — both
-were fixed at their actual root cause, not patched around:
-- A locked-variants test was catching a legitimately-enabled Subject
-  input from the now-visible "Add a follow-up stage" section, because
-  its filter matched on visible label text ("Subject...") rather than
-  the distinct widget key each section actually uses. Now filters by
-  key.
-- A "maxed out" test conflated two unrelated concepts — Add Variant
-  being at its letter limit (A-D, unrelated to this change) and the
-  old, now-dynamic "already has all 5 stages" text (Add Stage). Split
-  apart; the test now only checks what its name actually claims to.
-
-## The Asana task-name / "Product" corruption — same root cause, different visible symptom
-
-Reported separately: some task titles show a timestamp where the
-product name should be ("DudeRobe | @keepupwiththeroses –
-2026-09-17 15:27:03" instead of "... – SheRobe"), and it reverts back
-every sync.
-
-Checked Asana directly on the affected task, then the real Sheet cell
-by cell. Confirmed: the task's "Product" custom field itself reads
-correctly ("DudeRobe") — the corruption is in the SHEET's own
-`Product` column, which now holds a raw timestamp instead of the
-product name, and `build_asana_task_name` reads that column directly
-for the task title.
-
-This is the SAME root cause as the AsanaTaskGID/Status column-position
-bug, landing on a different column purely because of this particular
-sheet's own header layout. `Kelson_Creators_Licensing_03SEP`'s header
-has 11 custom columns (Ad Ready, Client, Content Score, Creator, Last
-Contact Date, Name, Product, Refunnel Link, Rights Expiration, Usage
-Rights, Video File) inserted between `AsanaTaskGID` and
-`ManualAsanaStage`. The old `update_lead_statuses` bug computed
-`MASTER_COLUMNS.index("LastActionAt") + 1` — a position that, on THIS
-sheet's real layout, lands exactly on `Product`. Every time
-`LastActionAt` got stamped (i.e. on ordinary sends and reply checks),
-its timestamp was written into `Product` instead — confirmed by
-scanning the sheet directly: 6 rows currently hold a raw timestamp in
-`Product`, matching exactly the 6 creators whose Asana task titles were
-reported or independently found to be broken this way
-(`@keepupwiththeroses`, `@mrshanrn`, `@mallikachhetri13`,
-`@sarahpup785`, `@itsmarianv`, `@jameerae10`).
-
-**This does not need a further code fix** — the column-position fix
-already deployed stops this from happening to any NEW write, on any
-sheet, regardless of its custom-column layout. But it can't retroactively
-repair a column's value that was already overwritten; the original
-product name for these 6 rows was never recorded anywhere else, so it
-has to be re-entered manually in the Sheet's `Product` column, after
-which the task title will correct itself on the next sync.
-
-## Re-audited for the whole bug CLASS, not just the reported column
-
-Asked directly: "confirm this won't happen again." A stronger answer
-than "the one reported spot is fixed" — re-grepped the entire codebase
-for every remaining `SOME_COLUMNS.index(...)` pattern used for a real
-sheet write. Found and fixed FOUR more, on the Responses sheet, using
-the identical latent pattern (`RESPONSES_COLUMNS.index(...)` in
-`get_logged_message_ids`, `get_logged_message_info`,
-`update_response_match`, and `mark_responses_read`) — not yet actively
-triggering a visible bug (that sheet's schema hasn't been extended
-recently the way `MASTER_COLUMNS` was), but the exact same landmine,
-waiting for the next time `RESPONSES_COLUMNS` gains an entry inserted
-before an existing one, or that sheet gets widened with its own custom
-columns. Fixed identically — each now reads its column position from
-`self.responses_ws.row_values(1)`, never the Python list's position.
-
-Confirmed zero remaining `MASTER_COLUMNS.index(...)` or
-`RESPONSES_COLUMNS.index(...)` calls anywhere in the codebase.
-Sabotage-verified two of the four new fixes directly. So: yes — this
-specific failure mode is closed everywhere it could occur, not just
-where it already had.
-
-## Confirmed the column-position fix is actually working, via real production data
-
-Follow-up report: "just updated the tool, but it keeps duplicating."
-Pulled the real Asana project and the real Sheet directly (not just
-reasoning about the code) to check.
-
-**What the data actually showed:** every lead in the newly-created
-"Kelson_Creators_Licensing_17SEP" campaign has exactly TWO Asana tasks
-— one created ~15:06-15:08 (before the column-position fix was
-deployed) and one created ~16:58-17:00 (the very first sync run after
-it). No third task exists for any of them. The Sheet itself confirms
-why: every row has the OLD task's GID sitting, exactly as predicted,
-in `FollowUp10SentAt` (position 45 — precisely `MASTER_COLUMNS`' own
-internal position for `AsanaTaskGID` before the fix), and the NEW,
-correctly-created task's GID sitting in the real `AsanaTaskGID` column.
-
-**This confirms the fix is working, not failing.** A row already
-corrupted by the old bug has a permanently blank real `AsanaTaskGID`
-column — the fix can't retroactively know a task already exists for
-that row, so exactly one more "catch-up" task gets created the first
-time it syncs post-fix. After that one catch-up, the row is finally
-correctly tracked and stops duplicating. What was reported as "it kept
-duplicating" was that one unavoidable catch-up run, not ongoing,
-continued duplication — verified directly against Asana that no third
-copy has appeared since.
-
-## Second, independent safeguard: dedup by video content, not just AsanaTaskGID
-
-Requested directly: stop duplicating based on Video File / Refunnel
-Link matching, so the tool doesn't depend on the Sheet's own
-`AsanaTaskGID` tracking never failing again for any reason, ever. Built
-this as a genuinely valuable second layer, on top of the column-fix
-above rather than instead of it.
-
-Before creating a new task for any lead, `sync_campaign_to_asana` now
-checks whether a task already exists in the project for that exact
-video — matched via `_extract_tiktok_video_id` (the same ID-extraction
-already used for tracker disambiguation, reliably shared by both a
-long-form Video File URL and a Refunnel Link even when one of the two
-is stored as TikTok's short, opaque share-link form) — falling back to
-an exact raw-string match when no ID can be extracted from either. If
-a match is found, that existing task's GID is reused and written back
-to the Sheet instead of creating another one.
-
-The existing-task index is built ONCE per sync run (not per lead), and
-skipped entirely — zero extra API calls — for any project that doesn't
-have a Video File or Refunnel Link custom field configured at all.
-Paginated, since a project can hold far more tasks than one page
-returns. When more than one existing task happens to already share a
-content key (a prior duplication incident could easily have produced
-exactly this), the oldest task wins, on the reasoning that it's more
-likely to already carry real history worth keeping.
-
-Verified end-to-end: a lead with a blank `AsanaTaskGID` whose video
-matches an existing task reuses it (no new task, `AsanaTaskGID`
-correctly written back); a lead whose video matches nothing still
-gets a real new task created normally. Sabotage-verified by disabling
-the check and confirming the reuse test fails.
-
-**Cleanup note:** this safeguard prevents new duplicates going forward.
-It does not retroactively merge or delete the duplicate tasks already
-sitting in Asana from before either fix — those still need manual
-cleanup, and the stale GID values sitting in `FollowUp10SentAt` (or
-wherever the old positional bug happened to land for a given sheet's
-own header shape) are harmless leftover data but can be cleared for
-tidiness.
-
-## CRITICAL: writes by column POSITION broke the moment MASTER_COLUMNS grew — confirmed via real Asana data
-
-Reported as: syncing Asana twice creates duplicate tasks for the same,
-single Sheet row. Checked the actual "Creator Outreach" Asana project
-directly — every task in "Sourced" was duplicated (most 2x, several
-4x), created in two tight clusters roughly 5 minutes apart, matching
-two sync runs exactly.
-
-**Root cause, confirmed by direct sabotage against the real numbers:**
-`update_lead_fields` and `update_lead_statuses` computed which column to
-write to via `MASTER_COLUMNS.index(column_name) + 1` — the column's
-POSITION in the Python list — and wrote to that exact position on the
-real Google Sheet. This only works if the real sheet's header is in the
-EXACT same order as `MASTER_COLUMNS` itself. It never reliably is:
-`_get_or_create_ws` deliberately APPENDS any missing required column to
-the END of whatever header a sheet already has — it never reorders
-existing columns to match `MASTER_COLUMNS`' internal order, specifically
-so existing data is never disturbed. So the two orders diverging isn't
-an edge case; it's the normal, expected state for any sheet that's been
-incrementally widened over time (which is every sheet that's existed
-for more than one schema change).
-
-Extending follow-ups from 4 to 10 inserted 12 new columns partway
-through the `MASTER_COLUMNS` list, before `AsanaTaskGID`, `Status`, and
-`LastActionAt` — shifting every one of their Python-list positions by
-12. `AsanaTaskGID`'s write went to (real) column 45 in one direct test
-reproduction, when the actual column sat at real position 3. This means:
-- Every Asana task creation appeared to succeed, but the new task's GID
-  never actually reached the sheet's real `AsanaTaskGID` cell — landing
-  in some unrelated column instead. Every following sync saw a blank
-  GID and created another task. For every lead. Every run.
-- `update_lead_statuses` (the soft-remove-a-lead flow) had the
-  identical bug for `Status` and `LastActionAt` — meaning a "removed"
-  lead's real Status column was never actually touched, and whatever
-  column really sat at the wrong computed position got silently
-  overwritten with "Removed" instead. Real, silent data corruption on
-  an unrelated column, not just a missed removal.
-
-**Fixed:** both methods now look up each column's position from the
-sheet's own, live header (`self.master_ws.row_values(1)`) — matching
-the "by name, never a fixed positional offset" principle
-`_get_or_create_ws` itself already documents and follows, which these
-two methods had silently never actually lived up to despite that
-principle being stated as already true for "every read/write anywhere
-in this system."
-
-**Test coverage gap that let this ship unnoticed:** neither method had
-ANY direct test before this — every existing test exercised
-`FakeSheets`' own separate, hand-written stand-in for them, never the
-real `SheetsConnector` implementation where the bug actually lived.
-Added direct tests against the real class (bypassing `__init__`, which
-needs a live connection) with a header order that deliberately diverges
-from `MASTER_COLUMNS`, matching a realistic incrementally-widened sheet.
-Sabotage-verified against the exact numbers: reverting the fix
-reproduces a write landing at column 45 instead of the real column 3.
-
-**Action needed if this has already run in production:** any Asana
-task without a corresponding `AsanaTaskGID` correctly recorded in the
-Sheet will keep generating a fresh duplicate on every sync going
-forward until this fix is deployed. Once deployed, the duplicates
-already created in Asana will not be automatically cleaned up — they
-were each a real, successful task creation from the tool's point of
-view. Manual cleanup in Asana is needed for anything already
-duplicated; new duplication should stop as soon as this ships, since
-new task GIDs will finally land in the correct real column.
-
-## MASTER_COLUMNS growth broke every existing Sheet's grid width
-
-Direct, urgent consequence of extending follow-ups from 4 to 10:
-`MASTER_COLUMNS` grew from 34 to 46 columns. Every EXISTING campaign's
-Master Sheet tab has a fixed grid width set whenever it was first
-created — the reported case was stuck at 39. Any command that connects
-to Sheets (`_connect_sheets` -> `SheetsConnector.__init__` ->
-`_get_or_create_ws`) tries to widen that tab's header to match the new,
-longer `MASTER_COLUMNS`, and Google's real API rejects a cell write
-beyond the tab's current grid width outright with a 400 error —
-`Range ('...'!AN1) exceeds grid limits. Max columns: 39` — regardless of
-how correct the header content itself is. This affected every existing
-campaign, not just the one that happened to hit it first, and could
-recur again for any future MASTER_COLUMNS growth.
-
-`ensure_master_header_includes` (used for CUSTOM columns from CSV
-imports) already resizes the grid before writing — its own docstring
-even says "this one had been sitting at 38 for a long time," meaning
-this exact failure mode had already bitten this system once before.
-`_get_or_create_ws` — used for the STANDARD MASTER_COLUMNS schema check
-on every single `SheetsConnector` construction — never got the same
-protection. Now it does: resizes the grid first, with the same
-10-column headroom pattern, whenever the required header would exceed
-the tab's current width. A tab whose grid is already wide enough
-correctly skips the resize call entirely rather than paying for one on
-every connection.
-
-Verified against the exact reported numbers, not a generic case: a
-39-column grid, `MASTER_COLUMNS` at its real, current 46-column length,
-and a fake worksheet that actually ENFORCES the grid limit and raises
-the same shape of error Google's API does (rather than the normal test
-fake, which never checked this at all and would have passed either
-way). Sabotage-verified by removing the resize: the test reproduces
-`APIError: [400]: Range exceeds grid limits. Max columns: 39` — the
-exact reported error — failing on column 40, the exact reported column.
-
-## Live reads vs the local checkout — the systemic rule
-
-This app WRITES every config change to GitHub via the API, but the code
-historically READ the same data from the local checkout. On Streamlit
-Cloud that checkout is frozen until a redeploy, so a change could be
-visibly committed on GitHub and never appear in the UI — surviving a
-refresh, cache expiry, and even a full logout/login.
-
-**The rule: anything the app writes to GitHub must be read from GitHub.**
-
-Three repo paths are written by the app, and all three now have live
-readers with a local-disk fallback:
-
-| Path | Live reader | Used by |
+Four ideas explain almost everything:
+
+1. **Google Sheets is the source of truth.** Each campaign has its own tabs. Every run reads the Sheet, decides what is due, acts, and writes the result back.
+2. **GitHub Actions does everything that needs a credential** — sending, reading inboxes, Asana. The control panel only reads, and asks Actions to act.
+3. **The control panel never holds sending credentials.** It reads Sheets with a separate *viewer-only* service account. Anything that changes data is either a file it commits to this repo or a workflow it starts.
+4. **Every scheduled run is a full sweep.** It works out what is due *right now* from the Sheet. So a run that is skipped or delayed loses nothing — the next one picks up the same work.
+
+---
+
+## What happens to a lead
+
+1. **Imported** (CSV upload in the control panel) into the campaign's Master Sheet. Imports leave `Approval` blank — see the note below.
+2. **Intro email** goes out once the campaign is *Active*, inside its sending window, and the daily limit allows.
+3. **Follow-ups** go out one after another. Each follow-up waits `wait_days_after_previous` (default **2 days**) counted from when the *previous* stage was actually sent — not from the intro.
+4. **A genuine reply or a hard bounce stops the sequence** for that lead (`Status` becomes `Stopped - Replied` / `Stopped - Bounced`). Out-of-office, auto-replies and soft bounces are logged but do **not** stop it.
+5. A person can also stop one lead by hand from **Manage a lead** (for example `Stopped - Manual` or `Stopped - Rejected`); `Paused` and `Completed` also exist as hand-set stopped statuses.
+6. After the last stage nothing further is due — the lead simply stays at `<last stage> Sent`. The engine never sets `Completed` by itself. Removing a lead is always soft (`Status = Removed`); nothing is ever hard-deleted.
+
+**A lead is eligible for a stage when** it has an email address, is not in a stopped status, has not replied, has not already been sent *this* stage (duplicate protection), and — for follow-ups — the previous stage was sent and its wait has passed. Duplicate emails within one batch are dropped.
+
+> **`Approval` does not gate sending.** It is an informational column (`Pending | Yes | No | Paused`). Some older help text in the control panel and in the *Run workflow* form still says "Approval must be Yes" — that text is out of date. Every lead meeting the rules above is eligible whatever `Approval` says.
+
+**How sending is paced.** Sending works in *rounds*: one email per distinct sender account, all at the same moment, then a random pause of `delay_min_minutes`–`delay_max_minutes` (default **3–7 minutes**) before the next round. So a batch takes as long as its rounds take — an hour or more is normal. Limits: `daily_limit` per campaign (default 100) and an optional `per_account_daily_limit`. Which account sends: the lead's own `SenderAccount` cell, else the campaign's `default_sender_account`, else the global default in `config/settings.yaml`; optionally rotated across accounts (`sender_rotation`).
+
+**What blocks a send** (checked for both scheduled and manual sends): the campaign is `paused`, `draft` or `deleted`; or it is outside its **sending window** (see [the important note on `schedule:`](#sending-window--read-this)). Preview is deliberately *not* blocked by either, so you can always review.
+
+**How replies are found.** Check Replies reads each configured inbox (read-only IMAP) and matches a message to a lead by email threading headers first, then by sender address. Only a header match, or a sender match whose subject also matches the lead's original email, is acted on; a sender-only match is logged as unverified and does **not** touch the lead. Each message is classified as `Genuine Reply`, `Auto-Reply`, `Out of Office`, `Bounce (Hard)` or `Bounce (Soft)` and logged once to the Response Sheet. If an Anthropic API key is configured, each new genuine reply also gets a one-time intent label; without a key those fields are simply blank.
+
+---
+
+## Repository layout
+
+```
+outreach.py                  the engine: all sending, reply-checking, Asana and Sheets logic, as a CLI
+ugc_tracker_sync.py          standalone: Asana "Rights Secured" -> UGC Video Edits Tracker sheet
+ugc_tracker_logic.py         pure matching/labelling logic for the UGC sync
+asana_client.py              minimal Asana API client used by the UGC sync
+requirements.txt             Python dependencies for the engine and its tests
+
+config/
+  settings.yaml              global defaults shared by every campaign (+ the shared Sheet id)
+  campaigns/<name>.yaml      OPTIONAL per-campaign overrides (status, schedule, limits, Asana ...)
+  campaigns-overrides-README.md   how overrides and stage auto-discovery work
+  email_account_slots.yaml   non-secret map of which email account sits in which secret slot
+
+templates/<campaign>/        the email templates: <stage>_<variant>.txt   (this folder IS the campaign)
+
+imports/  removals/  replies/  mark_read/
+                             short-lived "payload" files the control panel commits and workflows
+                             consume then delete (see Privacy and security)
+
+.github/workflows/           every workflow (see table below)
+streamlit_app/               the control panel (has its own README)
+tests/                       engine + workflow-schedule tests (fixtures under tests/fixtures/)
+streamlit_app/tests/         control-panel tests (fixture repo under streamlit_app/tests/fixtures/)
+```
+
+---
+
+## The pieces
+
+### The engine: `outreach.py`
+
+One file, run as `python outreach.py <command>`. Run `python outreach.py --help`, or `python outreach.py <command> --help` for arguments. Credentials come from environment variables (set by the workflows).
+
+| Command | What it does | Run by |
 |---|---|---|
-| `config/campaigns/<name>.yaml` | `load_raw_override_live()` + `merge_live_override_into_cfg()` | Settings, Schedule, Status |
-| `config/email_account_slots.yaml` | `read_slot_mapping_live()` | Email Accounts, Settings sender picker |
-| `templates/<campaign>/` | `list_campaigns_live()`, `list_directory_files()`, `get_file_content()` | Campaign list, Sequences |
+| `preview` | Shows what *would* be sent; sends nothing | `preview_batch.yml` (the control panel runs the same logic in-app) |
+| `send` | Sends one stage's batch | `send_batch.yml` |
+| `auto-send-all` | For every *Active* campaign, tries every stage that is due | `auto_send.yml` |
+| `check-replies` / `check-replies-all` | Reads inboxes, logs replies and bounces, stops sequences | `check_replies.yml` |
+| `import-leads` | Adds leads from a payload file | `import_leads.yml` |
+| `remove-leads` | Soft-removes leads | `remove_leads.yml` |
+| `set-lead-override` | Hand-sets a lead's status, Asana stage or reply status | `set_lead_override.yml` |
+| `send-reply` | Sends one manual reply from the Responses inbox | `send_reply.yml` |
+| `mark-responses-read` | Marks responses as read | `mark_responses_read.yml` |
+| `sync-asana` / `sync-asana-all` | Creates/updates Asana tasks (and the Creator Tracker sheet) | `sync_asana.yml` |
+| `check-account-health` | Tests each email account's IMAP login, writes the result to a tab | `check_account_health.yml` |
+| `dashboard` | Recomputes the dashboard tab(s) | `dashboard.yml`; also after every send and reply check |
+| `backfill-thread-subject` | One-time repair for leads already mid-sequence | `backfill_thread_subject.yml` |
 
-`config/settings.yaml` is deliberately NOT in this list — the app never
-writes it, so reading it locally cannot go stale.
+### GitHub Actions workflows
 
-Every live reader follows the same three-part contract:
-1. live GitHub content wins over a stale local copy
-2. a definitive "not there" (404) is reported as such, never silently
-   backfilled from the stale local copy — otherwise deleting something
-   would resurrect it
-3. a genuine API failure degrades to the local copy rather than
-   erroring out or showing a misleadingly empty result
+| Workflow | Triggers | Lock | Purpose |
+|---|---|---|---|
+| Auto Send | schedule + manual | `google-sheets-api` | Send whatever is due, for every Active campaign |
+| Check Replies | schedule + manual | `google-sheets-api` | Read inboxes; log replies/bounces; refresh dashboards |
+| Sync Asana + Creator Tracker | schedule + manual | `google-sheets-api` | Push lead state to Asana and the Creator Tracker sheet |
+| Update Dashboard | schedule + manual | `google-sheets-api` | Recompute dashboard tabs |
+| Check Account Health | schedule (every 2 h, around the clock) + manual | `google-sheets-api` | Test email account logins |
+| UGC Tracker Sync | schedule + manual | `ugc-tracker-sync` | Asana → UGC Video Edits Tracker sheet |
+| Send Batch | manual (typed `SEND`) | `send-batch-<campaign>` | One manual batch |
+| Preview Batch | manual | — | Preview without sending |
+| Import / Remove Leads | manual | per campaign | Consume a payload, then delete it |
+| Send Reply · Mark Responses Read · Set Lead Override · Backfill Thread Subject | manual | — | Small one-off actions |
+| CI | push + pull request | — | Runs the test suites |
 
-**Read-only pages** (`dashboard.py`, `overview.py`) have no GitHub
-client configured and intentionally keep the local listing — they never
-create or delete anything, so a new campaign simply appears there after
-the next redeploy.
+*Manual* means started from the control panel or from the Actions tab → *Run workflow*. Exact times for the scheduled ones are in [Schedule](#schedule-when-things-run).
 
-**If you add a new config file the app writes, add a live reader for it
-at the same time**, or it will reproduce this exact bug.
+### The Streamlit control panel
 
-## Scheduled runs — every 30 minutes, 5 PM to 5 AM IST only
+Full detail is in [`streamlit_app/README.md`](streamlit_app/README.md). In short, the pages are:
 
-Five workflows run on a schedule. All five now run every 30 minutes, but
-**only between 5:00 PM and 5:00 AM IST** (24 runs a day each). Outside that
-window nothing runs on its own. Manual triggers — the in-app buttons and the
-Actions tab's "Run workflow" — are unaffected and work at any hour.
+- **Campaigns** — the everyday page. A searchable list (create, open, duplicate). Inside a campaign, the Pause / Resume / Launch controls sit at the top, above tabs for **Analytics**, **Data** (upload leads, remove, *Manage a lead*), **Sequences** (edit templates, add variants/stages), **Schedule**, **Settings** (accounts, limits, Asana, Creator Tracker, Send Batch, maintenance, Danger Zone) and **Responses** (conversations, reply, mark read, *Check Replies Now*).
+- **Controls** — Preview, Send Batch, Check Replies, Backfill in one place.
+- **Responses** — one inbox across every campaign.
+- **Email Accounts** — add, edit, remove sending accounts, and see their connection status.
+- **New Campaign / Add Stage**, **Overview** (totals for every campaign), **Dashboard** (per-campaign dashboards).
 
-The window is the IST equivalent of US business hours. Every active campaign
-sends 9 AM-5 PM in New York or Chicago time, which is roughly 6:30 PM-4:30 AM
-IST, so the window comfortably contains it. The schedule only decides when a
-job *wakes up*; each campaign's own sending window (timezone + hours, checked
-inside `send_batch`) still decides whether anything is actually sent.
+### Google Sheets
+
+One spreadsheet (`shared_sheet_id` in `config/settings.yaml`). Each campaign gets these tabs, named from the campaign name unless the campaign overrides them:
+
+| Tab | Holds |
+|---|---|
+| `<name> Master Sheet` | One row per lead — the heart of the system |
+| `<name> Response Sheet` | One row per inbound message: classification, how it was matched, action taken, optional intent, read/unread |
+| `<name> Custom Log Sheet` | The send log: one row per email sent |
+| `<name> Error Log` | Failures, with type and detail |
+| `<name> Dashboard` | Computed metrics |
+
+Shared tabs: `All Campaigns Dashboard` and `Email Accounts Health`. A campaign's tabs are created automatically the first time Preview, Send or Check Replies runs for it — until then the control panel says *"Tab … doesn't exist yet."*
+
+Key Master Sheet columns (the engine locates columns by header name, so the order in the Sheet does not matter, and extra columns you add are preserved):
+
+| Column(s) | Meaning |
+|---|---|
+| `LeadID`, `Email`, `FirstName`, `LastName`, `Company`, `Campaign` | Identity |
+| `Approval` | Informational only |
+| `SenderAccount` | Optional per-lead sending account |
+| `CurrentStage`, `NextEligibleAt` | Where the lead is in the sequence |
+| `IntroSentAt`, `IntroVariant`, `FollowUp1SentAt` … `FollowUp10Variant` | When each stage was sent, and which variant |
+| `Status`, `LastActionAt`, `Error` | Current state |
+| `ReplyStatus`, `ReplyAt`, `LastInboundClassification`, `LastInboundAt` | Reply tracking |
+| `MessageID`, `ThreadReferences`, `ThreadSubject` | Keeps follow-ups in the same email thread |
+| `AsanaTaskGID`, `ManualAsanaStage`, `LastSyncedAsanaStage` | Asana link and stage control (see [Asana](#asana)) |
+
+Any other column (for example `Product` or `Creator`) can be used as a `{{placeholder}}` in a template.
+
+### Templates
+
+`templates/<campaign>/<stage>_<variant>.txt`. **The folder is the campaign** — no registration needed.
+
+- **Stages:** `intro`, then `followup1` … `followup10` (up to 11 in total).
+- **Variants:** `A`–`D` (up to four versions of each stage, for testing wording).
+- **Format:** the first line is `Subject: …`, then a blank line, then the body. `{{ColumnName}}` is replaced with that lead's value; a placeholder with no matching column is reported in the Error Log.
+- **Auto-discovery rules:** stages must be contiguous starting from `intro`, and every stage must offer exactly the same variant letters as `intro`. A mismatch is rejected with a clear error rather than silently shrinking the campaign. Details in [`config/campaigns-overrides-README.md`](config/campaigns-overrides-README.md).
+
+### Asana
+
+Per campaign (turn on under *Settings → Asana Sync*), each lead becomes a task in an Asana project, placed in one of six sections:
+
+| Stage | How it is set |
+|---|---|
+| Sourced · Outreach Sent · Follow-up · Negotiating | Derived automatically from sends and replies |
+| **Rights Secured · Declined / Dead** | **Human decisions only** — a sync never moves a task into or out of either on its own |
+
+- Task title is `[Client] | [CreatorHandle] – [Product]`; custom fields are filled by matching Asana field names to Sheet column names. Leads are matched to existing tasks by `AsanaTaskGID`, with a second safeguard that matches on the video, so a lost GID does not create a duplicate.
+- **`ManualAsanaStage`** (set from *Manage a lead*) overrides the derived stage for one lead.
+- **`LastSyncedAsanaStage`** is written by the sync itself — never edit it. It records where the sync last left the task. If a task sits in *Rights Secured* or *Declined / Dead* and has since been dragged there directly in Asana, the live position wins over an older `ManualAsanaStage` override that points somewhere else. An override that itself names *Rights Secured* or *Declined / Dead* always wins.
+- Tasks are never moved backwards automatically.
+
+### Creator Tracker sheet
+
+A separate, much larger sheet shared across campaigns (`CREATOR_TRACKER_SHEET_ID` / `CREATOR_TRACKER_WORKSHEET_NAME`; enable per campaign with `tracker_sync.enabled`). The sync **never creates rows and never touches any column except `Contact Status`, `Last Contacted Date` and `Rights Duration`** — every other column belongs to a different process. A lead with no matching row, or an ambiguous name match, is reported as a warning, never guessed at.
+
+### UGC Video Edits Tracker
+
+A standalone automation (`ugc_tracker_sync.py`, run by `ugc_tracker_sync.yml`) for the editing team. Every run it finds each Asana task in **Rights Secured** and makes sure it has a row in the tracker sheet's `Tracker` tab:
+
+- Columns: `Asana Task GID` · `Creator` · `Brand` · `Product` · `Tiktok` · `Raw` · `Rights expiration` · `Status` · `Edited folder` · `Notes`.
+- `Brand` is always the constant **DudeRobe** (the client). `Product` is the real value from Asana's *Product* field (DudeRobe, BroThrow or SheRobe). Duplicate creators get `@handle`, `@handle_2`, …
+- `Tiktok` and `Raw` are hyperlinks to matching Google Drive items. Raw Contents is searched for files **and** folders (multi-clip creators); Tiktok Contents for files only. Matching uses a bracketed task id in the file name first — e.g. `DudeRobe - @handle – DudeRobe [1218941738388881].mov` — and falls back to handle + product. More than one candidate is logged and **never written**.
+- A cell that already has content is **never overwritten**. A blank `Tiktok`/`Raw`/`Product` cell is re-checked every run, since raw files often arrive later.
+- `Status` (dropdown: Not edited / Edited / Live, colour-coded), `Edited folder` and `Notes` belong to the editing team; the automation never writes them.
+- It has its own lock (`ugc-tracker-sync`), so it can never block, or be blocked by, the email workflows.
+
+---
+
+## Schedule: when things run
+
+Five workflows run every 30 minutes, but **only between 5:00 PM and 5:00 AM IST** (24 runs a day each). Outside that window nothing runs on its own. Manual buttons and *Run workflow* work at any hour.
+
+The window is the IST equivalent of US business hours: the active campaigns send 9–5 New York / Chicago time, roughly 6:30 PM–4:30 AM IST, so the window contains it. The schedule only decides when a job *wakes up*; each campaign's own sending window still decides whether anything is sent.
 
 | Workflow | Runs at (IST, every half hour) | Cron lines (UTC) |
 |---|---|---|
@@ -642,699 +237,202 @@ inside `send_batch`) still decides whether anything is actually sent.
 | Update Dashboard | :25 and :55 — 5:25 PM to 4:55 AM | `55 11` / `25,55 12-22` / `25 23` |
 | UGC Tracker Sync | :04 and :34 — 5:04 PM to 4:34 AM | `34 11` / `4,34 12-22` / `4 23` |
 
-(each cron line is followed by `* * *`). GitHub cron is always UTC and IST is
-UTC+5:30, so 5 PM-5 AM IST is 11:30-23:30 UTC; the window never crosses
-midnight in UTC, which is why three simple lines are enough.
-
-**Why those minutes.** They are staggered, in the order Check Replies, Auto
-Send, Sync Asana, Dashboard, so a reply is recorded *before* the next send
-decides who is due, and Asana and the dashboard reflect both afterwards. They
-are kept off :00 and :30 because GitHub's own documentation says scheduled runs
-are delayed under load, worst at the start of the hour, and that some can be
-dropped.
+(each cron line is followed by `* * *`.) GitHub cron is always UTC and IST is UTC+5:30, so 5 PM–5 AM IST is 11:30–23:30 UTC; the window never crosses midnight in UTC. The minutes are staggered in the order *Check Replies → Auto Send → Sync Asana → Dashboard*, so a reply is recorded before the next send decides who is due. They avoid :00 and :30 because GitHub delays — and sometimes drops — scheduled runs under load, worst at the start of the hour. Check Account Health is separate: every 2 hours, around the clock.
 
 ### What happens when an Auto Send run takes longer than 30 minutes
 
-This is normal, not a failure. Sending is paced: one email per mailbox at the
-same moment (a "round"), then a random 3-7 minute pause before the next round,
-so a batch of any size runs for as long as its rounds take — an hour or more is
-ordinary. The next scheduled Auto Send does **not** start a second copy. It
-waits. Two sends never run at once, which is what prevents duplicate emails.
+This is normal. The next scheduled Auto Send does **not** start a second copy; it waits, so two sends never overlap and no one gets a duplicate email. GitHub's rule for a concurrency group is **one running and one waiting** run. If another run arrives while one is already waiting, the older waiting run is dropped (shown as **Cancelled** — expected, not an error) and the newer takes its place. The four Google-Sheets workflows share one group (`google-sheets-api`), so during a long send:
 
-The detail that matters, straight from GitHub's documentation: a concurrency
-group allows **one running and one waiting** run. If another run arrives while
-one is already waiting, the older waiting run is dropped (shown as
-**Cancelled** — expected, not an error) and the newer takes its place. All
-four Google-Sheets workflows share one group, so during a long send:
+- nothing else that shares the lock can start (Check Replies, Sync Asana and Dashboard wait);
+- of everything that arrives meanwhile, only the newest keeps its place;
+- when the send ends, that waiting run starts and the normal rhythm returns within about a cycle.
 
-- nothing else that shares the lock can start (Check Replies, Sync Asana,
-  Dashboard all wait);
-- of everything that arrives meanwhile, only the newest one keeps its place;
-- when the send ends, that one waiting run starts, and the normal rhythm is
-  back within about a cycle.
+A dropped run loses nothing (each run is a full sweep). The real cost is that replies are not checked, and Asana is not synced, *while a long send is running*.
 
-Nothing is lost by a dropped run: every scheduled run is a full sweep of
-whatever is due right now, so the next one picks up the same work. The real
-cost is that replies are not checked, and Asana is not synced, *while a long
-send is running*.
+**Why Auto Send stays inside the shared lock.** Sending and reply-checking both write the `Status` column on the same rows. If they overlapped, a reply could be overwritten by a send in progress, and a lead who had just replied could be sent a follow-up. Do not give Auto Send its own lock to "unblock" the others.
 
-**Why Auto Send stays inside the shared lock.** It would be tempting to give
-Auto Send its own lock so it stops blocking the others. Do not: sending and
-reply-checking both write the same `Status` column on the same lead rows. If
-they overlapped, a reply could be overwritten by a send in progress, and a lead
-who had just replied could be sent a follow-up.
+**Timeouts.** Check Replies, Sync Asana and Dashboard stop after 30 / 30 / 20 minutes so one hung call cannot hold the shared lock for hours; UGC Tracker Sync after 10. Auto Send deliberately keeps GitHub's maximum (360): force-stopping it mid-round could leave an email sent but not yet recorded, and the next run would send it again.
 
-**Timeouts.** Check Replies, Sync Asana and Dashboard have 30/30/20-minute
-limits so one hung network call cannot hold the shared lock for hours. Auto Send
-deliberately keeps GitHub's maximum (360): force-stopping it mid-round could
-leave an email sent but not yet recorded, and the next run would resend it.
+### Things only the real Actions tab can confirm
 
-### Caveats that only the real Actions tab can confirm
+- **`schedule` is best-effort.** A run can start minutes late, and under heavy GitHub load occasionally not at all.
+- **60-day inactivity.** In a public repository GitHub switches scheduled workflows off after 60 days with no repository activity. The control panel's commits count; a repo left untouched for two months would silently stop. Re-enable from the Actions tab.
+- **Schedules run only from the default branch**, so a change takes effect once merged to `main`.
+- **Replies that arrive between about 5 AM and 5 PM IST wait until about 5:07 PM IST** unless someone clicks *Check Replies Now*; the same applies to the Asana, Creator Tracker, UGC and dashboard refreshes. `reply_monitor.lookback_hours` (default 24) must stay comfortably longer than that 12.5-hour gap — a test guards this.
 
-- **Delays and dropped runs.** `schedule` is best-effort. A run can start
-  several minutes late, and under heavy GitHub load occasionally not at all.
-- **60-day inactivity.** In a public repository, GitHub switches scheduled
-  workflows off after 60 days with no repository activity. Ordinary commits
-  (including the ones the app makes) count; a repo left untouched for two
-  months would silently stop. Re-enable from the Actions tab if it ever happens.
-- **Runs only start from the default branch**, so a schedule change takes
-  effect once it is merged to `main`.
-- **Replies arriving between 5 AM and 5 PM IST wait until about 5:07 PM IST**
-  unless someone clicks "Check Replies Now". The same applies to the Asana,
-  Creator Tracker, UGC and dashboard refreshes. That is the direct effect of
-  restricting the window.
-- **Check Account Health is unchanged** (every 2 hours, around the clock). It
-  shares the lock, so now and then it lands in the same minute as Check Replies
-  — harmless, they just take turns.
+To move the window, edit the three cron lines in each workflow and the constants at the top of `tests/test_workflow_schedules.py`.
 
-`tests/test_workflow_schedules.py` expands the real cron lines into concrete IST
-run times and fails if any run falls outside the window, drifts off the 30-minute
-grid, loses its place in the order, shares a minute with another lock-holder, or
-if a lock or timeout setting is changed in a way that could cancel a send.
-To move the window, edit the three cron lines in each workflow and update the
-constants at the top of that test.
+---
 
-## Known limitations (by design, not bugs)
+## Configuration reference
 
-- **Follow-ups no longer get stuck on a sender account removed from the
-  campaign.** The earlier stale-pin fix only cleared a pin when
-  `sending.sender_rotation` was currently TRUE. A campaign reduced from
-  5 accounts to 1 naturally has rotation UNCHECKED too — rotating among
-  one account makes no sense — which silently disabled the entire
-  staleness check. Three separate bugs, found and fixed together:
-  1. The staleness check itself was gated on `sender_rotation` being
-     on. Generalized via `current_valid_senders_for_campaign()`, which
-     treats an explicit `rotation_accounts` list as authoritative
-     regardless of the rotation toggle.
-  2. Even once a pin was correctly judged stale, the single-default
-     fallback branch resolved against the ORIGINAL lead object (which
-     still carried the stale `SenderAccount`), silently re-deriving the
-     very account the staleness check had just rejected.
-  3. The rotation-pool branch's own trigger condition didn't match the
-     staleness check's — a pin correctly cleared could still fail to
-     resolve to anything, because the fallback path that then ran had
-     never heard of `rotation_accounts` at all.
-  All three independently sabotage-verified. A pin still present in the
-  campaign's current account list is untouched; a campaign with no
-  sender configuration at all never has a pin blindly cleared.
+**`config/settings.yaml`** — global. `shared_sheet_id`; `email_accounts.default_account`; and `default_campaign_settings` (the wait days per stage, `sending`, `reply_monitor`) which every campaign inherits.
 
+**`config/campaigns/<name>.yaml`** — optional; only what differs from the defaults is needed (it is deep-merged over the defaults):
 
-- **Account names are matched case-insensitively.** Account names are
-  typed by hand in three places that cannot validate each other: the
-  `EMAIL_ACCOUNTS_JSON` secret, a campaign's `sending.rotation_accounts`,
-  and the per-lead `SenderAccount` column. The real config has slots
-  named `Sales2`/`Sales3`/`Sales4` while lead rows carry lowercase
-  values, so case-sensitive matching forked one account into two
-  identities. Two live consequences, both fixed:
-  1. `get_rotation_accounts` returned an EMPTY pool when config casing
-     differed from the secret's keys — every send in the campaign
-     failing over capitalization.
-  2. A lead pinned to `sales2` against a secret keyed `Sales2` was
-     SILENTLY reassigned to a different sender mid-thread, because the
-     stale-pin check read the case variant as "removed from rotation".
-     Silent wrong-sender is worse than the loud error it replaced.
-
-  `canonical_account_name()` now resolves any case variant to the exact
-  secret key before any membership test. A genuinely unknown account
-  still errors loudly, and a genuinely removed one is still re-rotated.
-
-## Testing gap: CI does not run the Streamlit suite
-
-`ci.yml` installs only the root `requirements.txt` and runs only
-`tests/`. The ~590-test `streamlit_app/tests/` suite never runs in CI —
-so the entire Streamlit layer (including the 1,700-line `campaigns.py`)
-has no automated regression coverage on push. To close it, add
-`pip install -r streamlit_app/requirements.txt` and a
-`python -m pytest streamlit_app/tests/` step.
-
-Note that some Streamlit tests assert against LIVE campaign templates
-and `config/` (e.g. "this sample campaign has all 5 stages"). Those now
-fail because the real campaigns have 3 stages. They are coupled to
-mutable production data rather than fixtures, so they will keep
-breaking whenever campaigns legitimately change — worth converting to
-fixtures before wiring them into CI.
-
-
-- **A genuine reply on a NEW email thread (a different subject the
-  automated reply-checker can't match back to the original outbound
-  thread) can now be marked manually.** `set-lead-override` gained
-  `--reply-status` (`''` or `Replied`) and `--last-inbound-classification`
-  (`''` or one of the five real classifications). Setting ReplyStatus
-  to Replied also sets ReplyAt to now; setting a non-blank
-  classification also sets LastInboundAt to now — matching exactly
-  what the normal, automatic reply-detection flow does when it sets
-  these together, so a manually-marked reply looks the same as a
-  normally-detected one everywhere else in the system that reads them.
-  This is the actual fix for a real gap: without it, a lead correctly
-  moved to Negotiating by hand (because the reply itself was only
-  ever thread-matched via Message-ID references, and a different-
-  thread reply never touches ReplyStatus) could have that decision
-  silently reverted by the very next Asana sync, since Negotiating is
-  computed from ReplyStatus rather than being a protected manual-only
-  stage the way Rights Secured / Declined are.
-- **`sync_asana.yml` now runs every 30 minutes**, matching
-  `auto_send.yml`'s cadence, rather than once a day.
-
-- **New and existing Asana tasks can get a default assignee.** Set
-  `ASANA_DEFAULT_ASSIGNEE_EMAIL` as a GitHub secret and every newly
-  created task gets it at creation; every existing task that's
-  currently unassigned gets it backfilled on its next sync. A task
-  someone's deliberately assigned to a different person is never
-  overwritten — only a genuinely blank assignee gets filled in.
-- **A decision made directly in Asana (dragging a task to Rights
-  Secured / Declined, or setting its Rights Expiration field) now
-  reaches the Creator Tracker sheet without also requiring the same
-  decision to be typed into `ManualAsanaStage` on the campaign's own
-  Sheet.** Only applies when a lead's `ManualAsanaStage` is blank — an
-  explicit Sheet-side decision always takes precedence over whatever a
-  task's live section in Asana happens to say, so a change on the
-  Sheet is never silently overridden by stale Asana state. Rights
-  Expiration populates a new "Rights Duration" column on the Tracker
-  sheet the same way Last Contacted Date is populated elsewhere —
-  never overwritten with something older or blank. This only works
-  when Asana sync is also enabled and configured for that campaign,
-  since there's no Asana state to read otherwise; Creator Tracker sync
-  still runs normally without it, just without this particular
-  reverse-sync behavior.
-
-- **A second, independent sync target now exists: the Creator Tracker
-  sheet** — a separate, shared spreadsheet (its ID and worksheet name
-  are GitHub secrets — `CREATOR_TRACKER_SHEET_ID` and
-  `CREATOR_TRACKER_WORKSHEET_NAME` — not per-campaign settings, since
-  it's the same sheet across every campaign) that keeps its own
-  `Contact Status` and `Last Contacted Date` columns in sync with each
-  lead's pipeline stage and most recent send. Configured in its own,
-  fully separate "📊 Creator Tracker Sync" expander in Settings — NOT
-  nested under Asana Sync, since a campaign can enable either without
-  the other. `CREATOR_TRACKER_WORKSHEET_NAME` accepts either the tab's
-  own name (shown at the bottom of Google Sheets) OR its numeric gid
-  (the number after `gid=` in that specific tab's URL) — a gid is
-  more robust, since it never changes even if the tab gets renamed.
-  Either way, this is the TAB's identifier, never the spreadsheet
-  document's own title (a different, easily-confused thing — e.g. the
-  document might be titled "Content Tracker" while the specific tab
-  to sync is named something else, like a brand name). Matches each
-  lead by Creator (the @handle) first, falling back to full name — a
-  match against more than one of that sheet's rows is reported for
-  manual review, never guessed at, since silently picking one could
-  update the wrong creator in a sheet spanning thousands of rows
-  across every other campaign too. Never creates a row, and never
-  touches any column other than those two — every other column
-  (`Brand`, `Platform`, `Product`, `Video File`, etc.) belongs to a
-  separate daily process and is never written to from here. Rights
-  Secured and Declined / Dead freeze the entire row from this sync's
-  perspective (neither column is touched further), sharing the exact
-  same `ManualAsanaStage` override Asana sync uses, so one human
-  decision is reflected consistently in both places rather than two
-  separate overrides that could disagree. Asana sync and Creator
-  Tracker sync run fully independently of each other — a campaign can
-  enable just one without needing the other's credentials at all.
-  Confirmed columns on the real sheet: `id`, `Brand`, `Platform`,
-  `Creator`, `Creator Email`, `Product`, `Sub Category`, `Usage
-  Rights`, `Refunnel Link`, `Video File`, `Created At`, `Summary`,
-  `Product Score`, `Rights Duration`, `Ad Ready`, `Notes`, `Contact
-  Status`, `Last Contacted Date` — matching is by `Creator Email` then
-  `Creator`, and only `Contact Status` / `Last Contacted Date` are
-  ever written.
-- **The same creator can appear on more than one Creator Tracker row**
-  (contacted separately for different videos) without being reported
-  as unresolvable. When an email or name match finds more than one
-  candidate row, `Video File` / `Refunnel Link` — whichever the lead
-  itself has — is checked against each candidate row's own value for
-  that same column; exactly one match narrows it down to the right
-  row. Zero matches, or more than one, stays genuinely ambiguous and
-  is still reported for review rather than guessed at. A related bug
-  fixed alongside this: an earlier version let a later row silently
-  overwrite an earlier one sharing the same email in the internal
-  lookup, meaning an email collision was never even detected in the
-  first place — only name collisions were ever reported as ambiguous.
-  Both email and name matching now detect and handle collisions the
-  same way.
-
-- **Sheet header widening now checks by column name, not position.** An
-  earlier version required newly-added required columns to line up as
-  an exact ordered prefix — which broke the first time a real custom
-  column (added earlier via a CSV import) happened to sit exactly
-  where a later, genuinely new required column was expected. Since
-  every read/write in this system already works by column name, that
-  positional requirement was stricter than necessary; it's gone now,
-  replaced with "does every required column exist somewhere in the
-  header" — a tab that shares literally none of the expected columns
-  still fails loudly, since that almost certainly means it's the wrong
-  tab entirely, not just one that's picked up a few custom columns.
-
-- **Asana date fields now convert from common Sheet formats to Asana's
-  required ISO 8601** — a value like `09/03/26` (US-style MM/DD/YY, a
-  common spreadsheet display format) previously reached Asana
-  unconverted and was silently rejected or misread. Several formats are
-  recognized (`MM/DD/YY`, `MM/DD/YYYY`, day-first variants, month names,
-  and already-ISO values); anything unrecognized is skipped rather than
-  guessed at.
-- **Asana's "Last Contact Date" custom field now also reflects real
-  send activity, not just a manually-typed Sheet value.** It takes
-  whichever is more recent: the Sheet's own "Last Contact Date" column
-  (still fully respected — a human-entered date newer than the last
-  automated send is never overwritten) or the lead's own `LastActionAt`
-  (updated automatically every time an email actually goes out).
-  Before this, sending a real follow-up today never moved this field
-  forward on its own — it stayed frozen at whatever was last typed in
-  manually, however stale that became, even while the task's own stage
-  correctly advanced from Outreach Sent to Follow-up in the same sync.
-- **A lead's Asana pipeline stage can be manually overridden** — set a
-  `ManualAsanaStage` value (`Sourced` / `Outreach Sent` / `Follow-up` /
-  `Negotiating` / `Rights Secured` / `Declined / Dead`, case-insensitive)
-  from the Data tab's "🔧 Manage a lead" section, and it takes priority
-  over auto-derivation on the very next sync — including for a task
-  that doesn't exist in Asana yet, so a lead handled entirely outside
-  the automated pipeline can be created directly into the right stage.
-  An unrecognized value is ignored, not rejected.
-- **A single lead can be stopped from automated sending without being
-  removed** — the same "🔧 Manage a lead" section can set Status to
-  `Stopped - Manual`, a real terminal status excluding just that one
-  lead from future sends while it stays fully visible everywhere else,
-  distinct from `Removed`. Clearing either override (status or Asana
-  stage) resumes normal automatic behavior.
-- **CSV import can deliberately allow re-importing an existing email** —
-  check "Allow re-importing an email that already exists" when
-  uploading, for the real case of contacting the same creator again for
-  a genuinely different video. Each import becomes its own row and,
-  once synced, its own separate Asana task. This never risks a
-  duplicate email being sent automatically — a separate, pre-existing
-  protection inside the core eligibility logic always considers only
-  the first (lowest row number) lead for a given address eligible to
-  actually be emailed, regardless of this setting.
-
-- **A campaign's sending window is now actually automated, not just a
-  check nothing ever exercised.** A new `auto_send.yml` workflow runs
-  every 30 minutes and calls `outreach.py auto-send-all`, which loops
-  over every campaign, skips anything not Running (Draft/Paused/Deleted
-  are never touched), and attempts every stage in turn for the rest.
-  `send_batch`'s own existing checks (the sending window, the daily
-  limit, every per-lead eligibility rule) decide whether anything
-  actually goes out — most stages on most runs correctly do nothing,
-  which isn't a failure, just nothing being due yet. No per-campaign
-  opt-in is needed: any Running campaign with a configured Schedule
-  (window/days/timezone) is picked up automatically; a Running campaign
-  with no schedule set behaves as "always allowed," exactly as before
-  this existed. The manual "Send" button in Settings still works
-  exactly as before, for an on-demand send outside of waiting for the
-  next scheduled pass.
-
-
-- **Duplicating a campaign reads the source fresh from GitHub's API**,
-  deliberately not from Streamlit's own local checkout of the repo —
-  that checkout can lag behind a very recent commit for a short window
-  until the next redeploy finishes. An earlier version read locally and
-  could silently create a duplicate with zero template files if that
-  lag was in effect at the exact moment; it now refuses outright with a
-  clear error if the source ever comes back empty, and reports exactly
-  how many files it copied so you can confirm the count yourself.
-- **The whole Sequences tab reads its stage/variant structure — and now
-  every template's actual subject/body text too — live from GitHub's
-  API on every render**, not just as a pre-delete safety check. The
-  local checkout could otherwise keep showing an already-deleted stage,
-  or a template's old text after a recent save, indefinitely — no
-  in-app refresh or re-login could ever fix it, since the staleness
-  lived in the checkout itself, not in any session state. Delete Stage
-  and Delete Variant also independently re-verify immediately before
-  deleting anything, so even a change within the same session can't be
-  acted on from an outdated view. One inherent limitation worth
-  knowing: an already-open, already-rendered edit box in a session
-  that's stayed open the whole time won't retroactively update just
-  because the file changed in the background — that's how Streamlit's
-  own widget state works, not something a live data source can override.
-  A fresh page load (closing and reopening, or a different tab) always
-  reflects the current truth.
-- **A CSV column that doesn't match anything existing defaults straight
-  to a new custom field using its own name** — no extra click, no
-  retyping the same name you can already see in the column header.
-  "➕ New custom field..." stays available if you actually want a
-  DIFFERENT name than the CSV's own header. Naming a custom field the
-  same as one of the system's own tracked columns (`Status`,
-  `IntroSentAt`, etc.) is rejected outright, since that would silently
-  corrupt real tracking data on the next import.
-- **A brand-new custom field name is only useful if the Master Sheet
-  actually gains that column** — import now widens the Sheet's header
-  first, for every field name across every lead in the batch, before
-  writing any rows. An earlier version silently dropped anything that
-  wasn't already a column, which meant a CSV import could report success
-  on GitHub while custom field data (Client, Product, etc.) never
-  actually reached the Sheet at all. Widening also expands the Sheet's
-  own grid width first if needed — a tab's column count is fixed at
-  whatever it was when first created, and writing past that limit is
-  rejected outright by Google's API regardless of how correct the
-  content is.
-- **A CSV with the same column name twice is detected and warned about,
-  never a crash.** Python's own CSV parser silently keeps only the
-  LAST duplicate-named column's value per row before this app even
-  sees the data — the warning names which column(s) are affected so you
-  can fix it in the source file (rename one) and re-upload, rather than
-  silently importing with data already missing.
-- **Approval is informational only, everywhere** — it no longer gates
-  sending, Launch readiness, "campaign complete" status, or the "In
-  Progress" filter. A lead needs a valid email and nothing else to be
-  eligible.
-- **The leads table in the Data tab shows every column that exists on
-  a lead**, not a fixed subset — custom fields from a CSV import
-  (Client, Product, Content Score, etc.) appear automatically, in the
-  same order as the Sheet's own header where that's known.
-- **Asana project lookup specifies a workspace**, which Asana's own API
-  requires for listing projects — a request without one is rejected
-  outright with a 400, regardless of how correct the project name is.
-  Every workspace the token's owner belongs to is searched, not just
-  the first, in case the account spans more than one.
-- **A task's name is kept in sync on every update, not just set once at
-  creation** — the naming convention (`Client | CreatorHandle –
-  Product`) falls back to a plain "Creator" column for the handle when
-  there's no separate "CreatorHandle" column, matching how a real
-  campaign's sheet commonly labels it. Because the name updates every
-  sync, any task created before this fallback existed self-corrects
-  automatically the next time sync runs — no manual renaming needed
-  in Asana.
-- **Lead fields are always coerced to strings before use in Asana
-  sync** — gspread types a cell's value by what it LOOKS like, not
-  what column it's in, so a numeric-looking value (an Asana task GID
-  is a long run of digits) comes back as a Python `int`. Every
-  already-synced lead hit exactly this on the next sync run before it
-  was fixed.
-- **A stale AsanaTaskGID (Asana returns a 404 for it) self-heals** — a
-  fresh task gets created and the dead GID is overwritten with the new
-  one, rather than that lead failing every sync forever. A 403 is
-  deliberately handled differently and stays a hard, visible error:
-  it could mean the task still exists but access to it was lost, and
-  creating a second one in that case would be a real duplicate sitting
-  in Asana that the current token just can't see.
-
-- **Asana sync needs `ASANA_ACCESS_TOKEN` as a GitHub secret** — a
-  Personal Access Token from whichever Asana account should own the
-  sync (Asana → My Settings → Apps → Manage Developer Apps → Personal
-  Access Tokens). Enable it per campaign in Settings → "🔗 Asana Sync",
-  with the exact Asana project name. A lead's stage (Sourced / Outreach
-  Sent / Follow-up / Negotiating) is derived automatically from its
-  send/reply history; Rights Secured and Declined / Dead are always set
-  by hand in Asana and a sync will never move a task out of either —
-  see `outreach.decide_asana_sync_action`. Re-running sync any number
-  of times never creates a duplicate task — each lead's task is tracked
-  via a stored `AsanaTaskGID` the moment it's first created.
-- **Which custom Sheet columns map to which Asana fields is by name
-  match, not a fixed list** — any lead column whose name matches a
-  registered custom field on the target Asana project gets pushed
-  there automatically; a column with no matching field is simply
-  skipped. This means it works differently for different Asana
-  projects without any code change, but also means a typo'd column
-  name silently doesn't sync — worth checking the created/updated task
-  in Asana against what you expected, at least the first few times.
-
-- **Intent classification (Interested / Not Interested / Lead-Needs-Follow-up
-  / Unclear) is a genuinely separate layer from mechanical classification**
-  (Genuine Reply / Auto-Reply / Out of Office / Bounce), only ever run for
-  a Genuine Reply, only once per reply ever (the same Message-ID dedup
-  that already prevents logging a reply twice also prevents re-classifying
-  it). Optional — set `ANTHROPIC_API_KEY` as a secret to enable it; leave
-  it unset and Intent columns just stay blank, exactly like before this
-  existed. A low-confidence result always shows as "Unclear" rather than
-  a specific category — never trust an uncertain guess at face value on
-  something that could affect a real business decision.
-- **Unread tracking persists across sessions now** — a response's
-  `IsRead` column in the Response Sheet is the source of truth, marked
-  via an explicit "✓ Mark as read" button. Marking is batched: click
-  "🔄 Sync read status (N pending)" to actually write it back, rather
-  than triggering a GitHub Actions run per response. Between marking and
-  syncing, the current session shows it as read immediately (an
-  optimistic local overlay) without waiting for the sync to land.
-- **This app never connects to SMTP/IMAP directly** — only GitHub
-  Actions does, using a credential Streamlit never holds. Real email
-  credentials living inside a public-facing web app would be a
-  meaningfully bigger risk than anything else here. "Check Replies Now"
-  (per-campaign or all-at-once on the Responses page) gives you an
-  on-demand check without waiting for the schedule; shortening
-  `check_replies.yml`'s cron interval is the safe way to reduce that
-  wait generally, if 30 minutes is too slow for your use case.
-
-- **Deleting a campaign has two tiers.** "Temporarily Remove" (Settings →
-  Danger Zone) just changes its status — the campaign disappears from
-  the everyday Campaigns list but shows up in "🗑️ Deleted Campaigns"
-  (Campaigns Hub page) with a Restore button, nothing about it is
-  touched. "Permanently Delete" removes its template files (and its
-  settings override, if any) outright and isn't reversible from this
-  app. Neither ever touches the Google Sheet — leads, sends, and replies
-  stay exactly where they are, fully readable directly in the Sheet,
-  either way.
-- **You can only delete the *last* stage**, never a middle one — stages
-  must stay contiguous from Intro (the same rule
-  `outreach.discover_stages_and_variants` already enforces), so deleting
-  a middle stage would silently orphan every stage after it.
-- **Deleting a variant always removes it from every stage at once**,
-  never just one — every stage must offer the exact same variant
-  letters, so a per-stage deletion would immediately break that
-  invariant. You also can't delete the last remaining variant.
-
-- **Only 10 account slots by default** (`EMAIL_ACCOUNT_SLOT_1..10`) —
-  deliberately not jumped straight to a large number; if you need more,
-  raise `EMAIL_ACCOUNT_SLOT_COUNT` in `outreach.py` and add the matching
-  `EMAIL_ACCOUNT_SLOT_N` lines to every workflow's `env:` block that
-  calls `load_email_accounts()` (`check_account_health.yml`,
-  `check_replies.yml`, `send_batch.yml`, `send_reply.yml`).
-- **Account health is a snapshot, not a log.** Every check overwrites the
-  whole "Email Accounts Health" tab — a removed account's old row
-  disappears on the next run rather than lingering.
-- **A bulk CSV account upload makes one GitHub API call per account** —
-  unavoidable, since each account is its own secret and GitHub has no
-  "set several secrets at once" endpoint. A very large upload (100+ rows)
-  will take a little while; the mapping file itself is still committed
-  once for the whole batch, not once per account.
-
-- **Replying supports file/image attachments, up to 10 MB total.** Sent
-  as regular email attachments, not inline/embedded HTML images — this
-  codebase doesn't have an HTML-email body path, so an "image in the
-  message body" the way a rich-text editor shows it isn't built. A fuller
-  quoted email-thread view (like a real inbox shows) also isn't built —
-  this only shows the response's snippet, not the full back-and-forth.
-- **No "schedule a reply for later."** Every reply sends within a minute
-  or two of clicking Send — there's no deferred/scheduled send yet. That
-  would need a genuinely new subsystem (a pending-sends store plus a
-  periodic checker), deliberately left for later rather than bolted on.
-- **Every GitHub Actions workflow that pipes its output through `tee`
-  now uses `set -o pipefail` first.** Without it, `command | tee file`
-  reports the exit code of `tee` (which almost always succeeds), not
-  `command` — meaning a real crash or failure inside `outreach.py` could
-  previously show as a green checkmark in the Actions tab. Found while
-  building the reply-send workflow (which specifically needed a correct
-  non-zero exit on failure) and fixed retroactively across every
-  existing workflow, including `send_batch.yml`.
-
-- **Launch/Pause/Resume are never gated by campaign readiness.** The
-  readiness check (no sender configured, no templates, no approved
-  leads) is shown as an FYI on the Launch confirmation, never a blocker —
-  `outreach.send_batch()` already naturally does nothing if there's
-  nothing eligible to send, so blocking Launch on it would just be
-  friction with no real safety benefit.
-
-- **New Campaign is an inline modal now, not a separate page** — and
-  deliberately asks for nothing but a name. Git can't store an empty
-  folder, so a placeholder Intro template is created automatically; write
-  the real email afterward in the Sequences tab. Right after creating a
-  campaign, it deliberately does NOT auto-navigate into it — Streamlit
-  Cloud's local checkout won't have the new file until it redeploys
-  (triggered by the commit, not instant), so jumping straight in would
-  likely hit a real "No templates found" error. The same redeploy delay
-  applies more mildly to Sequences/Settings/Schedule saves (you may
-  briefly see the old values reflected here — the change is already live
-  for actual sending regardless).
-- **Any page showing a dialog/form driven by session_state calls
-  `page_state.mark_active_page()` at its top.** Without it, a dialog left
-  open (not explicitly cancelled) would silently reopen every time you
-  returned to that page from somewhere else — session_state persists
-  across navigation, and a plain "is this open" flag has no way to tell
-  "still filling this out" apart from "came back much later." Add the
-  same call to any future page that needs this pattern.
-- **Schedule restricts Send Batch, never Preview.** A campaign outside
-  its configured sending window can still be freely previewed; only an
-  actual Send is blocked, with a clear reason. No schedule configured
-  (the default) means "always allowed," exactly matching every
-  campaign's behavior before this feature existed.
-- **Timezones are always real IANA names** (e.g. `America/Los_Angeles`),
-  never fixed offsets like "PST" — this is what makes Daylight Saving
-  transitions handled correctly automatically, rather than silently
-  sending an hour off twice a year.
-
-- **`create_file` now correctly handles updating files that already
-  exist** (fetches the current SHA first, as GitHub's API requires) —
-  this was a latent bug from Phase D that Phase F's settings-file
-  overwrites would have hit immediately; fixed retroactively for both.
-- **Settings are saved to the campaign's config override file**
-  (`config/campaigns/<name>.yaml`), touching only the `sending` key —
-  `status`, `schedule`, and anything else already in that file survive a
-  Settings save untouched.
-
-- **Variants are campaign-wide, not per-stage.** Every stage must offer
-  the exact same variant letters (a hard rule in `outreach.py` itself —
-  see `discover_stages_and_variants`). "Add a variant" in Sequences
-  therefore always adds it to every existing stage at once, in one
-  commit, never just one stage.
-- **Template edits are locked by default.** Unlock a variant to edit it;
-  Save Changes commits everything you've unlocked and changed as ONE
-  commit, not one per field — same batching principle as everywhere else
-  writes happen in this app.
-
-- **Sheets reads on the campaign detail page are cached for 30 seconds.**
-  This isn't just a performance nicety — Google's Sheets API caps reads at
-  60/minute/user, and Streamlit reruns the entire script on nearly every
-  widget interaction. Without caching, a few minutes of ordinary use
-  (adjusting several CSV mapping dropdowns in a row, for example) could
-  exceed that quota and return a `429`. If you need to see a change
-  immediately rather than waiting up to 30s, use the **🔄 Refresh data**
-  button at the top of the campaign detail page.
-
-- **Leads are imported/removed via a commit-then-trigger-workflow
-  pattern**, same as template creation — Streamlit commits a JSON payload
-  file (`imports/<campaign>/...` or `removals/<campaign>/...`), then
-  triggers `import_leads.yml` / `remove_leads.yml`, which does the actual
-  Sheet write with the Editor-scoped credential and deletes the payload
-  file afterward. Streamlit itself never gets Sheets write access, here
-  or anywhere else in this app.
-- **Removing a lead never deletes anything.** It sets `Status = Removed`
-  — the row, and everything ever sent to that lead, stays intact. A
-  removed lead is simply excluded from all future eligibility checks.
-- **New leads always start as Pending approval**, even if your CSV had an
-  "Approval" column you didn't map — approve them in the Data tab (or the
-  Master Sheet directly) before they're eligible to send.
-
-- **A campaign's `status` (draft/active/paused) lives in its config
-  override file** (`config/campaigns/<name>.yaml`), not the Sheet.
-  Pausing/resuming currently means editing that file directly (a proper
-  Pause/Resume button is Phase G). Unset `status` always means "active" —
-  this was chosen specifically so introducing the field never silently
-  paused a pre-existing campaign.
-- **No persistent login session.** Username/password here is intentionally
-  simple — no OAuth means no "forgot password" flow and no cross-session
-  cookie. Closing the tab logs you out. If this becomes annoying,
-  `streamlit-authenticator` (cookie-based) or Streamlit's native
-  `st.login()`/OIDC are the upgrade paths.
-- **Run status is manual-refresh, not live-streaming.** After triggering
-  Send/Check Replies/Backfill, click "Refresh run status" — this app
-  doesn't auto-poll in the background. A link to the full GitHub Actions
-  run is always shown for complete logs.
-- **New Campaign only creates the Intro stage** when starting a brand new
-  campaign. Auto-discovery treats a single-stage campaign as fully valid.
-  Use "Add the next stage to an existing campaign" (same page) to add
-  follow-ups later.
-- **Campaign creation is a direct commit, not a PR.** The in-app "I've
-  reviewed this content" checkbox is the only remaining confirmation step
-  — there's no second human review before it's live. If you want that
-  back, the previous PR-based flow is straightforward to restore (open an
-  issue/ask if you need it).
-
-## Testing
-
-`streamlit_app/tests/` covers every non-UI module (auth, github_client,
-sheets_readonly, preview_logic's pure pieces, send_logic, campaign_builder,
-overview_logic, replies_logic, accounts_logic) with mocked HTTP/Sheets
-calls, plus page-level smoke tests that actually execute each page script
-via Streamlit's own `AppTest` harness — no real network, no real
-credentials needed. Run with:
-
-```bash
-cd streamlit_app
-python -m pytest tests/ -v
+```yaml
+status: active              # active | paused | draft | deleted   (default: active)
+schedule:                   # the SENDING WINDOW — see the note below
+  timezone: America/New_York      # a real IANA name, never "EST"
+  window_start: '09:00'
+  window_end: '17:00'
+  send_days: [mon, tue, wed, thu, fri]
+sending:
+  daily_limit: 100
+  per_account_daily_limit: 10     # optional
+  sender_rotation: false
+  rotation_accounts: [sales1, sales2]   # optional; omit to rotate across all accounts
+  delay_min_minutes: 3
+  delay_max_minutes: 7
+default_sender_account: sales1
+reply_monitor:
+  lookback_hours: 24              # keep >= 14 (see Schedule)
+asana:
+  enabled: true
+  project_name: Creator Outreach
+tracker_sync:
+  enabled: true
+# Advanced: declare BOTH together to turn off stage auto-discovery and require every file:
+# stages: [...]   variants: [...]
+# Advanced: sheet_id, master_tab, responses_tab, send_log_tab, error_log_tab, dashboard_tab
 ```
 
-This does **not** verify a live deployment — the Streamlit UI itself, the
-real GitHub token, and the real Google credential all need one manual pass
-against your actual repo/Sheet after deploying. Use the checklist below.
+### Sending window — read this
 
-## Manual verification checklist (do this once, after deploying)
+**A campaign's sending window comes only from its `schedule:` block.** If a campaign has no `schedule:` block, the code treats it as "always allowed" — it can send at any hour. The `timezone` / `window_start` / `window_end` that appear under `sending:` in `config/settings.yaml` are required by validation but are **not used to enforce a window**. Set a schedule for every campaign: *Campaigns → the campaign → Schedule*.
 
-Everything above is verified with mocked Google/GitHub calls — this
-section is the real pass against your actual repo, Sheet, and GitHub
-Actions. Go through it in order; each step depends on the one before it.
+### Email accounts
 
-**Setup**
-- [ ] Read-only service account created, shared to the Sheet as **Viewer**
-      (not Editor) — confirm in the Sheet's Share dialog.
-- [ ] Fine-grained GitHub PAT created, scoped to **only this repo**.
-- [ ] `secrets.toml` filled in on Streamlit Community Cloud and the app
-      deploys without a "secrets not found" error.
-- [ ] At least one user's hash generated via
-      `tools/generate_password_hash.py` and added to `[auth_users]`.
+Each sending account is one JSON secret, `EMAIL_ACCOUNT_SLOT_1` … `EMAIL_ACCOUNT_SLOT_10`:
 
-**Login**
-- [ ] Wrong password is rejected with an error, correct password logs in.
-- [ ] 5 wrong attempts in a row lock you out (matches the automated test —
-      confirming the real deployment behaves the same as the mocked one).
-- [ ] "Log out" in the sidebar actually requires logging in again.
-- [ ] Sidebar icons render correctly (📈 📊 🚀 📧 ➕), not as garbled text —
-      if they still look broken, hard-refresh the browser tab first.
+```json
+{"name": "sales1", "address": "sales1@example.com", "app_password": "…"}
+```
 
-**Overview / Dashboard (read-only — safe to test freely)**
-- [ ] Campaign selector lists your real campaign(s) from `templates/`.
-- [ ] Numbers shown match the Sheet's own Dashboard tab (run
-      `dashboard.yml` manually first if it hasn't run recently, so both
-      are reading the same underlying data).
-- [ ] "Refresh now" actually re-fetches (change something in the Sheet by
-      hand, confirm it shows up after refresh, not just after 30s).
+Gmail needs only those three fields (an app password, not the login password). A non-Gmail provider also sets `smtp_host`, `smtp_port`, `smtp_username` and the matching `imap_host`, `imap_port`, `imap_username`. The control panel's *Email Accounts* page manages the slots for you and records name → slot → address (never a password) in `config/email_account_slots.yaml`. The older single `EMAIL_ACCOUNTS_JSON` secret still works and is merged with the slots; **a slot wins over a same-named `EMAIL_ACCOUNTS_JSON` entry**, so migrating an account is just "Add Account" with the same name.
 
-**Campaigns — Preview tab (safe, nothing is sent)**
-- [ ] Preview returns the same eligible leads and rendered content you'd
-      get from `python outreach.py preview` locally, for the same
-      campaign/stage/batch size.
-- [ ] A lead with `Approval` blank or `No` correctly does NOT appear.
+---
 
-**Campaigns — Settings tab's Send section (uses a REAL test campaign /
-low daily limit for this)**
-- [ ] Send is only offered while the campaign's status is 🟢 Running —
-      switch it to Draft/Paused and confirm the Send button disappears,
-      replaced by an explanation, with nothing dispatched.
-- [ ] Submitting without typing `SEND` is rejected — no dispatch call
-      happens (check the repo's Actions tab: no new run appears).
-- [ ] Typing `SEND` and clicking Send Batch actually triggers a real
-      `send_batch.yml` run — confirm in the repo's Actions tab.
-- [ ] "Refresh run status" reflects real progress (queued → in_progress →
-      completed).
-- [ ] The Sheet's Send Log gets the new row(s) after the run completes,
-      and the Analytics tab reflects them after "🔄 Refresh data".
+## Setup from scratch
 
-**Campaigns — Responses tab's Check Replies section**
-- [ ] Triggers a real `check_replies.yml` run, visible in the Actions tab.
-- [ ] The reply list shows real Response Sheet rows, with `ActionTaken`
-      clearly labeled (🛑 vs 📝, "NOT stopped") when a reply did NOT stop
-      the sequence.
+### 1. Google
 
-**Campaigns — Sequences tab's Maintenance section (Backfill)**
-- [ ] Dry run shows what would be backfilled without writing anything.
-- [ ] Turning off dry run and re-running actually writes `ThreadSubject`
-      values to the Master Sheet.
+1. Create a Google Cloud project; enable the **Google Sheets API** (and the **Google Drive API** if you use the UGC tracker).
+2. Create a service account and download its JSON key — this is `GOOGLE_SERVICE_ACCOUNT_JSON` for GitHub Actions. Share the campaign spreadsheet, the Creator Tracker sheet and the UGC tracker sheet with its email address as **Editor**. For the UGC tracker, also share the Raw and Tiktok Drive folders with it (a Drive `403` means either the Drive API is off for the project or the folder is not shared).
+3. Create a **second**, separate service account for the control panel and share the campaign spreadsheet with it as **Viewer** only. Its JSON goes in Streamlit Secrets. Keeping it viewer-only is what guarantees the web app can never write to your data.
 
-**Email Accounts**
-- [ ] Shows every account (from `[email_accounts_directory]` and/or the
-      slot mapping file), with today's real send count from the Send Log
-      and live connection status.
-- [ ] "＋ Add Account" is disabled until the confirmation checkbox is
-      checked; submitting creates a real `EMAIL_ACCOUNT_SLOT_N` secret —
-      confirm in the repo's Settings → Secrets tab (you'll see the name,
-      never the value) and a real commit to `config/email_account_slots.yaml`.
-- [ ] Editing an account with the password field left blank updates only
-      the address (check the commit only touched the mapping file, not
-      a secret) — filling in a new password updates the secret too.
-- [ ] Removing requires the confirmation checkbox; confirm the secret is
-      actually gone from Settings → Secrets afterward.
+### 2. GitHub repository secrets
 
-**New Campaign — via the Campaigns tab's ➕ New Campaign, creates a REAL
-campaign, live immediately**
-- [ ] The "Create Campaign" / "Add Stage" button is disabled until the
-      confirmation checkbox is checked.
-- [ ] Submitting commits directly — check the repo's commit history, NOT
-      the Pull Requests tab (there shouldn't be one).
-- [ ] The campaign appears in the Campaigns list within a minute or two,
-      with its Sheet tabs already created (no "tab doesn't exist" error)
-      — this confirms the auto-triggered Dashboard-workflow tab
-      initialization worked.
-- [ ] Adding a follow-up stage (Sequences tab → "Add a follow-up stage")
-      only offers variant letters matching the campaign's existing
-      ones — try it on a multi-variant test campaign to confirm.
+*Settings → Secrets and variables → Actions.*
 
-If any step fails, check the specific module it exercises (`auth.py`,
-`github_client.py`, `sheets_readonly.py`, `campaign_builder.py`) against
-the automated tests for that module first — a live-only failure usually
-means a secrets/permission mismatch, not a logic bug (the logic is what
-the automated test suite covers).
+| Secret | Needed for | Notes |
+|---|---|---|
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | everything | the Editor service account |
+| `EMAIL_ACCOUNT_SLOT_1` … `_10` (and/or `EMAIL_ACCOUNTS_JSON`) | send, replies, health | see Email accounts |
+| `ANTHROPIC_API_KEY` | reply intent labels | optional; blank labels without it |
+| `ASANA_ACCESS_TOKEN` | Asana sync, UGC sync | |
+| `ASANA_DEFAULT_ASSIGNEE_EMAIL` | Asana sync | optional default task assignee |
+| `CREATOR_TRACKER_SHEET_ID`, `CREATOR_TRACKER_WORKSHEET_NAME` | Creator Tracker sync | the tab's own name, not the file name |
+| `UGC_TRACKER_SHEET_ID`, `UGC_TRACKER_RAW_FOLDER_ID`, `UGC_TRACKER_TIKTOK_FOLDER_ID`, `UGC_TRACKER_ASANA_PROJECT_GID` | UGC tracker | all required |
+| `UGC_TRACKER_SHARED_DRIVE_ID` | UGC tracker | optional; only if automatic Shared Drive discovery fails |
+
+### 3. The control panel
+
+1. Deploy on [Streamlit Community Cloud](https://share.streamlit.io): main file `streamlit_app/app.py`.
+2. Create a **fine-grained GitHub token** scoped to *only this repository* with: **Actions** (read & write — start workflows, poll status), **Contents** (read & write — templates, settings and campaign files are committed directly) and **Secrets** (read & write — only for the Email Accounts page's Add/Edit/Remove; it lets the token overwrite or delete account credentials, though it can never read one back). **No Pull requests permission is needed.**
+3. For each colleague run `python streamlit_app/tools/generate_password_hash.py` and paste the printed `[auth_users.<name>]` block into Streamlit Secrets (only a salted hash is stored).
+4. Fill in Streamlit Secrets from `streamlit_app/secrets.toml.example`: `shared_sheet_id`, `[github]` (token, owner, repo), `[google_sheets_readonly]`, `[auth_users.*]`, and optionally `[email_accounts_directory]` (names and addresses only) for accounts still managed the legacy way. **Never commit a real `secrets.toml`.**
+
+### 4. Asana
+
+Create (or use) a project with the six sections named exactly as in the table under [Asana](#asana), put the API token in `ASANA_ACCESS_TOKEN`, and set `asana.enabled: true` and `asana.project_name` for each campaign (from *Settings → Asana Sync*). Asana custom-field names should match Sheet column names where you want them filled automatically.
+
+### 5. First campaign
+
+Create it from the control panel (*Campaigns → ＋ New Campaign*), upload leads, **set its Schedule**, run *Preview*, then *Launch*.
+
+---
+
+## Day-to-day use
+
+- **Start a campaign:** ＋ New Campaign → edit templates under *Sequences* → upload leads under *Data* → set the *Schedule* → *Preview* → *Launch*. A new campaign starts as a **draft** and sends nothing until launched.
+- **Watch it:** *Analytics* (by stage, variant and sender; errors) and the *Overview* / *Dashboard* pages. Each Auto Send run writes a plain summary in the workflow's job summary — including a line for every campaign that was skipped or had nothing due.
+- **Handle replies:** *Responses* shows conversations (all messages from one person grouped). Reply from there, mark as read, or click *Check Replies Now* for an immediate check.
+- **Pause:** *Pause* on the campaign. Paused, draft and deleted campaigns are never sent to.
+- **Fix one lead:** *Data → Manage a lead* (stop it, change its Asana stage, correct its reply status).
+- **Remove a campaign:** *Temporarily Remove* hides it and stops it sending; *Permanently Delete* is irreversible. Both are under *Settings → Danger Zone*.
+- **Force fresh data:** the control panel caches Sheet reads for 30 seconds; *Refresh* or *Force a live check (bypasses every cache)* skips the wait.
+
+---
+
+## Safety design
+
+What stops the bad outcomes:
+
+- **No duplicate emails.** The "already sent this stage" check reads the Sheet; sends are serialised by the shared lock; a running job is never cancelled; and Auto Send is never given a short timeout.
+- **A reply is never overwritten.** Sheet writes touch only the named cells — never a whole row — and sending and replying take turns.
+- **Typed confirmation.** Send Batch needs `SEND` typed exactly, both in the control panel and as a check inside the workflow.
+- **Sending window, daily and per-account limits, and campaign status** are enforced inside `send_batch` itself, so they apply to manual and scheduled sends alike.
+- **A broken campaign cannot stop the others.** Auto Send, Check Replies and the hub list isolate failures per campaign and report them.
+- **The web app cannot damage data.** It reads with a viewer-only account and has no email passwords.
+- **Manual decisions are respected.** Nothing moves an Asana task into or out of *Rights Secured* / *Declined / Dead* by itself, and the Creator Tracker and UGC syncs never overwrite content a person has entered.
+
+---
+
+## Privacy and security
+
+- **Keep this repository private.** The control panel commits lead imports (names and email addresses), reply texts, removal lists and read-marks into `imports/`, `replies/`, `removals/` and `mark_read/`. Each workflow deletes its file after processing, **but a deleted file remains in git history**, and in a public repository that history is readable by anyone. Public repositories do get free Actions minutes; a private one has a monthly allowance that this schedule would likely exceed on a free plan — that trade-off is real, but it is a decision to make knowingly.
+- **Secrets live only in GitHub Secrets and Streamlit Secrets.** Email passwords can be written from the control panel but never read back.
+- **Login** to the control panel is username + password, stored as a salted PBKDF2 hash.
+- **`shared_sheet_id` is committed** in `config/settings.yaml`. It is an identifier, not a credential — the spreadsheet itself must stay shared only with the service accounts and your team.
+- **Least privilege:** the control panel's Google account is viewer-only and its GitHub token is limited to this repository.
+
+---
+
+## Testing and CI
+
+```bash
+pip install -r requirements.txt
+python -m pytest tests/ -q                       # engine + workflow schedules
+
+pip install -r requirements.txt -r streamlit_app/requirements.txt pytest
+python -m pytest streamlit_app/tests/ -q         # control panel
+```
+
+CI (`.github/workflows/ci.yml`) runs both suites on every push to `main` and every pull request, and first checks that the control-panel fixture repo is committed. Tests never touch real Google, GitHub, Asana or email: they use fakes and fixture data (`tests/fixtures/`, `streamlit_app/tests/fixtures/`).
+
+`tests/test_workflow_schedules.py` expands the real cron lines into concrete IST run times and fails if a run drifts outside 5 PM–5 AM, off the 30-minute grid or out of order; if two lock-holders share a minute; if a lock or timeout setting could cancel a send; or if a reply lookback is shorter than the overnight gap.
+
+**What tests cannot prove:** real timing on GitHub (delays, queue replacement, the 60-day rule), live Google/Asana/email behaviour, and the deployed Streamlit app. Those are only visible on the real Actions tab and in the running app.
+
+---
+
+## Troubleshooting
+
+| You see | Likely cause | What to do |
+|---|---|---|
+| A workflow run marked **Cancelled** | A newer run took the single waiting slot | Normal; nothing was lost (see Schedule) |
+| Nothing sent overnight | Campaign not *Active*; outside its own `schedule:` window or send days; daily limit reached; nobody due yet | Read the Auto Send job summary — it states why for every campaign |
+| A campaign sends at odd hours | It has no `schedule:` block | Set its Schedule |
+| *"Tab … doesn't exist yet"* | Tabs are created on first Preview / Send / Check Replies | Run one of those |
+| Google `429` / quota errors | Too many Sheets reads in a minute | Wait; the shared lock already serialises the workflows |
+| An Asana task keeps returning to a stage | A stale `ManualAsanaStage` override disagrees with where you moved it | *Manage a lead* → clear or update the override. Moves made directly in Asana to *Rights Secured* / *Declined / Dead* are respected automatically |
+| Replies seem missing | Check Replies only runs 5 PM–5 AM IST; or an inbox login is failing; or lookback too short | *Check Replies Now*; *Email Accounts* page for health; keep lookback ≥ 14 h |
+| UGC tracker: Drive `403` | Drive API off for the project, or the folder is not shared with the service account | Enable the API; share the exact folder; set `UGC_TRACKER_SHARED_DRIVE_ID` if it is on a Shared Drive |
+| UGC tracker: a GID shows as `1.21894E+15` | An old row written before the text-format fix | Retype it with a leading apostrophe, e.g. `'1218941739494020` |
+| Scheduled runs stopped entirely | GitHub disabled schedules after 60 days of inactivity | Re-enable under the Actions tab |
+| A page shows old data | 30-second read cache | *Refresh* / *Force a live check* |
+
+---
+
+## Known limitations
+
+- **Replies and syncs pause 5 AM–5 PM IST** (by design of the window) unless triggered by hand.
+- **A long Auto Send blocks the other lock-holders** until it finishes (by design — they write the same cells).
+- **Manual *Send Batch* and Auto Send use different locks** (`send-batch-<campaign>` vs `google-sheets-api`), so nothing prevents both running at once; if they overlapped they could both send the same stage.
+- **The sending window is checked when each stage's batch starts**, not between rounds, so a batch that starts inside the window can keep sending after it closes.
+- **`Approval` is informational**; some old help text still says otherwise.
+- **`sending.timezone/window_*` in `settings.yaml` are not enforced** (only `schedule:` is).
+- **Check Account Health is not subject to the 5 PM–5 AM window** (it runs every 2 hours, around the clock). Manual runs never are.
+- **The UGC tracker is not shown in the control panel** — it runs only from GitHub Actions.
+- **Streamlit Community Cloud's free tier sleeps** after about 12 hours idle; the next visitor waits roughly 30 seconds.
