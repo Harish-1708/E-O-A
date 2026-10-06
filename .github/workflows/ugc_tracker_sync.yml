@@ -8,7 +8,22 @@ name: UGC Tracker Sync
 # that pipeline, and vice versa.
 on:
   schedule:
-    - cron: "*/30 * * * *"  # every 30 minutes — change to "0 * * * *" for hourly if preferred
+    # Every 30 minutes, but ONLY between 5:00 PM and 5:00 AM IST — the
+    # window that covers US business hours. GitHub cron is always UTC
+    # and IST is UTC+5:30, so 5 PM-5 AM IST is 11:30-23:30 UTC (the
+    # window never crosses midnight in UTC). The three lines below
+    # make 24 runs a day, from 5:04 PM to 4:34 AM IST, and nothing
+    # outside that. Manual "Run workflow" / in-app buttons are unaffected.
+    # UGC Tracker Sync runs at IST :04 and :34.
+    # Minutes are staggered and kept off :00/:30 on purpose: GitHub's
+    # own docs say scheduled runs are delayed (and some dropped) under
+    # load, worst at the start of the hour. Cycle order each half hour,
+    # IST: Check Replies :07, Auto Send :13, Sync Asana :19, Dashboard
+    # :25 (UGC Tracker Sync :04, separate lock) — replies first, so a
+    # reply is recorded before the next send decides who is due.
+    - cron: "34 11 * * *"        # 5:04 PM IST
+    - cron: "4,34 12-22 * * *"  # every half hour after that
+    - cron: "4 23 * * *"             # 4:34 AM IST (last run of the night)
   workflow_dispatch: {}
 
 concurrency:
