@@ -225,3 +225,48 @@ def test_manual_run_buttons_keep_working(name):
     """The app's 'Check Replies Now' / 'Sync Now' buttons and the Actions
     tab's 'Run workflow' use workflow_dispatch; the window must not remove it."""
     assert "workflow_dispatch" in _triggers(_load(name))
+
+
+# ------------------------------------------- the schedule gap vs. reply lookback
+
+def _longest_gap_minutes(workflow):
+    """Longest stretch between two consecutive runs, wrapping around the
+    clock — for a 5 PM-5 AM schedule that is the daytime gap."""
+    minutes = schedule_ist_minutes(workflow)
+    following = minutes[1:] + minutes[:1]
+    return max(((nxt - cur) % (24 * 60)) or 24 * 60 for cur, nxt in zip(minutes, following))
+
+
+def _reply_lookback_hours_everywhere():
+    """(label, hours) for the global default and for every campaign that
+    overrides it."""
+    root = os.path.abspath(os.path.join(WORKFLOWS_DIR, "..", ".."))
+    with open(os.path.join(root, "config", "settings.yaml")) as handle:
+        settings = yaml.safe_load(handle)
+    found = [("settings.yaml default", settings["default_campaign_settings"]["reply_monitor"]["lookback_hours"])]
+    campaigns_dir = os.path.join(root, "config", "campaigns")
+    for filename in sorted(os.listdir(campaigns_dir)):
+        if filename.endswith(".yaml"):
+            with open(os.path.join(campaigns_dir, filename)) as handle:
+                override = yaml.safe_load(handle) or {}
+            hours = (override.get("reply_monitor") or {}).get("lookback_hours")
+            if hours is not None:
+                found.append((f"campaigns/{filename}", hours))
+    return found
+
+
+def test_the_longest_gap_between_reply_checks_is_what_we_expect():
+    """Pins the number the next test depends on: last run 4:37 AM IST to the
+    next 5:07 PM IST is 12.5 hours."""
+    assert _longest_gap_minutes(_load("check_replies.yml")) == 12 * 60 + 30
+
+
+def test_reply_lookback_always_reaches_back_further_than_the_overnight_gap():
+    """Check Replies only looks back `lookback_hours`. With nothing running
+    from ~5 AM to ~5 PM IST, a lookback shorter than that gap would silently
+    miss every reply that arrived in the middle of it. One hour of margin."""
+    gap_hours = _longest_gap_minutes(_load("check_replies.yml")) / 60
+    for label, hours in _reply_lookback_hours_everywhere():
+        assert hours >= gap_hours + 1, \
+            f"{label}: lookback_hours={hours} is too short — Check Replies has a {gap_hours:g}h gap " \
+            f"each day, so replies could be missed. Use at least {gap_hours + 1:g}."
