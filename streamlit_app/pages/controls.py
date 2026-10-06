@@ -193,13 +193,15 @@ with send_tab:
                 st.error(f"Failed to fetch run status: {exc}")
 
 # ---------------------------------------------------------------------------
-# Check Replies — also runs automatically every 30 min; this button is a
-# manual trigger for convenience. The Response Sheet is already updated the
+# Check Replies — also runs automatically every 30 min, but only between
+# 5 PM and 5 AM IST (see check_replies.yml); this button is a manual
+# trigger for convenience, and the only way to check outside those hours. The Response Sheet is already updated the
 # moment the run finishes, so this tab shows those results directly rather
 # than just linking out to the Actions log.
 # ---------------------------------------------------------------------------
 with replies_tab:
-    st.caption("This also runs automatically every 30 minutes — use this only if you want it to check right now.")
+    st.caption("This also runs automatically every 30 minutes, but only between 5 PM and 5 AM IST. "
+               "Outside those hours, replies are checked only when you click this.")
 
     if st.button("Check Replies Now"):
         try:
