@@ -621,6 +621,99 @@ the next redeploy.
 **If you add a new config file the app writes, add a live reader for it
 at the same time**, or it will reproduce this exact bug.
 
+## Scheduled runs — every 30 minutes, 5 PM to 5 AM IST only
+
+Five workflows run on a schedule. All five now run every 30 minutes, but
+**only between 5:00 PM and 5:00 AM IST** (24 runs a day each). Outside that
+window nothing runs on its own. Manual triggers — the in-app buttons and the
+Actions tab's "Run workflow" — are unaffected and work at any hour.
+
+The window is the IST equivalent of US business hours. Every active campaign
+sends 9 AM-5 PM in New York or Chicago time, which is roughly 6:30 PM-4:30 AM
+IST, so the window comfortably contains it. The schedule only decides when a
+job *wakes up*; each campaign's own sending window (timezone + hours, checked
+inside `send_batch`) still decides whether anything is actually sent.
+
+| Workflow | Runs at (IST, every half hour) | Cron lines (UTC) |
+|---|---|---|
+| Check Replies | :07 and :37 — 5:07 PM to 4:37 AM | `37 11` / `7,37 12-22` / `7 23` |
+| Auto Send | :13 and :43 — 5:13 PM to 4:43 AM | `43 11` / `13,43 12-22` / `13 23` |
+| Sync Asana + Creator Tracker | :19 and :49 — 5:19 PM to 4:49 AM | `49 11` / `19,49 12-22` / `19 23` |
+| Update Dashboard | :25 and :55 — 5:25 PM to 4:55 AM | `55 11` / `25,55 12-22` / `25 23` |
+| UGC Tracker Sync | :04 and :34 — 5:04 PM to 4:34 AM | `34 11` / `4,34 12-22` / `4 23` |
+
+(each cron line is followed by `* * *`). GitHub cron is always UTC and IST is
+UTC+5:30, so 5 PM-5 AM IST is 11:30-23:30 UTC; the window never crosses
+midnight in UTC, which is why three simple lines are enough.
+
+**Why those minutes.** They are staggered, in the order Check Replies, Auto
+Send, Sync Asana, Dashboard, so a reply is recorded *before* the next send
+decides who is due, and Asana and the dashboard reflect both afterwards. They
+are kept off :00 and :30 because GitHub's own documentation says scheduled runs
+are delayed under load, worst at the start of the hour, and that some can be
+dropped.
+
+### What happens when an Auto Send run takes longer than 30 minutes
+
+This is normal, not a failure. Sending is paced: one email per mailbox at the
+same moment (a "round"), then a random 3-7 minute pause before the next round,
+so a batch of any size runs for as long as its rounds take — an hour or more is
+ordinary. The next scheduled Auto Send does **not** start a second copy. It
+waits. Two sends never run at once, which is what prevents duplicate emails.
+
+The detail that matters, straight from GitHub's documentation: a concurrency
+group allows **one running and one waiting** run. If another run arrives while
+one is already waiting, the older waiting run is dropped (shown as
+**Cancelled** — expected, not an error) and the newer takes its place. All
+four Google-Sheets workflows share one group, so during a long send:
+
+- nothing else that shares the lock can start (Check Replies, Sync Asana,
+  Dashboard all wait);
+- of everything that arrives meanwhile, only the newest one keeps its place;
+- when the send ends, that one waiting run starts, and the normal rhythm is
+  back within about a cycle.
+
+Nothing is lost by a dropped run: every scheduled run is a full sweep of
+whatever is due right now, so the next one picks up the same work. The real
+cost is that replies are not checked, and Asana is not synced, *while a long
+send is running*.
+
+**Why Auto Send stays inside the shared lock.** It would be tempting to give
+Auto Send its own lock so it stops blocking the others. Do not: sending and
+reply-checking both write the same `Status` column on the same lead rows. If
+they overlapped, a reply could be overwritten by a send in progress, and a lead
+who had just replied could be sent a follow-up.
+
+**Timeouts.** Check Replies, Sync Asana and Dashboard have 30/30/20-minute
+limits so one hung network call cannot hold the shared lock for hours. Auto Send
+deliberately keeps GitHub's maximum (360): force-stopping it mid-round could
+leave an email sent but not yet recorded, and the next run would resend it.
+
+### Caveats that only the real Actions tab can confirm
+
+- **Delays and dropped runs.** `schedule` is best-effort. A run can start
+  several minutes late, and under heavy GitHub load occasionally not at all.
+- **60-day inactivity.** In a public repository, GitHub switches scheduled
+  workflows off after 60 days with no repository activity. Ordinary commits
+  (including the ones the app makes) count; a repo left untouched for two
+  months would silently stop. Re-enable from the Actions tab if it ever happens.
+- **Runs only start from the default branch**, so a schedule change takes
+  effect once it is merged to `main`.
+- **Replies arriving between 5 AM and 5 PM IST wait until about 5:07 PM IST**
+  unless someone clicks "Check Replies Now". The same applies to the Asana,
+  Creator Tracker, UGC and dashboard refreshes. That is the direct effect of
+  restricting the window.
+- **Check Account Health is unchanged** (every 2 hours, around the clock). It
+  shares the lock, so now and then it lands in the same minute as Check Replies
+  — harmless, they just take turns.
+
+`tests/test_workflow_schedules.py` expands the real cron lines into concrete IST
+run times and fails if any run falls outside the window, drifts off the 30-minute
+grid, loses its place in the order, shares a minute with another lock-holder, or
+if a lock or timeout setting is changed in a way that could cancel a send.
+To move the window, edit the three cron lines in each workflow and update the
+constants at the top of that test.
+
 ## Known limitations (by design, not bugs)
 
 - **Follow-ups no longer get stuck on a sender account removed from the
