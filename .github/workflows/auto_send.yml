@@ -18,20 +18,19 @@ name: Auto Send
 on:
   workflow_dispatch: {}
   schedule:
-    # Once an hour, but ONLY between 5:00 PM and 5:00 AM IST - the window that
-    # covers US business hours. GitHub cron is always UTC and IST is UTC+5:30,
-    # so this one line (minute 43 of UTC hours 11-22) fires at 5:13 PM,
-    # 6:13 PM ... 4:13 AM IST: 12 runs a night, none outside the window.
-    # Manual "Run workflow" and the in-app buttons are unaffected.
-    # Auto Send runs at IST :13 of every hour in the window.
-    # Minute within each hour (IST): UGC Tracker Sync :04, Check Replies :07,
-    # Auto Send :13, Sync Asana :19, Dashboard :25 - replies first, so a reply
-    # is recorded before the next send decides who is due; all kept off :00 and
-    # :30, the busiest moments on GitHub. GitHub's schedule is best-effort (a
-    # run can arrive late or not at all), which is why every run is a full
-    # sweep of what is due right now: a missed hour loses nothing, the next
-    # run covers it.
-    - cron: "43 11-22 * * *"   # 5:13 PM ... 4:13 AM IST
+    # Once an hour, around the clock. GitHub cron is always UTC, so the minute
+    # below is minutes past each UTC hour. Auto Send runs at :43.
+    # Minute within each hour (UTC): UGC Tracker Sync :34, Check Replies :37,
+    # Auto Send :43, Sync Asana :49, Dashboard :55 - replies first, so a reply
+    # is recorded before the next send decides who is due. All kept off :00 and
+    # :30, the busiest moments on GitHub.
+    # Running every hour is harmless when nothing is due: Auto Send skips a
+    # campaign outside its sending window without opening its Sheet, so only
+    # runs inside a window do any work. GitHub's schedule is best-effort (a run
+    # can arrive late or not at all), which is why every run is a full sweep of
+    # what is due right now: a missed hour loses nothing, the next run covers
+    # it. Manual "Run workflow" and the in-app buttons are unaffected.
+    - cron: "43 * * * *"   # :43 past every hour
 
 # Two overlapping runs must never happen here specifically: send_batch
 # reads "how many sent today" ONCE at the start of a run to compute the
