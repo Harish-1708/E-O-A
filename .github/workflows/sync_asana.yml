@@ -20,22 +20,20 @@ on:
         description: "Campaign name — leave blank to sync every enabled campaign instead"
         required: false
   schedule:
-    # Every 30 minutes, but ONLY between 5:00 PM and 5:00 AM IST — the
-    # window that covers US business hours. GitHub cron is always UTC
-    # and IST is UTC+5:30, so 5 PM-5 AM IST is 11:30-23:30 UTC (the
-    # window never crosses midnight in UTC). The three lines below
-    # make 24 runs a day, from 5:19 PM to 4:49 AM IST, and nothing
-    # outside that. Manual "Run workflow" / in-app buttons are unaffected.
-    # Sync Asana + Creator Tracker runs at IST :19 and :49.
-    # Minutes are staggered and kept off :00/:30 on purpose: GitHub's
-    # own docs say scheduled runs are delayed (and some dropped) under
-    # load, worst at the start of the hour. Cycle order each half hour,
-    # IST: Check Replies :07, Auto Send :13, Sync Asana :19, Dashboard
-    # :25 (UGC Tracker Sync :04, separate lock) — replies first, so a
-    # reply is recorded before the next send decides who is due.
-    - cron: "49 11 * * *"        # 5:19 PM IST
-    - cron: "19,49 12-22 * * *"  # every half hour after that
-    - cron: "19 23 * * *"             # 4:49 AM IST (last run of the night)
+    # Once an hour, but ONLY between 5:00 PM and 5:00 AM IST - the window that
+    # covers US business hours. GitHub cron is always UTC and IST is UTC+5:30,
+    # so this one line (minute 49 of UTC hours 11-22) fires at 5:19 PM,
+    # 6:19 PM ... 4:19 AM IST: 12 runs a night, none outside the window.
+    # Manual "Run workflow" and the in-app buttons are unaffected.
+    # Sync Asana + Creator Tracker runs at IST :19 of every hour in the window.
+    # Minute within each hour (IST): UGC Tracker Sync :04, Check Replies :07,
+    # Auto Send :13, Sync Asana :19, Dashboard :25 - replies first, so a reply
+    # is recorded before the next send decides who is due; all kept off :00 and
+    # :30, the busiest moments on GitHub. GitHub's schedule is best-effort (a
+    # run can arrive late or not at all), which is why every run is a full
+    # sweep of what is due right now: a missed hour loses nothing, the next
+    # run covers it.
+    - cron: "49 11-22 * * *"   # 5:19 PM ... 4:19 AM IST
 
 # Same reasoning as check_replies.yml's concurrency block: two overlapping
 # syncs (a scheduled run and a manual click close together) could both
