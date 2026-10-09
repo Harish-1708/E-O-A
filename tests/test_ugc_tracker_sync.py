@@ -826,3 +826,207 @@ def test_sync_once_never_touches_status_or_edited_folder_on_an_existing_row():
     assert 7 not in touched_cols  # Status
     assert 8 not in touched_cols  # Edited folder
     assert 9 not in touched_cols  # Notes
+
+
+# ---------- Rights Secured assignee swap: orchestration ----------
+
+import ugc_tracker_sync
+from ugc_tracker_sync import reassign_rights_secured_tasks, _run_reassign_step
+
+OLD_EMAIL, NEW_EMAIL = "old.person@example.com", "new.person@example.com"
+
+
+def _rs_task(gid, assignee_gid="100", section="Rights Secured", completed=False):
+    return {"gid": gid, "memberships": [{"section": {"name": section}}], "completed": completed,
+            "assignee": ({"gid": assignee_gid, "email": "x@x.com"} if assignee_gid else None)}
+
+
+class FakeAsanaModule:
+    """Stands in for asana_client: records every call, can be told to fail."""
+
+    def __init__(self, users=None, fail_updates_for=(), fail_user=None):
+        self.users = users or {OLD_EMAIL: {"gid": "100"}, NEW_EMAIL: {"gid": "200"}}
+        self.fail_updates_for = set(fail_updates_for)
+        self.fail_user = fail_user
+        self.get_user_calls, self.update_calls = [], []
+
+    def get_user(self, identifier, token, label="that user"):
+        self.get_user_calls.append(identifier)
+        if self.fail_user == identifier:
+            raise RuntimeError(f"Asana could not find or read {label} (HTTP 404).")
+        return self.users[identifier]
+
+    def update_task(self, task_gid, patch, token):
+        self.update_calls.append((task_gid, patch))
+        if task_gid in self.fail_updates_for:
+            raise RuntimeError("boom")
+
+
+def test_swap_is_off_and_makes_no_asana_call_unless_both_emails_are_given():
+    for frm, to in [("", ""), (OLD_EMAIL, ""), ("", NEW_EMAIL), ("  ", "  ")]:
+        fake = FakeAsanaModule()
+        result = reassign_rights_secured_tasks([_rs_task("1")], "tok", frm, to, asana=fake)
+        assert result["enabled"] is False
+        assert fake.get_user_calls == [] and fake.update_calls == []
+
+
+def test_swap_is_off_when_both_emails_are_the_same_person_in_any_casing():
+    fake = FakeAsanaModule()
+    result = reassign_rights_secured_tasks([_rs_task("1")], "tok", OLD_EMAIL, OLD_EMAIL.upper(), asana=fake)
+    assert result["enabled"] is False and fake.update_calls == []
+
+
+def test_swap_is_off_when_two_different_emails_resolve_to_the_same_asana_user():
+    fake = FakeAsanaModule(users={OLD_EMAIL: {"gid": "100"}, NEW_EMAIL: {"gid": "100"}})
+    result = reassign_rights_secured_tasks([_rs_task("1")], "tok", OLD_EMAIL, NEW_EMAIL, asana=fake)
+    assert result["enabled"] is False and fake.update_calls == []
+
+
+def test_swap_changes_only_the_matching_tasks_with_the_new_persons_id():
+    tasks = [_rs_task("a"), _rs_task("b"), _rs_task("c", assignee_gid="999"), _rs_task("d", assignee_gid=None),
+             _rs_task("e", section="Negotiating"), _rs_task("f", completed=True)]
+    fake = FakeAsanaModule()
+    result = reassign_rights_secured_tasks(tasks, "tok", OLD_EMAIL, NEW_EMAIL, asana=fake)
+    assert fake.update_calls == [("a", {"assignee": "200"}), ("b", {"assignee": "200"})]
+    assert result["reassigned"] == 2 and result["failed"] == 0
+    assert (result["left_other_assignee"], result["left_unassigned"], result["skipped_completed"]) == (1, 1, 1)
+    assert fake.get_user_calls == [OLD_EMAIL, NEW_EMAIL]  # each person looked up once, not per task
+
+
+def test_one_task_failing_does_not_stop_the_others_and_is_reported(capsys):
+    fake = FakeAsanaModule(fail_updates_for={"b"})
+    result = reassign_rights_secured_tasks([_rs_task("a"), _rs_task("b"), _rs_task("c")], "tok",
+                                            OLD_EMAIL, NEW_EMAIL, asana=fake)
+    assert [c[0] for c in fake.update_calls] == ["a", "b", "c"]   # c was still attempted after b failed
+    assert result["reassigned"] == 2 and result["failed"] == 1 and result["failed_task_gids"] == ["b"]
+    assert "could not update task b" in capsys.readouterr().out
+
+
+def test_an_unresolvable_user_raises_before_any_task_is_changed():
+    fake = FakeAsanaModule(fail_user=NEW_EMAIL)
+    with pytest.raises(RuntimeError):
+        reassign_rights_secured_tasks([_rs_task("a")], "tok", OLD_EMAIL, NEW_EMAIL, asana=fake)
+    assert fake.update_calls == []
+
+
+def test_running_it_twice_changes_nothing_the_second_time():
+    tasks = [_rs_task("a"), _rs_task("b")]
+    fake = FakeAsanaModule()
+    reassign_rights_secured_tasks(tasks, "tok", OLD_EMAIL, NEW_EMAIL, asana=fake)
+    for gid, change in fake.update_calls:                 # apply what Asana would now hold
+        next(t for t in tasks if t["gid"] == gid)["assignee"] = {"gid": change["assignee"], "email": "n@x.com"}
+    fake2 = FakeAsanaModule()
+    result = reassign_rights_secured_tasks(tasks, "tok", OLD_EMAIL, NEW_EMAIL, asana=fake2)
+    assert fake2.update_calls == [] and result["reassigned"] == 0
+
+
+# ---- the report line, and the exit-code contribution ----
+
+def test_report_when_unconfigured_says_off_and_is_not_a_failure(capsys):
+    fake = FakeAsanaModule()
+    assert _run_reassign_step([_rs_task("1")], "tok", "", "", asana=fake) is False
+    out = capsys.readouterr().out
+    assert "off" in out and ugc_tracker_sync.REASSIGN_FROM_ENV in out
+    assert fake.update_calls == []
+
+
+def test_report_when_only_one_email_is_set_is_loud_and_a_failure(capsys):
+    """Half a configuration is a mistake worth a red run — otherwise the
+    swap would sit silently off while looking set up."""
+    assert _run_reassign_step([_rs_task("1")], "tok", OLD_EMAIL, "", asana=FakeAsanaModule()) is True
+    assert "only one of" in capsys.readouterr().out
+
+
+def test_report_on_success_gives_exact_counts_and_is_not_a_failure(capsys):
+    fake = FakeAsanaModule()
+    failed = _run_reassign_step([_rs_task("a"), _rs_task("b", assignee_gid="999"), _rs_task("c", assignee_gid=None)],
+                                 "tok", OLD_EMAIL, NEW_EMAIL, asana=fake)
+    assert failed is False
+    assert ("3 task(s) in Rights Secured: swapped 1, failed 0. Left alone: 1 assigned to someone else, "
+            "1 unassigned, 0 completed.") in capsys.readouterr().out
+
+
+def test_report_on_a_task_failure_is_a_failed_run():
+    assert _run_reassign_step([_rs_task("a")], "tok", OLD_EMAIL, NEW_EMAIL,
+                               asana=FakeAsanaModule(fail_updates_for={"a"})) is True
+
+
+def test_report_when_a_user_cannot_be_found_is_a_failed_run_that_changed_nothing(capsys):
+    fake = FakeAsanaModule(fail_user=OLD_EMAIL)
+    assert _run_reassign_step([_rs_task("a")], "tok", OLD_EMAIL, NEW_EMAIL, asana=fake) is True
+    assert "FAILED before changing anything" in capsys.readouterr().out
+    assert fake.update_calls == []
+
+
+def test_no_report_line_ever_prints_an_email_address(capsys):
+    """This repository's Actions logs are public."""
+    for kwargs in (dict(frm="", to=""), dict(frm=OLD_EMAIL, to=""), dict(frm=OLD_EMAIL, to=NEW_EMAIL),
+                   dict(frm=OLD_EMAIL, to=OLD_EMAIL)):
+        _run_reassign_step([_rs_task("a")], "tok", kwargs["frm"], kwargs["to"], asana=FakeAsanaModule())
+    _run_reassign_step([_rs_task("a")], "tok", OLD_EMAIL, NEW_EMAIL, asana=FakeAsanaModule(fail_user=NEW_EMAIL))
+    out = capsys.readouterr().out
+    assert "@" not in out and "old.person" not in out and "new.person" not in out
+
+
+# ---- main(): where the step sits in a real run ----
+
+def _run_main(monkeypatch, env, sync_result=None, tasks=None, fake_asana=None, sync_raises=None):
+    """Runs the real main() with every network edge replaced, returning
+    (exit_code, ordered log of what happened)."""
+    import asana_client
+    log = []
+    for k, v in {"UGC_TRACKER_SHEET_ID": "S", "UGC_TRACKER_RAW_FOLDER_ID": "R", "UGC_TRACKER_TIKTOK_FOLDER_ID": "T",
+                 "UGC_TRACKER_ASANA_PROJECT_GID": "P", "GOOGLE_SERVICE_ACCOUNT_JSON": '{"client_email": "sa@x"}',
+                 "ASANA_TOKEN": "tok"}.items():
+        monkeypatch.setenv(k, v)
+    for k in (ugc_tracker_sync.REASSIGN_FROM_ENV, ugc_tracker_sync.REASSIGN_TO_ENV):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    class FakeSpreadsheet:
+        def worksheet(self, name):
+            return object()
+
+    monkeypatch.setattr(sys, "argv", ["ugc_tracker_sync.py"])
+    monkeypatch.setattr(ugc_tracker_sync, "_connect_sheets", lambda sid, info: (FakeSpreadsheet(), object()))
+
+    def fake_sync_once(*a, **k):
+        log.append("sheet sync")
+        if sync_raises:
+            raise sync_raises
+        return sync_result or {"new_rows": 0, "filled_in": 0, "ambiguous": 0}
+
+    monkeypatch.setattr(ugc_tracker_sync, "sync_once", fake_sync_once)
+    monkeypatch.setattr(asana_client, "get_all_project_tasks", lambda gid, tok: tasks if tasks is not None else [_rs_task("a")])
+    fake_asana = fake_asana or FakeAsanaModule()
+    monkeypatch.setattr(asana_client, "get_user", lambda *a, **k: (log.append("get_user"), fake_asana.get_user(*a, **k))[1])
+    monkeypatch.setattr(asana_client, "update_task", lambda *a, **k: (log.append("update_task"), fake_asana.update_task(*a, **k))[1])
+    return ugc_tracker_sync.main(), log
+
+
+def test_main_without_the_secrets_never_touches_asana_and_exits_clean(monkeypatch):
+    code, log = _run_main(monkeypatch, env={})
+    assert code == 0 and log == ["sheet sync"]
+
+
+def test_main_runs_the_swap_only_after_the_sheet_sync_has_finished(monkeypatch):
+    code, log = _run_main(monkeypatch, env={ugc_tracker_sync.REASSIGN_FROM_ENV: OLD_EMAIL,
+                                              ugc_tracker_sync.REASSIGN_TO_ENV: NEW_EMAIL})
+    assert code == 0
+    assert log == ["sheet sync", "get_user", "get_user", "update_task"]
+
+
+def test_main_a_swap_failure_never_undoes_or_blocks_the_sheet_sync_but_fails_the_run(monkeypatch, capsys):
+    code, log = _run_main(monkeypatch, env={ugc_tracker_sync.REASSIGN_FROM_ENV: OLD_EMAIL,
+                                              ugc_tracker_sync.REASSIGN_TO_ENV: NEW_EMAIL},
+                          fake_asana=FakeAsanaModule(fail_updates_for={"a"}))
+    assert code == 1 and log[0] == "sheet sync"
+    assert "New rows:" in capsys.readouterr().out   # the sheet sync's own result was still reported
+
+
+def test_main_does_not_attempt_the_swap_when_the_sheet_sync_itself_failed(monkeypatch):
+    with pytest.raises(RuntimeError, match="sheet down"):
+        _run_main(monkeypatch, env={ugc_tracker_sync.REASSIGN_FROM_ENV: OLD_EMAIL,
+                                    ugc_tracker_sync.REASSIGN_TO_ENV: NEW_EMAIL},
+                  sync_raises=RuntimeError("sheet down"))
