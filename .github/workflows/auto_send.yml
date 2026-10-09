@@ -5,32 +5,33 @@ name: Auto Send
 # a campaign's schedule config is just a check that sits there until a
 # human happens to click "Send Now" while it's true — not real automation.
 #
-# Every run here calls `outreach.py auto-send-all`, which loops over every
-# campaign, skips anything that isn't Running (Draft/Paused/Deleted are
-# never touched), and for each Running campaign, attempts every stage in
-# turn. send_batch's own existing checks (sending window, daily limit,
-# per-lead eligibility) decide whether anything actually goes out — most
-# stages on most runs will correctly do nothing, and that's not a failure,
-# just nothing being due yet.
+# Every run here calls `outreach.py auto-send-all`, which works ONLY on
+# campaigns that are in progress: Draft/Paused/Deleted are never touched,
+# a campaign outside its sending window is skipped without opening its
+# Sheet, and one with nothing due (Completed, or every lead still waiting
+# out a follow-up delay) costs a single read. Only stages that actually
+# have a lead due go on to send_batch, whose own checks (sending window,
+# daily limit, per-lead eligibility) still decide what goes out. This is
+# deliberately frugal: Google allows 60 Sheet reads a minute per account,
+# shared by every workflow, and the old attempt-every-stage approach used
+# about 55 of them in a single run.
 on:
   workflow_dispatch: {}
   schedule:
-    # Every 30 minutes, but ONLY between 5:00 PM and 5:00 AM IST — the
-    # window that covers US business hours. GitHub cron is always UTC
-    # and IST is UTC+5:30, so 5 PM-5 AM IST is 11:30-23:30 UTC (the
-    # window never crosses midnight in UTC). The three lines below
-    # make 24 runs a day, from 5:13 PM to 4:43 AM IST, and nothing
-    # outside that. Manual "Run workflow" / in-app buttons are unaffected.
-    # Auto Send runs at IST :13 and :43.
-    # Minutes are staggered and kept off :00/:30 on purpose: GitHub's
-    # own docs say scheduled runs are delayed (and some dropped) under
-    # load, worst at the start of the hour. Cycle order each half hour,
-    # IST: Check Replies :07, Auto Send :13, Sync Asana :19, Dashboard
-    # :25 (UGC Tracker Sync :04, separate lock) — replies first, so a
-    # reply is recorded before the next send decides who is due.
-    - cron: "43 11 * * *"        # 5:13 PM IST
-    - cron: "13,43 12-22 * * *"  # every half hour after that
-    - cron: "13 23 * * *"             # 4:43 AM IST (last run of the night)
+    # Once an hour, but ONLY between 5:00 PM and 5:00 AM IST - the window that
+    # covers US business hours. GitHub cron is always UTC and IST is UTC+5:30,
+    # so this one line (minute 43 of UTC hours 11-22) fires at 5:13 PM,
+    # 6:13 PM ... 4:13 AM IST: 12 runs a night, none outside the window.
+    # Manual "Run workflow" and the in-app buttons are unaffected.
+    # Auto Send runs at IST :13 of every hour in the window.
+    # Minute within each hour (IST): UGC Tracker Sync :04, Check Replies :07,
+    # Auto Send :13, Sync Asana :19, Dashboard :25 - replies first, so a reply
+    # is recorded before the next send decides who is due; all kept off :00 and
+    # :30, the busiest moments on GitHub. GitHub's schedule is best-effort (a
+    # run can arrive late or not at all), which is why every run is a full
+    # sweep of what is due right now: a missed hour loses nothing, the next
+    # run covers it.
+    - cron: "43 11-22 * * *"   # 5:13 PM ... 4:13 AM IST
 
 # Two overlapping runs must never happen here specifically: send_batch
 # reads "how many sent today" ONCE at the start of a run to compute the
