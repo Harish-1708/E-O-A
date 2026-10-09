@@ -220,3 +220,97 @@ def test_rights_expiration_to_sheet_date_blank_stays_blank():
 
 def test_rights_expiration_to_sheet_date_malformed_input_returns_blank_not_raise():
     assert rights_expiration_to_sheet_date("not-a-date") == ""
+
+
+# ---------- Rights Secured assignee swap: which tasks are changed ----------
+
+from ugc_tracker_logic import find_tasks_to_reassign, is_in_rights_secured
+
+FROM_GID, TO_GID = "100", "200"
+
+
+def _swap_task(gid, section="Rights Secured", assignee_gid=None, assignee_email=None, completed=False):
+    task = {"gid": gid, "memberships": [{"section": {"name": section}}], "completed": completed}
+    if assignee_gid is not None or assignee_email is not None:
+        task["assignee"] = {"gid": assignee_gid, "email": assignee_email}
+    else:
+        task["assignee"] = None
+    return task
+
+
+def _plan(tasks, from_email="old@x.com"):
+    return find_tasks_to_reassign(tasks, FROM_GID, from_email, TO_GID)
+
+
+def test_swaps_a_rights_secured_task_assigned_to_the_from_person():
+    plan = _plan([_swap_task("1", assignee_gid=FROM_GID, assignee_email="old@x.com")])
+    assert plan["updates"] == [{"task_gid": "1", "patch": {"assignee": TO_GID}}]
+    assert plan["rights_secured"] == 1
+
+
+def test_never_touches_a_task_outside_rights_secured_even_if_assigned_to_the_from_person():
+    """The whole point of scoping this: every other stage keeps its
+    default assignee, exactly as sync-asana sets it."""
+    tasks = [_swap_task(str(i), section=name, assignee_gid=FROM_GID, assignee_email="old@x.com")
+             for i, name in enumerate(["Sourced", "Outreach Sent", "Follow-up", "Negotiating", "Declined / Dead"])]
+    plan = _plan(tasks)
+    assert plan["updates"] == [] and plan["rights_secured"] == 0
+
+
+def test_a_task_assigned_to_somebody_else_is_left_alone_and_counted():
+    plan = _plan([_swap_task("1", assignee_gid="999", assignee_email="other@x.com")])
+    assert plan["updates"] == [] and plan["left_other_assignee"] == 1
+
+
+def test_an_unassigned_task_is_left_alone_and_counted():
+    plan = _plan([_swap_task("1")])
+    assert plan["updates"] == [] and plan["left_unassigned"] == 1
+
+
+def test_a_completed_task_is_not_touched():
+    plan = _plan([_swap_task("1", assignee_gid=FROM_GID, completed=True)])
+    assert plan["updates"] == [] and plan["skipped_completed"] == 1
+
+
+def test_matches_by_email_when_the_id_is_missing_case_insensitively():
+    plan = _plan([_swap_task("1", assignee_gid=None, assignee_email="  OLD@X.com ")])
+    assert [u["task_gid"] for u in plan["updates"]] == ["1"]
+
+
+def test_an_empty_from_email_never_matches_an_assignee_with_no_email():
+    """Guards a subtle trap: "" == "" must not count as a match."""
+    plan = find_tasks_to_reassign([_swap_task("1", assignee_gid="999", assignee_email=None)], FROM_GID, "", TO_GID)
+    assert plan["updates"] == []
+
+
+def test_a_task_already_swapped_does_not_match_again_so_a_second_run_changes_nothing():
+    plan = _plan([_swap_task("1", assignee_gid=TO_GID, assignee_email="new@x.com")])
+    assert plan["updates"] == [] and plan["left_other_assignee"] == 1
+
+
+def test_a_task_in_several_projects_counts_when_any_membership_is_rights_secured():
+    task = _swap_task("1", section="Backlog", assignee_gid=FROM_GID)
+    task["memberships"].append({"section": {"name": "Rights Secured"}})
+    assert len(_plan([task])["updates"]) == 1
+
+
+def test_mixed_list_is_counted_exactly():
+    tasks = [
+        _swap_task("a", assignee_gid=FROM_GID),                 # swapped
+        _swap_task("b", assignee_gid=FROM_GID),                 # swapped
+        _swap_task("c", assignee_gid="999"),                    # someone else
+        _swap_task("d"),                                        # unassigned
+        _swap_task("e", assignee_gid=FROM_GID, completed=True), # completed
+        _swap_task("f", section="Negotiating", assignee_gid=FROM_GID),  # not Rights Secured
+    ]
+    plan = _plan(tasks)
+    assert [u["task_gid"] for u in plan["updates"]] == ["a", "b"]
+    assert (plan["rights_secured"], plan["left_other_assignee"], plan["left_unassigned"], plan["skipped_completed"]) == (5, 1, 1, 1)
+
+
+def test_the_row_sync_and_the_swap_agree_on_what_rights_secured_means():
+    """One shared definition — so the tracker rows and the swap can never
+    talk about different sets of tasks."""
+    tasks = [_swap_task("1"), _swap_task("2", section="Negotiating")]
+    assert [is_in_rights_secured(t) for t in tasks] == [True, False]
+    assert [t["task_gid"] for t in extract_rights_secured_tasks(tasks)] == ["1"]
