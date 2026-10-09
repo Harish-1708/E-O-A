@@ -4,7 +4,7 @@ never step on each other.
 Why this exists: a schedule is easy to get subtly wrong and nothing fails
 loudly when it is. GitHub cron is UTC, the intended window is IST 5 PM - 5 AM
 (UTC+5:30, so the offset is a half hour), a typo shifts a run outside the
-window or off the 30-minute grid without any error, and a wrong concurrency
+window or off the hourly grid without any error, and a wrong concurrency
 setting can let two sends overlap (duplicate emails) or kill one mid-send.
 These tests expand the REAL cron expressions from the REAL workflow files
 into concrete run times, convert them to IST, and assert on those — they do
@@ -22,13 +22,13 @@ import yaml
 
 WORKFLOWS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".github", "workflows"))
 
-# The five workflows that were asked to run every 30 min, IST 5 PM - 5 AM.
+# The five workflows that run once an hour, IST 5 PM - 5 AM.
 SCHEDULED = ["check_replies.yml", "auto_send.yml", "sync_asana.yml", "dashboard.yml", "ugc_tracker_sync.yml"]
 # Of those, the ones that write to the campaign Google Sheets and therefore
 # share ONE lock so they take turns (UGC has its own sheet and its own lock).
 SHARED_LOCK = ["check_replies.yml", "auto_send.yml", "sync_asana.yml", "dashboard.yml"]
 SHARED_GROUP = "google-sheets-api"
-# Intended order inside each half hour: replies are recorded BEFORE the next
+# Intended order inside each hour: replies are recorded BEFORE the next
 # send decides who is due, and Asana/dashboard reflect both afterwards.
 CYCLE_ORDER = ["check_replies.yml", "auto_send.yml", "sync_asana.yml", "dashboard.yml"]
 
@@ -107,10 +107,10 @@ def window_order(ist_minutes):
     return sorted(ist_minutes, key=lambda m: (m - WINDOW_START_MIN) % (24 * 60))
 
 
-def offset_in_half_hour(workflow):
+def offset_in_hour(workflow):
     minutes = schedule_ist_minutes(workflow)
-    offsets = {m % 30 for m in minutes}
-    assert len(offsets) == 1, f"runs are not on a single 30-minute grid: {sorted(offsets)}"
+    offsets = {m % 60 for m in minutes}
+    assert len(offsets) == 1, f"runs are not all at the same minute of the hour: {sorted(offsets)}"
     return offsets.pop()
 
 
@@ -118,6 +118,7 @@ def offset_in_half_hour(workflow):
 
 def test_cron_expander_handles_the_forms_used_here():
     assert len(cron_utc_minutes_of_day("7,37 12-22 * * *")) == 22
+    assert len(cron_utc_minutes_of_day("37 11-22 * * *")) == 12
     assert len(cron_utc_minutes_of_day("*/30 * * * *")) == 48
     assert cron_utc_minutes_of_day("37 11 * * *") == {11 * 60 + 37}
 
@@ -143,39 +144,47 @@ def test_window_check_rejects_the_old_around_the_clock_schedules():
 # ---------------------------------------------------- the real schedules
 
 @pytest.mark.parametrize("name", SCHEDULED)
-def test_runs_every_30_minutes_and_only_between_5pm_and_5am_ist(name):
+def test_runs_every_hour_and_only_between_5pm_and_5am_ist(name):
     minutes = schedule_ist_minutes(_load(name))
-    assert len(minutes) == 24, f"expected 24 runs a day, got {len(minutes)}"
+    assert len(minutes) == 12, f"expected 12 runs a night, got {len(minutes)}"
     assert all(in_ist_window(m) for m in minutes), \
         f"a run falls outside 5 PM - 5 AM IST: {[f'{m // 60:02d}:{m % 60:02d}' for m in minutes if not in_ist_window(m)]}"
     ordered = window_order(minutes)
     gaps = {(b - a) % (24 * 60) for a, b in zip(ordered, ordered[1:])}
-    assert gaps == {30}, f"runs are not exactly 30 minutes apart: {sorted(gaps)}"
+    assert gaps == {60}, f"runs are not exactly one hour apart: {sorted(gaps)}"
 
 
 @pytest.mark.parametrize("name", SCHEDULED)
 def test_the_whole_window_is_covered_with_no_gap_at_either_edge(name):
     ordered = window_order(schedule_ist_minutes(_load(name)))
     first, last = (ordered[0] - WINDOW_START_MIN) % (24 * 60), (ordered[-1] - WINDOW_START_MIN) % (24 * 60)
-    assert 0 <= first < 30, "first run should start within the first half hour of 5 PM IST"
-    assert 11 * 60 + 30 <= last <= 12 * 60, "last run should land between 4:30 AM and 5:00 AM IST"
+    assert 0 <= first < 60, "first run should start within the first hour after 5 PM IST"
+    assert 11 * 60 <= last <= 12 * 60, "last run should land between 4:00 AM and 5:00 AM IST"
+
+
+@pytest.mark.parametrize("name", SCHEDULED)
+def test_every_clock_hour_of_the_window_has_exactly_one_run(name):
+    """The point of an hourly schedule: at least one run in each hour."""
+    minutes = schedule_ist_minutes(_load(name))
+    hours = sorted(m // 60 for m in minutes)
+    assert hours == [17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4] or hours == [0, 1, 2, 3, 4, 17, 18, 19, 20, 21, 22, 23]
 
 
 @pytest.mark.parametrize("name", SCHEDULED)
 def test_runs_avoid_the_top_of_the_hour_and_half_hour(name):
     """GitHub delays (and can drop) scheduled runs under load, worst at the
     start of the hour — so these are deliberately kept off :00 and :30."""
-    assert offset_in_half_hour(_load(name)) != 0
+    assert offset_in_hour(_load(name)) % 30 != 0
 
 
 def test_each_half_hour_runs_in_the_intended_order():
-    offsets = [offset_in_half_hour(_load(n)) for n in CYCLE_ORDER]
+    offsets = [offset_in_hour(_load(n)) for n in CYCLE_ORDER]
     assert offsets == sorted(offsets) and len(set(offsets)) == len(offsets), \
         f"expected strictly increasing offsets in order {CYCLE_ORDER}, got {offsets}"
 
 
 def test_no_two_workflows_that_share_the_lock_start_in_the_same_minute():
-    offsets = [offset_in_half_hour(_load(n)) for n in SHARED_LOCK]
+    offsets = [offset_in_hour(_load(n)) for n in SHARED_LOCK]
     assert len(set(offsets)) == len(offsets), \
         "two lock-sharing workflows start in the same minute, so one would always have to wait"
 
@@ -256,9 +265,9 @@ def _reply_lookback_hours_everywhere():
 
 
 def test_the_longest_gap_between_reply_checks_is_what_we_expect():
-    """Pins the number the next test depends on: last run 4:37 AM IST to the
-    next 5:07 PM IST is 12.5 hours."""
-    assert _longest_gap_minutes(_load("check_replies.yml")) == 12 * 60 + 30
+    """Pins the number the next test depends on: last run 4:07 AM IST to the
+    next 5:07 PM IST is 13 hours."""
+    assert _longest_gap_minutes(_load("check_replies.yml")) == 13 * 60
 
 
 def test_reply_lookback_always_reaches_back_further_than_the_overnight_gap():
