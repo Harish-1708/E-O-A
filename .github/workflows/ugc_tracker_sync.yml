@@ -76,6 +76,17 @@ jobs:
           # Outreach project's GID, set this secret to that same value
           # rather than changing anything else.
           UGC_TRACKER_ASANA_PROJECT_GID: ${{ secrets.UGC_TRACKER_ASANA_PROJECT_GID }}
+          # Optional — the Rights Secured assignee swap. When BOTH are set,
+          # every task in Rights Secured (existing and new) that is
+          # assigned to the first person is reassigned to the second. Safe
+          # to leave unset: nothing changes in Asana. Secrets, not
+          # literals, because this repo is public and these are staff
+          # email addresses. Tasks outside Rights Secured are never
+          # touched, and sync-asana is unaffected (it only assigns its
+          # default person to tasks with NO assignee, never overwriting
+          # anyone else).
+          UGC_TRACKER_REASSIGN_FROM_EMAIL: ${{ secrets.UGC_TRACKER_REASSIGN_FROM_EMAIL }}
+          UGC_TRACKER_REASSIGN_TO_EMAIL: ${{ secrets.UGC_TRACKER_REASSIGN_TO_EMAIL }}
         run: |
           set -o pipefail
           python ugc_tracker_sync.py --worksheet-name Tracker | tee ugc_sync_output.txt
