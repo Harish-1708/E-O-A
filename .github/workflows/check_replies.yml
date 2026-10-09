@@ -8,20 +8,19 @@ on:
         required: false
         default: ""
   schedule:
-    # Once an hour, but ONLY between 5:00 PM and 5:00 AM IST - the window that
-    # covers US business hours. GitHub cron is always UTC and IST is UTC+5:30,
-    # so this one line (minute 37 of UTC hours 11-22) fires at 5:07 PM,
-    # 6:07 PM ... 4:07 AM IST: 12 runs a night, none outside the window.
-    # Manual "Run workflow" and the in-app buttons are unaffected.
-    # Check Replies runs at IST :07 of every hour in the window.
-    # Minute within each hour (IST): UGC Tracker Sync :04, Check Replies :07,
-    # Auto Send :13, Sync Asana :19, Dashboard :25 - replies first, so a reply
-    # is recorded before the next send decides who is due; all kept off :00 and
-    # :30, the busiest moments on GitHub. GitHub's schedule is best-effort (a
-    # run can arrive late or not at all), which is why every run is a full
-    # sweep of what is due right now: a missed hour loses nothing, the next
-    # run covers it.
-    - cron: "37 11-22 * * *"   # 5:07 PM ... 4:07 AM IST
+    # Once an hour, around the clock. GitHub cron is always UTC, so the minute
+    # below is minutes past each UTC hour. Check Replies runs at :37.
+    # Minute within each hour (UTC): UGC Tracker Sync :34, Check Replies :37,
+    # Auto Send :43, Sync Asana :49, Dashboard :55 - replies first, so a reply
+    # is recorded before the next send decides who is due. All kept off :00 and
+    # :30, the busiest moments on GitHub.
+    # Running every hour is harmless when nothing is due: Auto Send skips a
+    # campaign outside its sending window without opening its Sheet, so only
+    # runs inside a window do any work. GitHub's schedule is best-effort (a run
+    # can arrive late or not at all), which is why every run is a full sweep of
+    # what is due right now: a missed hour loses nothing, the next run covers
+    # it. Manual "Run workflow" and the in-app buttons are unaffected.
+    - cron: "37 * * * *"   # :37 past every hour
 
 # Without this, the scheduled run and a manual "Check Replies Now" trigger
 # (or two manual clicks close together) can execute at the same time on two
