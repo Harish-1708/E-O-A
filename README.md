@@ -57,12 +57,12 @@ Four ideas explain almost everything:
 
 1. **Imported** (CSV upload in the control panel) into the campaign's Master Sheet. Imports leave `Approval` blank — see the note below.
 2. **Intro email** goes out once the campaign is *Active*, inside its sending window, and the daily limit allows.
-3. **Follow-ups** go out one after another. Each follow-up waits `wait_days_after_previous` (default **2 days**) counted from when the *previous* stage was actually sent — not from the intro.
+3. **Follow-ups** go out one after another. Each follow-up waits `wait_days_after_previous` (default **2 days**) counted from the day the previous stage was actually sent — not from the intro, and not from the time of day. Days are calendar days in the campaign's own timezone (its `schedule.timezone`; UTC if the campaign has no `schedule:` block): an intro sent Wednesday at 10:00 AM with a 2-day wait is **due from the start of Friday**, so a run at 9:00 AM on Friday can send it, rather than waiting until 10:00 AM. The sending window and send days still decide when a due lead actually goes out.
 4. **A genuine reply or a hard bounce stops the sequence** for that lead (`Status` becomes `Stopped - Replied` / `Stopped - Bounced`). Out-of-office, auto-replies and soft bounces are logged but do **not** stop it.
 5. A person can also stop one lead by hand from **Manage a lead** (for example `Stopped - Manual` or `Stopped - Rejected`); `Paused` and `Completed` also exist as hand-set stopped statuses.
 6. After the last stage nothing further is due — the lead simply stays at `<last stage> Sent`. The engine never sets `Completed` by itself. Removing a lead is always soft (`Status = Removed`); nothing is ever hard-deleted.
 
-**A lead is eligible for a stage when** it has an email address, is not in a stopped status, has not replied, has not already been sent *this* stage (duplicate protection), and — for follow-ups — the previous stage was sent and its wait has passed. Duplicate emails within one batch are dropped.
+**A lead is eligible for a stage when** it has an email address, is not in a stopped status, has not replied, has not already been sent *this* stage (duplicate protection), and — for follow-ups — the previous stage was sent and its due date has arrived. Duplicate emails within one batch are dropped. **A due date never expires:** a lead that falls due on a day with no sending (a weekend, or any day not in the campaign's `send_days`) simply stays due and goes out on the next sending day once the window opens, subject to the daily limit.
 
 > **`Approval` does not gate sending.** It is an informational column (`Pending | Yes | No | Paused`). Some older help text in the control panel and in the *Run workflow* form still says "Approval must be Yes" — that text is out of date. Every lead meeting the rules above is eligible whatever `Approval` says.
 
@@ -174,8 +174,8 @@ Key Master Sheet columns (the engine locates columns by header name, so the orde
 | `LeadID`, `Email`, `FirstName`, `LastName`, `Company`, `Campaign` | Identity |
 | `Approval` | Informational only |
 | `SenderAccount` | Optional per-lead sending account |
-| `CurrentStage`, `NextEligibleAt` | Where the lead is in the sequence |
-| `IntroSentAt`, `IntroVariant`, `FollowUp1SentAt` … `FollowUp10Variant` | When each stage was sent, and which variant |
+| `CurrentStage`, `NextEligibleAt` | Where the lead is in the sequence. `NextEligibleAt` is the **date** the next stage becomes due (campaign timezone), shown for information only — nothing reads it |
+| `IntroSentAt`, `IntroVariant`, `FollowUp1SentAt` … `FollowUp10Variant` | When each stage was sent, and which variant. **Times are UTC** (GitHub's server clock) — not IST and not New York time. For example `19:04` is 12:34 AM IST and 3:04 PM New York |
 | `Status`, `LastActionAt`, `Error` | Current state |
 | `ReplyStatus`, `ReplyAt`, `LastInboundClassification`, `LastInboundAt` | Reply tracking |
 | `MessageID`, `ThreadReferences`, `ThreadSubject` | Keeps follow-ups in the same email thread |
@@ -237,19 +237,19 @@ The same workflow can also change **who a Rights Secured task is assigned to**. 
 
 ## Schedule: when things run
 
-Five workflows run once an hour, but **only between 5:00 PM and 5:00 AM IST** (12 runs a night each). Outside that window nothing runs on its own. Manual buttons and *Run workflow* work at any hour.
+Five workflows run **once an hour, around the clock** (24 runs a day each). Manual buttons and *Run workflow* work at any time.
 
-The window is the IST equivalent of US business hours: the active campaigns send 9–5 New York / Chicago time, roughly 6:30 PM–4:30 AM IST, so the window contains it. The schedule only decides when a job *wakes up*; each campaign's own sending window still decides whether anything is sent.
+The schedule only decides when a job *wakes up*; each campaign's own sending window still decides whether anything is sent. A run outside every campaign's window costs almost nothing: Auto Send skips such a campaign without opening its Sheet. The active campaigns send 9–5 New York / Chicago time, which is roughly 6:30 PM–3:30 AM IST — so most of the day's runs have nothing to send, by design.
 
-| Workflow | Runs at (IST, once an hour) | Cron line (UTC) |
+| Workflow | Runs at (minutes past every hour, UTC) | Cron line |
 |---|---|---|
-| Check Replies | :07 — 5:07 PM to 4:07 AM | `37 11-22` |
-| Auto Send | :13 — 5:13 PM to 4:13 AM | `43 11-22` |
-| Sync Asana + Creator Tracker | :19 — 5:19 PM to 4:19 AM | `49 11-22` |
-| Update Dashboard | :25 — 5:25 PM to 4:25 AM | `55 11-22` |
-| UGC Tracker Sync | :04 — 5:04 PM to 4:04 AM | `34 11-22` |
+| Check Replies | :37 | `37 * * * *` |
+| Auto Send | :43 | `43 * * * *` |
+| Sync Asana + Creator Tracker | :49 | `49 * * * *` |
+| Update Dashboard | :55 | `55 * * * *` |
+| UGC Tracker Sync | :34 | `34 * * * *` |
 
-(each cron line is followed by `* * *`.) GitHub cron is always UTC and IST is UTC+5:30, so 5 PM–5 AM IST is 11:30–23:30 UTC; the window never crosses midnight in UTC. The minutes are staggered in the order *Check Replies → Auto Send → Sync Asana → Dashboard*, so a reply is recorded before the next send decides who is due. They avoid :00 and :30 because GitHub delays — and sometimes drops — scheduled runs under load, worst at the start of the hour. Check Account Health is separate: every 2 hours, around the clock.
+GitHub cron is always UTC. The minutes are staggered in the order *Check Replies → Auto Send → Sync Asana → Dashboard*, so a reply is recorded before the next send decides who is due. They avoid :00 and :30 because GitHub delays — and sometimes drops — scheduled runs under load, worst at the start of the hour. Check Account Health is separate: every 2 hours, around the clock.
 
 ### What Auto Send does on each run
 
@@ -280,12 +280,12 @@ A dropped run loses nothing (each run is a full sweep). The real cost is that re
 
 ### Things only the real Actions tab can confirm
 
-- **`schedule` is best-effort — and on this repository it has been far less reliable than that suggests.** In the Actions history for 5–7 October every workflow received only about **4–5 scheduled runs a day**, however often it was set to run (Check Account Health, set to every 2 hours, got ~4 a day; the old every-10-minutes Check Replies got ~4 a day), and runs arrive in bursts, some hours late. The missing runs were never created at all, so this is GitHub's scheduler, not the workflow files or the lock. Changing how often a workflow is scheduled does not change it. When a run you need has not happened, start it by hand (*Run workflow*, or the buttons in the control panel).
+- **`schedule` is best-effort — and on this repository it has been far less reliable than that suggests.** In the Actions history for 5–7 October every workflow received only about **4–5 scheduled runs a day**, however often it was set to run (Check Account Health, set to every 2 hours, got ~4 a day; the old every-10-minutes Check Replies got ~4 a day), and runs arrive in bursts, some hours late. The missing runs were never created at all, so this is GitHub's scheduler, not the workflow files or the lock. Changing how often a workflow is scheduled did not change it when tried at 10-minute, 30-minute and 2-hour settings. The schedule is now hourly around the clock; only the Actions tab shows how many of those runs GitHub really starts. When a run you need has not happened, start it by hand (*Run workflow*, or the buttons in the control panel).
 - **60-day inactivity.** In a public repository GitHub switches scheduled workflows off after 60 days with no repository activity. The control panel's commits count; a repo left untouched for two months would silently stop. Re-enable from the Actions tab.
 - **Schedules run only from the default branch**, so a change takes effect once merged to `main`.
-- **Replies that arrive between about 5 AM and 5 PM IST wait until about 5:07 PM IST** unless someone clicks *Check Replies Now*; the same applies to the Asana, Creator Tracker, UGC and dashboard refreshes. `reply_monitor.lookback_hours` (default 24) must stay comfortably longer than that 13-hour gap — a test guards this.
+- **Replies, syncs and dashboards are picked up by the next run GitHub actually starts**, which can be hours after the hourly schedule asks, unless someone clicks *Check Replies Now* or starts the workflow. `reply_monitor.lookback_hours` (default 24) is what stops a reply being missed in the meantime — a test requires it to stay at 24 or more.
 
-To move the window, edit the three cron lines in each workflow and the constants at the top of `tests/test_workflow_schedules.py`.
+To change the schedule, edit the cron line in each workflow and the expectations in `tests/test_workflow_schedules.py`.
 
 ---
 
@@ -427,7 +427,7 @@ python -m pytest streamlit_app/tests/ -q         # control panel
 
 CI (`.github/workflows/ci.yml`) runs both suites on every push to `main` and every pull request, and first checks that the control-panel fixture repo is committed. Tests never touch real Google, GitHub, Asana or email: they use fakes and fixture data (`tests/fixtures/`, `streamlit_app/tests/fixtures/`).
 
-`tests/test_workflow_schedules.py` expands the real cron lines into concrete IST run times and fails if a run drifts outside 5 PM–5 AM, off the 30-minute grid or out of order; if two lock-holders share a minute; if a lock or timeout setting could cancel a send; or if a reply lookback is shorter than the overnight gap.
+`tests/test_workflow_schedules.py` expands the real cron lines into concrete run times and fails if a workflow stops running exactly once in every clock hour, lands on :00 or :30, or runs out of order; if two workflows start in the same minute; if a lock or timeout setting could cancel a send; or if a reply lookback is shorter than 24 hours.
 
 **What tests cannot prove:** real timing on GitHub (delays, queue replacement, the 60-day rule), live Google/Asana/email behaviour, and the deployed Streamlit app. Those are only visible on the real Actions tab and in the running app.
 
@@ -438,12 +438,12 @@ CI (`.github/workflows/ci.yml`) runs both suites on every push to `main` and eve
 | You see | Likely cause | What to do |
 |---|---|---|
 | A workflow run marked **Cancelled** | A newer run took the single waiting slot | Normal; nothing was lost (see Schedule) |
-| Nothing sent overnight | Campaign not *Active*; outside its own `schedule:` window or send days; daily limit reached; nobody due yet | Read the Auto Send job summary — it states why for every campaign |
+| Nothing sent | Campaign not *Active*; outside its own `schedule:` window or send days; daily limit reached; nobody due yet — remember a lead is due from the start of its due **date** (campaign timezone), and Sheet times are **UTC** | Read the Auto Send job summary — it states why for every campaign |
 | A campaign sends at odd hours | It has no `schedule:` block | Set its Schedule |
 | *"Tab … doesn't exist yet"* | Tabs are created on first Preview / Send / Check Replies | Run one of those |
 | Google `429` / quota errors | More than 60 Sheet reads in a minute on the shared Google account (several runs overlapping, or a manual run during a scheduled one) | Auto Send retries on its own (45 s, then 75 s). If it still fails, rerun it after a minute; avoid starting manual runs while another is going |
 | An Asana task keeps returning to a stage | A stale `ManualAsanaStage` override disagrees with where you moved it | *Manage a lead* → clear or update the override. Moves made directly in Asana to *Rights Secured* / *Declined / Dead* are respected automatically |
-| Replies seem missing | Check Replies only runs 5 PM–5 AM IST; or an inbox login is failing; or lookback too short | *Check Replies Now*; *Email Accounts* page for health; keep lookback ≥ 14 h |
+| Replies seem missing | GitHub did not start the hourly run (see Known limitations); or an inbox login is failing; or lookback too short | *Check Replies Now*; *Email Accounts* page for health; keep lookback ≥ 24 h |
 | UGC tracker: Drive `403` | Drive API off for the project, or the folder is not shared with the service account | Enable the API; share the exact folder; set `UGC_TRACKER_SHARED_DRIVE_ID` if it is on a Shared Drive |
 | UGC tracker: a GID shows as `1.21894E+15` | An old row written before the text-format fix | Retype it with a leading apostrophe, e.g. `'1218941739494020` |
 | Scheduled runs stopped entirely | GitHub disabled schedules after 60 days of inactivity | Re-enable under the Actions tab |
@@ -453,7 +453,7 @@ CI (`.github/workflows/ci.yml`) runs both suites on every push to `main` and eve
 
 ## Known limitations
 
-- **Replies and syncs pause 5 AM–5 PM IST** (by design of the window) unless triggered by hand.
+- **Times in the Sheet are UTC**, not IST or New York time (see the Master Sheet columns).
 - **GitHub's scheduler delivers only a few runs a day on this repository** (about 4–5 per workflow, whatever the cron — see Schedule). The hourly schedule is the request; it is not a guarantee.
 - **"Completed" is calculated, not stored.** A finished campaign keeps `status: active` in its settings file, so Auto Send still opens its leads once per run (one read, nothing sent). To stop even that, set the campaign to Paused.
 - **A long Auto Send blocks the other lock-holders** until it finishes (by design — they write the same cells).
@@ -461,6 +461,6 @@ CI (`.github/workflows/ci.yml`) runs both suites on every push to `main` and eve
 - **The sending window is checked when each stage's batch starts**, not between rounds, so a batch that starts inside the window can keep sending after it closes.
 - **`Approval` is informational**; some old help text still says otherwise.
 - **`sending.timezone/window_*` in `settings.yaml` are not enforced** (only `schedule:` is).
-- **Check Account Health is not subject to the 5 PM–5 AM window** (it runs every 2 hours, around the clock). Manual runs never are.
+- **Check Account Health runs every 2 hours**, not hourly — it is separate from the five hourly workflows.
 - **The UGC tracker is not shown in the control panel** — it runs only from GitHub Actions.
 - **Streamlit Community Cloud's free tier sleeps** after about 12 hours idle; the next visitor waits roughly 30 seconds.
