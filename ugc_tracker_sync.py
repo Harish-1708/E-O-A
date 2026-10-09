@@ -37,7 +37,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from ugc_tracker_logic import (
     extract_rights_secured_tasks, find_drive_match, build_hyperlink_formula,
-    assign_duplicate_suffixes, rights_expiration_to_sheet_date,
+    assign_duplicate_suffixes, rights_expiration_to_sheet_date, find_tasks_to_reassign,
 )
 
 
@@ -630,6 +630,92 @@ def _call_with_transient_retries(fn, *args, **kwargs):
                         f"{len(_TRANSIENT_RETRY_DELAYS_SECONDS)} time(s): {last_exc}") from last_exc
 
 
+REASSIGN_FROM_ENV = "UGC_TRACKER_REASSIGN_FROM_EMAIL"
+REASSIGN_TO_ENV = "UGC_TRACKER_REASSIGN_TO_EMAIL"
+
+
+def reassign_rights_secured_tasks(asana_tasks: List[Dict], token: str, from_email: str, to_email: str,
+                                   asana=None) -> Dict:
+    """Swaps the assignee on every Rights Secured task — existing and new,
+    since it looks at all of them on every run — from one person to
+    another. Opt-in: does nothing unless BOTH emails are given.
+
+    Deliberately separate from the Sheet sync and from sync-asana:
+      * It runs after the Sheet sync has finished, so a problem here can
+        never stop the tracker from updating.
+      * sync-asana is untouched. On an existing task it assigns its default
+        person ONLY when the task has no assignee at all, and never
+        overwrites anyone else — so once this has set the new person,
+        sync-asana leaves it alone, and every task outside Rights Secured
+        keeps getting the default person exactly as before.
+      * Idempotent: a task already swapped no longer matches, so a second
+        run changes nothing, and a retried request is harmless.
+
+    One task failing does not stop the others. Returns a summary dict;
+    "enabled" is False when it did nothing because it is not configured."""
+    from_email = (from_email or "").strip()
+    to_email = (to_email or "").strip()
+    if not from_email or not to_email:
+        return {"enabled": False, "reason": "not configured"}
+    if from_email.lower() == to_email.lower():
+        return {"enabled": False, "reason": "the two emails are the same person"}
+
+    if asana is None:
+        import asana_client as asana  # kept separate so this stays testable without a real token
+
+    from_user = asana.get_user(from_email, token, label="the user to replace")
+    to_user = asana.get_user(to_email, token, label="the user to assign")
+    if from_user["gid"] == to_user["gid"]:
+        return {"enabled": False, "reason": "the two emails are the same person"}
+
+    plan = find_tasks_to_reassign(asana_tasks, from_user["gid"], from_email, to_user["gid"])
+    reassigned = 0
+    failed_task_gids: List[str] = []
+    for update in plan["updates"]:
+        try:
+            asana.update_task(update["task_gid"], update["patch"], token)
+            reassigned += 1
+        except Exception as exc:  # noqa: BLE001 - one task failing must not stop the rest
+            print(f"  could not update task {update['task_gid']}: {exc}")
+            failed_task_gids.append(update["task_gid"])
+
+    return {
+        "enabled": True,
+        "rights_secured": plan["rights_secured"],
+        "reassigned": reassigned,
+        "failed": len(failed_task_gids),
+        "failed_task_gids": failed_task_gids,
+        "left_other_assignee": plan["left_other_assignee"],
+        "left_unassigned": plan["left_unassigned"],
+        "skipped_completed": plan["skipped_completed"],
+    }
+
+
+def _run_reassign_step(asana_tasks: List[Dict], token: str, from_email: str, to_email: str, asana=None) -> bool:
+    """Runs the swap and prints what happened. Returns True if something
+    went wrong (so the run is shown as failed). Addresses are never
+    printed — this repository's Actions logs are public."""
+    print("Rights Secured assignee swap:")
+    if bool((from_email or "").strip()) != bool((to_email or "").strip()):
+        print(f"  OFF — only one of {REASSIGN_FROM_ENV} / {REASSIGN_TO_ENV} is set; it needs both.")
+        return True
+    try:
+        result = reassign_rights_secured_tasks(asana_tasks, token, from_email, to_email, asana=asana)
+    except Exception as exc:  # noqa: BLE001 - never let this take down the (already finished) Sheet sync
+        print(f"  FAILED before changing anything: {exc}")
+        return True
+    if not result["enabled"]:
+        if result["reason"] == "not configured":
+            print(f"  off (set {REASSIGN_FROM_ENV} and {REASSIGN_TO_ENV} to turn it on).")
+            return False
+        print(f"  OFF — {result['reason']}.")
+        return True
+    print(f"  {result['rights_secured']} task(s) in Rights Secured: swapped {result['reassigned']}, "
+          f"failed {result['failed']}. Left alone: {result['left_other_assignee']} assigned to someone else, "
+          f"{result['left_unassigned']} unassigned, {result['skipped_completed']} completed.")
+    return result["failed"] > 0
+
+
 def _require_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -671,6 +757,11 @@ def main():
     # that were shared.
     print(f"Authenticating as service account: {service_account_info.get('client_email', '(not found in JSON)')}")
     asana_token = _require_env("ASANA_TOKEN")
+    # Optional — the Rights Secured assignee swap (see reassign_rights_secured_tasks).
+    # Not hardcoded: this repo is public, and these are staff addresses.
+    reassign_from_email = os.environ.get(REASSIGN_FROM_ENV, "").strip()
+    reassign_to_email = os.environ.get(REASSIGN_TO_ENV, "").strip()
+    fetched = {}
 
     def _connect_and_sync():
         # Everything that talks to a network, as one unit — connecting
@@ -683,13 +774,18 @@ def main():
         worksheet = spreadsheet.worksheet(args.worksheet_name)
         import asana_client  # thin wrapper, kept separate so this stays testable without a real Asana token
         asana_tasks = asana_client.get_all_project_tasks(asana_project_gid, asana_token)
+        fetched["asana_tasks"] = asana_tasks
         return sync_once(asana_tasks, worksheet, drive_service, raw_folder_id, tiktok_folder_id,
                           shared_drive_id=shared_drive_id)
 
     summary = _call_with_transient_retries(_connect_and_sync)
     print(f"New rows: {summary['new_rows']}. Links filled in on existing rows: {summary['filled_in']}. "
           f"Ambiguous (not written): {summary['ambiguous']}.")
-    return 0
+
+    # After the Sheet sync, so nothing here can stop the tracker updating.
+    swap_failed = _run_reassign_step(fetched.get("asana_tasks", []), asana_token,
+                                      reassign_from_email, reassign_to_email)
+    return 1 if swap_failed else 0
 
 
 if __name__ == "__main__":
