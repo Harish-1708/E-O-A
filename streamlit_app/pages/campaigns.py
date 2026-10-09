@@ -1742,7 +1742,7 @@ def _render_check_replies_section_in_responses(campaign_cfg):
     replies and viewing them are the same activity, so the trigger
     belongs right where the replies themselves show up."""
     campaign_name = campaign_cfg["_campaign_name"]
-    st.caption("This also runs automatically every 30 minutes, but only between 5 PM and 5 AM IST. "
+    st.caption("This also runs automatically once an hour, but only between 5 PM and 5 AM IST. "
                "Outside those hours, replies are checked only when you click this.")
 
     if st.button("Check Replies Now", key="campaigns_check_replies_button"):
