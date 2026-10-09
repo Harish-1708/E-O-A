@@ -80,7 +80,7 @@ Four ideas explain almost everything:
 outreach.py                  the engine: all sending, reply-checking, Asana and Sheets logic, as a CLI
 ugc_tracker_sync.py          standalone: Asana "Rights Secured" -> UGC Video Edits Tracker sheet
 ugc_tracker_logic.py         pure matching/labelling logic for the UGC sync
-asana_client.py              minimal Asana API client used by the UGC sync
+asana_client.py              minimal Asana API client used by the UGC sync (reads; one write, for the assignee swap)
 requirements.txt             Python dependencies for the engine and its tests
 
 config/
@@ -221,6 +221,18 @@ A standalone automation (`ugc_tracker_sync.py`, run by `ugc_tracker_sync.yml`) f
 - `Status` (dropdown: Not edited / Edited / Live, colour-coded), `Edited folder` and `Notes` belong to the editing team; the automation never writes them.
 - It has its own lock (`ugc-tracker-sync`), so it can never block, or be blocked by, the email workflows.
 
+#### Rights Secured assignee swap (optional)
+
+The same workflow can also change **who a Rights Secured task is assigned to**. It is off until you add two repository secrets, and then it does exactly this on every run, for existing and new tasks alike:
+
+- a task **in Rights Secured** that is **assigned to the "from" person** is reassigned to the "to" person (matched by Asana user id, with email as a fallback);
+- it **never** touches a task outside Rights Secured, a task assigned to anyone else, an unassigned task, or a completed task;
+- it runs **after** the Sheet sync has finished, so a problem here can never stop the tracker updating; a failure makes the run show red and says which part failed;
+- it is idempotent — a task already swapped no longer matches, so running it again changes nothing;
+- it never prints an email address (this repository's Actions logs are public); the log line is only counts, for example `51 task(s) in Rights Secured: swapped 51, failed 0. Left alone: 0 assigned to someone else, 0 unassigned, 0 completed.`
+
+**How this fits with sync-asana (which is unchanged).** On an existing task, sync-asana gives its default assignee (`ASANA_DEFAULT_ASSIGNEE_EMAIL`) only when the task has no assignee at all and never overwrites anyone else, so once a task has been swapped it is left alone, and every task outside Rights Secured keeps getting the default person exactly as before. One consequence: a Rights Secured task that is **unassigned** (or that sync-asana has just created straight into that section) is given the default person first, and the swap replaces them on the next UGC run. Asana adds an assignee as a follower automatically, so the previous person stays a follower of the task and keeps getting its notifications until they unfollow; the swap changes the assignee only.
+
 ---
 
 ## Schedule: when things run
@@ -348,6 +360,7 @@ Gmail needs only those three fields (an app password, not the login password). A
 | `CREATOR_TRACKER_SHEET_ID`, `CREATOR_TRACKER_WORKSHEET_NAME` | Creator Tracker sync | the tab's own name, not the file name |
 | `UGC_TRACKER_SHEET_ID`, `UGC_TRACKER_RAW_FOLDER_ID`, `UGC_TRACKER_TIKTOK_FOLDER_ID`, `UGC_TRACKER_ASANA_PROJECT_GID` | UGC tracker | all required |
 | `UGC_TRACKER_SHARED_DRIVE_ID` | UGC tracker | optional; only if automatic Shared Drive discovery fails |
+| `UGC_TRACKER_REASSIGN_FROM_EMAIL`, `UGC_TRACKER_REASSIGN_TO_EMAIL` | UGC tracker | optional; set **both** to turn on the Rights Secured assignee swap (setting only one makes the run fail, on purpose). The token's owner must be in the same Asana workspace as both people |
 
 ### 3. The control panel
 
