@@ -158,6 +158,14 @@ def assign_duplicate_suffixes(creator_handles: List[str]) -> List[str]:
     return labels
 
 
+def is_in_rights_secured(task: Dict) -> bool:
+    """True if the task is CURRENTLY in the Rights Secured section. The
+    single definition used by both the row sync and the assignee swap, so
+    the two can never disagree about which tasks they are talking about."""
+    section_names = {m.get("section", {}).get("name") for m in task.get("memberships", [])}
+    return RIGHTS_SECURED_SECTION_NAME in section_names
+
+
 def extract_rights_secured_tasks(asana_tasks: List[Dict]) -> List[Dict]:
     """Filters a full list of Asana tasks (as returned by the Asana API
     with memberships.section.name and custom_fields included) down to
@@ -169,8 +177,7 @@ def extract_rights_secured_tasks(asana_tasks: List[Dict]) -> List[Dict]:
     showing an incomplete row for someone to notice and fix in Asana."""
     result = []
     for task in asana_tasks:
-        section_names = {m.get("section", {}).get("name") for m in task.get("memberships", [])}
-        if RIGHTS_SECURED_SECTION_NAME not in section_names:
+        if not is_in_rights_secured(task):
             continue
         fields = {cf.get("name"): cf.get("display_value") for cf in task.get("custom_fields", [])}
         result.append({
@@ -197,3 +204,53 @@ def rights_expiration_to_sheet_date(iso_datetime: str) -> str:
         return f"{int(month)}/{int(day)}/{int(year)}"
     except ValueError:
         return ""
+
+
+def find_tasks_to_reassign(asana_tasks: List[Dict], from_gid: str, from_email: str, to_gid: str) -> Dict:
+    """Which Rights Secured tasks should have their assignee swapped from
+    one person to another — and an honest count of everything left alone.
+
+    A task is changed ONLY if all of these hold:
+      * it is currently in Rights Secured;
+      * it is not completed (finished work is not reopened or touched);
+      * its assignee is the "from" person — matched by Asana user id, or
+        by email (case-insensitive) as a fallback.
+
+    Deliberately never changed: a task assigned to anyone ELSE (someone
+    took it on deliberately — never overwritten, the same rule sync-asana
+    follows) and an UNASSIGNED task (this swaps one person for another;
+    it does not hand out unowned work).
+
+    Returns {"updates": [{"task_gid", "patch"}...], plus counts}. The
+    update is a `patch` dict, applied to the task in a single request, so
+    that further Rights Secured-only fields can be added to the same patch
+    later without any extra requests."""
+    from_email_norm = (from_email or "").strip().lower()
+    updates: List[Dict] = []
+    in_section = left_other = left_unassigned = skipped_completed = 0
+
+    for task in asana_tasks:
+        if not is_in_rights_secured(task):
+            continue
+        in_section += 1
+        if task.get("completed"):
+            skipped_completed += 1
+            continue
+        assignee = task.get("assignee")
+        if not assignee:
+            left_unassigned += 1
+            continue
+        is_from_person = assignee.get("gid") == from_gid or (
+            bool(from_email_norm) and (assignee.get("email") or "").strip().lower() == from_email_norm)
+        if not is_from_person:
+            left_other += 1
+            continue
+        updates.append({"task_gid": task.get("gid", ""), "patch": {"assignee": to_gid}})
+
+    return {
+        "updates": updates,
+        "rights_secured": in_section,
+        "left_other_assignee": left_other,
+        "left_unassigned": left_unassigned,
+        "skipped_completed": skipped_completed,
+    }
