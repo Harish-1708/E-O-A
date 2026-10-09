@@ -13,22 +13,20 @@ on:
         required: false
         default: false
   schedule:
-    # Every 30 minutes, but ONLY between 5:00 PM and 5:00 AM IST — the
-    # window that covers US business hours. GitHub cron is always UTC
-    # and IST is UTC+5:30, so 5 PM-5 AM IST is 11:30-23:30 UTC (the
-    # window never crosses midnight in UTC). The three lines below
-    # make 24 runs a day, from 5:25 PM to 4:55 AM IST, and nothing
-    # outside that. Manual "Run workflow" / in-app buttons are unaffected.
-    # Update Dashboard runs at IST :25 and :55.
-    # Minutes are staggered and kept off :00/:30 on purpose: GitHub's
-    # own docs say scheduled runs are delayed (and some dropped) under
-    # load, worst at the start of the hour. Cycle order each half hour,
-    # IST: Check Replies :07, Auto Send :13, Sync Asana :19, Dashboard
-    # :25 (UGC Tracker Sync :04, separate lock) — replies first, so a
-    # reply is recorded before the next send decides who is due.
-    - cron: "55 11 * * *"        # 5:25 PM IST
-    - cron: "25,55 12-22 * * *"  # every half hour after that
-    - cron: "25 23 * * *"             # 4:55 AM IST (last run of the night)
+    # Once an hour, but ONLY between 5:00 PM and 5:00 AM IST - the window that
+    # covers US business hours. GitHub cron is always UTC and IST is UTC+5:30,
+    # so this one line (minute 55 of UTC hours 11-22) fires at 5:25 PM,
+    # 6:25 PM ... 4:25 AM IST: 12 runs a night, none outside the window.
+    # Manual "Run workflow" and the in-app buttons are unaffected.
+    # Update Dashboard runs at IST :25 of every hour in the window.
+    # Minute within each hour (IST): UGC Tracker Sync :04, Check Replies :07,
+    # Auto Send :13, Sync Asana :19, Dashboard :25 - replies first, so a reply
+    # is recorded before the next send decides who is due; all kept off :00 and
+    # :30, the busiest moments on GitHub. GitHub's schedule is best-effort (a
+    # run can arrive late or not at all), which is why every run is a full
+    # sweep of what is due right now: a missed hour loses nothing, the next
+    # run covers it.
+    - cron: "55 11-22 * * *"   # 5:25 PM ... 4:25 AM IST
 
 # Shared across every scheduled workflow that touches Google Sheets.
 # Google's "read requests per minute" quota is per SERVICE ACCOUNT, not per
