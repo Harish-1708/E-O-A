@@ -113,7 +113,7 @@ One file, run as `python outreach.py <command>`. Run `python outreach.py --help`
 |---|---|---|
 | `preview` | Shows what *would* be sent; sends nothing | `preview_batch.yml` (the control panel runs the same logic in-app) |
 | `send` | Sends one stage's batch | `send_batch.yml` |
-| `auto-send-all` | For every *Active* campaign, tries every stage that is due | `auto_send.yml` |
+| `auto-send-all` | Works only on campaigns in progress; sends only stages that have a lead due (see below) | `auto_send.yml` |
 | `check-replies` / `check-replies-all` | Reads inboxes, logs replies and bounces, stops sequences | `check_replies.yml` |
 | `import-leads` | Adds leads from a payload file | `import_leads.yml` |
 | `remove-leads` | Soft-removes leads | `remove_leads.yml` |
@@ -225,21 +225,34 @@ A standalone automation (`ugc_tracker_sync.py`, run by `ugc_tracker_sync.yml`) f
 
 ## Schedule: when things run
 
-Five workflows run every 30 minutes, but **only between 5:00 PM and 5:00 AM IST** (24 runs a day each). Outside that window nothing runs on its own. Manual buttons and *Run workflow* work at any hour.
+Five workflows run once an hour, but **only between 5:00 PM and 5:00 AM IST** (12 runs a night each). Outside that window nothing runs on its own. Manual buttons and *Run workflow* work at any hour.
 
 The window is the IST equivalent of US business hours: the active campaigns send 9–5 New York / Chicago time, roughly 6:30 PM–4:30 AM IST, so the window contains it. The schedule only decides when a job *wakes up*; each campaign's own sending window still decides whether anything is sent.
 
-| Workflow | Runs at (IST, every half hour) | Cron lines (UTC) |
+| Workflow | Runs at (IST, once an hour) | Cron line (UTC) |
 |---|---|---|
-| Check Replies | :07 and :37 — 5:07 PM to 4:37 AM | `37 11` / `7,37 12-22` / `7 23` |
-| Auto Send | :13 and :43 — 5:13 PM to 4:43 AM | `43 11` / `13,43 12-22` / `13 23` |
-| Sync Asana + Creator Tracker | :19 and :49 — 5:19 PM to 4:49 AM | `49 11` / `19,49 12-22` / `19 23` |
-| Update Dashboard | :25 and :55 — 5:25 PM to 4:55 AM | `55 11` / `25,55 12-22` / `25 23` |
-| UGC Tracker Sync | :04 and :34 — 5:04 PM to 4:34 AM | `34 11` / `4,34 12-22` / `4 23` |
+| Check Replies | :07 — 5:07 PM to 4:07 AM | `37 11-22` |
+| Auto Send | :13 — 5:13 PM to 4:13 AM | `43 11-22` |
+| Sync Asana + Creator Tracker | :19 — 5:19 PM to 4:19 AM | `49 11-22` |
+| Update Dashboard | :25 — 5:25 PM to 4:25 AM | `55 11-22` |
+| UGC Tracker Sync | :04 — 5:04 PM to 4:04 AM | `34 11-22` |
 
 (each cron line is followed by `* * *`.) GitHub cron is always UTC and IST is UTC+5:30, so 5 PM–5 AM IST is 11:30–23:30 UTC; the window never crosses midnight in UTC. The minutes are staggered in the order *Check Replies → Auto Send → Sync Asana → Dashboard*, so a reply is recorded before the next send decides who is due. They avoid :00 and :30 because GitHub delays — and sometimes drops — scheduled runs under load, worst at the start of the hour. Check Account Health is separate: every 2 hours, around the clock.
 
-### What happens when an Auto Send run takes longer than 30 minutes
+### What Auto Send does on each run
+
+Auto Send works **only on campaigns that are in progress**, and spends as few Google reads as it can:
+
+- **Paused, Draft and Deleted campaigns** are skipped outright — their Sheet is never opened.
+- **A campaign outside its sending window** (wrong hours, or not one of its send days) is skipped from its settings alone — no Google request at all.
+- **A campaign with nothing due** — *Completed*, or every lead still waiting out a follow-up delay — costs one read of its leads, then nothing more. *Completed* is judged the same way as the control panel's label: at least one lead, and every one of them finished or stopped. The engine never changes a campaign's stored status; "Completed" is calculated each time.
+- **Only stages that actually have a lead due** go on to `send_batch`, which still enforces the sending window, the daily limit and every per-lead rule. After a stage that really sent something, the leads are re-read once so a follow-up the send just made due is still handled in the same run.
+
+Why: Google allows **60 Sheet reads a minute per account**, and every workflow shares one account. The old version connected to every campaign and called `send_batch` for every stage, about **55 reads per run** — one overlap with another workflow and the run failed with a `429`. With a simulated Google, one run over three campaigns now makes about **24 reads when they are in their window and 0 when they are not**. If a campaign's connection still hits the limit, Auto Send waits (about 45 s, then 75 s) and retries before giving up on that campaign for the run.
+
+The log ends with a one-line summary, for example `Auto Send summary: 1 campaign(s) with something due, 2 with nothing due, 0 outside their sending window.`
+
+### What happens when an Auto Send run takes longer than an hour
 
 This is normal. The next scheduled Auto Send does **not** start a second copy; it waits, so two sends never overlap and no one gets a duplicate email. GitHub's rule for a concurrency group is **one running and one waiting** run. If another run arrives while one is already waiting, the older waiting run is dropped (shown as **Cancelled** — expected, not an error) and the newer takes its place. The four Google-Sheets workflows share one group (`google-sheets-api`), so during a long send:
 
@@ -255,10 +268,10 @@ A dropped run loses nothing (each run is a full sweep). The real cost is that re
 
 ### Things only the real Actions tab can confirm
 
-- **`schedule` is best-effort.** A run can start minutes late, and under heavy GitHub load occasionally not at all.
+- **`schedule` is best-effort — and on this repository it has been far less reliable than that suggests.** In the Actions history for 5–7 October every workflow received only about **4–5 scheduled runs a day**, however often it was set to run (Check Account Health, set to every 2 hours, got ~4 a day; the old every-10-minutes Check Replies got ~4 a day), and runs arrive in bursts, some hours late. The missing runs were never created at all, so this is GitHub's scheduler, not the workflow files or the lock. Changing how often a workflow is scheduled does not change it. When a run you need has not happened, start it by hand (*Run workflow*, or the buttons in the control panel).
 - **60-day inactivity.** In a public repository GitHub switches scheduled workflows off after 60 days with no repository activity. The control panel's commits count; a repo left untouched for two months would silently stop. Re-enable from the Actions tab.
 - **Schedules run only from the default branch**, so a change takes effect once merged to `main`.
-- **Replies that arrive between about 5 AM and 5 PM IST wait until about 5:07 PM IST** unless someone clicks *Check Replies Now*; the same applies to the Asana, Creator Tracker, UGC and dashboard refreshes. `reply_monitor.lookback_hours` (default 24) must stay comfortably longer than that 12.5-hour gap — a test guards this.
+- **Replies that arrive between about 5 AM and 5 PM IST wait until about 5:07 PM IST** unless someone clicks *Check Replies Now*; the same applies to the Asana, Creator Tracker, UGC and dashboard refreshes. `reply_monitor.lookback_hours` (default 24) must stay comfortably longer than that 13-hour gap — a test guards this.
 
 To move the window, edit the three cron lines in each workflow and the constants at the top of `tests/test_workflow_schedules.py`.
 
@@ -415,7 +428,7 @@ CI (`.github/workflows/ci.yml`) runs both suites on every push to `main` and eve
 | Nothing sent overnight | Campaign not *Active*; outside its own `schedule:` window or send days; daily limit reached; nobody due yet | Read the Auto Send job summary — it states why for every campaign |
 | A campaign sends at odd hours | It has no `schedule:` block | Set its Schedule |
 | *"Tab … doesn't exist yet"* | Tabs are created on first Preview / Send / Check Replies | Run one of those |
-| Google `429` / quota errors | Too many Sheets reads in a minute | Wait; the shared lock already serialises the workflows |
+| Google `429` / quota errors | More than 60 Sheet reads in a minute on the shared Google account (several runs overlapping, or a manual run during a scheduled one) | Auto Send retries on its own (45 s, then 75 s). If it still fails, rerun it after a minute; avoid starting manual runs while another is going |
 | An Asana task keeps returning to a stage | A stale `ManualAsanaStage` override disagrees with where you moved it | *Manage a lead* → clear or update the override. Moves made directly in Asana to *Rights Secured* / *Declined / Dead* are respected automatically |
 | Replies seem missing | Check Replies only runs 5 PM–5 AM IST; or an inbox login is failing; or lookback too short | *Check Replies Now*; *Email Accounts* page for health; keep lookback ≥ 14 h |
 | UGC tracker: Drive `403` | Drive API off for the project, or the folder is not shared with the service account | Enable the API; share the exact folder; set `UGC_TRACKER_SHARED_DRIVE_ID` if it is on a Shared Drive |
@@ -428,6 +441,8 @@ CI (`.github/workflows/ci.yml`) runs both suites on every push to `main` and eve
 ## Known limitations
 
 - **Replies and syncs pause 5 AM–5 PM IST** (by design of the window) unless triggered by hand.
+- **GitHub's scheduler delivers only a few runs a day on this repository** (about 4–5 per workflow, whatever the cron — see Schedule). The hourly schedule is the request; it is not a guarantee.
+- **"Completed" is calculated, not stored.** A finished campaign keeps `status: active` in its settings file, so Auto Send still opens its leads once per run (one read, nothing sent). To stop even that, set the campaign to Paused.
 - **A long Auto Send blocks the other lock-holders** until it finishes (by design — they write the same cells).
 - **Manual *Send Batch* and Auto Send use different locks** (`send-batch-<campaign>` vs `google-sheets-api`), so nothing prevents both running at once; if they overlapped they could both send the same stage.
 - **The sending window is checked when each stage's batch starts**, not between rounds, so a batch that starts inside the window can keep sending after it closes.
