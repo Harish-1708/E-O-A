@@ -216,3 +216,21 @@ def test_compute_campaign_status_deleted_takes_precedence_over_readiness_issues(
 
 def test_status_label_deleted():
     assert "Deleted" in status_label(STATUS_DELETED)
+
+
+def test_the_engines_completed_wording_agrees_with_the_apps_completed_status():
+    """Auto Send's log says a campaign is "completed" using its own copy of
+    the rule (it cannot import the app). If the two ever drift, the log
+    would call a campaign completed that the app shows as Running, or the
+    reverse — this pins them together on a spread of cases."""
+    import outreach
+    from campaign_status_logic import compute_campaign_is_complete
+    stages = [{"name": "intro"}, {"name": "followup1"}]
+    last = outreach.stage_field_names(1)["sent_at"]
+    done = {"Email": "a@x.com", "Status": "Followup1 Sent", last: "2026-01-01 10:00:00"}
+    stopped = {"Email": "b@x.com", "Status": "Stopped - Bounced"}
+    waiting = {"Email": "c@x.com", "Status": "Intro Sent"}
+    no_email = {"Email": "", "Status": "Stopped - Replied"}
+    for leads in ([done], [done, stopped], [done, waiting], [waiting], [], [no_email], [done, no_email]):
+        assert outreach._campaign_is_complete(stages, leads) == compute_campaign_is_complete({"stages": stages}, leads), leads
+    assert outreach._campaign_is_complete([], [done]) == compute_campaign_is_complete({"stages": []}, [done])
