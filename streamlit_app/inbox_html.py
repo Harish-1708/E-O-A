@@ -162,13 +162,16 @@ def row_html(name: str, subject: str, preview: str, date_text: str, status_key: 
             f'<div class="ux-subject">{esc(subject)}</div><div class="ux-preview">{esc(preview)}</div>{meta_html}</div>')
 
 
-def thread_header_html(name: str, email: str, status_key: str, detail_chips: Iterable[str] = ()) -> str:
+def thread_header_html(name: str, email: str, status_key: str, detail_chips: Iterable[str] = (), status_note: str = "") -> str:
+    """The header above a conversation: avatar, name, address, any muted detail chips, and the coloured status pill
+    (with an optional short note after the status, such as how sure the AI was)."""
     chips = "".join(f'<span class="ux-chip ux-chip-muted">{esc(c)}</span>' for c in detail_chips if c)
+    note = f" · {esc(status_note)}" if status_note else ""
     return (f'<div class="ux-thread-head"><span class="ux-avatar" style="background:{avatar_color(name)}">{esc(initials(name))}</span>'
             f'<span class="ux-head-name">{esc(name)}</span><span class="ux-head-email">{esc(email)}</span>'
             f'<span class="ux-spacer"></span>{chips}'
             f'<span class="ux-chip" style="color:{status_color(status_key)};border-color:{status_color(status_key)}55">'
-            f'{esc(status_icon(status_key))} {esc(status_label(status_key))}</span></div>')
+            f'{esc(status_icon(status_key))} {esc(status_label(status_key))}{note}</span></div>')
 
 
 def _body_lines_html(body: str) -> str:
@@ -214,14 +217,16 @@ INBOX_CSS = """
 div:has(> .ux-row), div:has(> .ux-rail-title), div:has(> .ux-rail-item), div:has(> .ux-list-head), div:has(> .ux-thread-head),
 div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
 
-/* ---- the three panes (exact key classes: a prefix pattern here would also catch the invisible buttons) */
-.st-key-ux_shell { border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; overflow: hidden; }
-.st-key-ux_shell [data-testid="stHorizontalBlock"] { gap: 0 !important; }
-.st-key-ux_railpane { gap: 0 !important; padding: 6px 8px; border-right: 1px solid #eef0f3; }
-@media (min-width: 900px) { .st-key-ux_railpane { min-height: 700px; } }
-.st-key-ux_listpane, .st-key-ux_list, .st-key-ux_threadpane { gap: 0 !important; }
-.st-key-ux_listpane { border-right: 1px solid #eef0f3; }
-.st-key-ux_threadbody { gap: 0 !important; background: #fff; padding: 18px 20px; }
+/* ---- the three panes. Every container key carries the page's name after a trailing underscore
+   (ux_railpane_hub, ux_railpane_tab_Camp...), and each pattern ends in that underscore so that, for example,
+   "ux_list_" can never also match "ux_listpane_" or an invisible button. */
+[class*="st-key-ux_shell_"] { border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; overflow: hidden; }
+[class*="st-key-ux_shell_"] [data-testid="stHorizontalBlock"] { gap: 0 !important; }
+[class*="st-key-ux_railpane_"] { gap: 0 !important; padding: 6px 8px; border-right: 1px solid #eef0f3; }
+@media (min-width: 900px) { [class*="st-key-ux_railpane_"] { min-height: 700px; } }
+[class*="st-key-ux_listpane_"], [class*="st-key-ux_list_"], [class*="st-key-ux_threadpane_"] { gap: 0 !important; }
+[class*="st-key-ux_listpane_"] { border-right: 1px solid #eef0f3; }
+[class*="st-key-ux_threadbody_"] { gap: 0 !important; background: #fff; padding: 18px 20px; }
 
 /* ---- rail */
 .ux-rail-title { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #6b7280; padding: 10px 10px 6px; }
@@ -251,6 +256,8 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
 [class*="st-key-ux_row_"], [class*="st-key-ux_ritem_"] { position: relative; gap: 0 !important; cursor: pointer; }
 [class*="st-key-ux_row_"] [class*="_open_"], [class*="st-key-ux_ritem_"] [class*="_railbtn_"] {
   position: absolute !important; inset: 0; width: 100% !important; height: 100% !important; margin: 0 !important; z-index: 3; }
+/* the button's own wrapper must also fill the row, or only the top 40px of a tall row would respond to a click */
+[class*="st-key-ux_row_"] [class*="_open_"] > div, [class*="st-key-ux_ritem_"] [class*="_railbtn_"] > div { width: 100% !important; height: 100% !important; }
 [class*="st-key-ux_row_"] [class*="_open_"] button, [class*="st-key-ux_ritem_"] [class*="_railbtn_"] button {
   width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; background: transparent; }
 [class*="st-key-ux_row_"]:hover .ux-row:not(.ux-selected) { background: #f3f6fb; }
@@ -279,18 +286,19 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
 .ux-placeholder { text-align: center; color: #6b7280; font-size: 14px; padding: 80px 20px; }
 
 /* ---- the Reply bar: a row of buttons sized to their text */
-.st-key-ux_bar { flex-direction: row !important; align-items: center; background: #fff; border-top: 1px solid #e5e7eb; padding: 12px 20px; gap: 10px !important; }
-.st-key-ux_bar > div { width: auto !important; flex: 0 0 auto; }
-[class*="st-key-ux_reply_"] button, [class*="st-key-ux_markread_"] button { border-radius: 8px; font-size: 13px; font-weight: 600; padding: 6px 20px; min-height: 36px; white-space: nowrap; }
+[class*="st-key-ux_bar_"] { flex-direction: row !important; align-items: center; background: #fff; border-top: 1px solid #e5e7eb; padding: 12px 20px; gap: 10px !important; }
+[class*="st-key-ux_bar_"] > div { width: auto !important; flex: 0 0 auto; }
+[class*="st-key-ux_reply_"] button, [class*="st-key-ux_bar_"] [class*="_mark_read_"] button, [class*="st-key-ux_bar_"] [data-testid="stPopover"] button {
+  border-radius: 8px; font-size: 13px; font-weight: 600; padding: 6px 20px; min-height: 36px; white-space: nowrap; }
 [class*="st-key-ux_reply_"] button { background: #2563eb; color: #fff; border: 1px solid #2563eb; }
 [class*="st-key-ux_reply_"] button:hover { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
-[class*="st-key-ux_markread_"] button { background: #fff; color: #374151; border: 1px solid #d1d5db; }
+[class*="st-key-ux_bar_"] [class*="_mark_read_"] button, [class*="st-key-ux_bar_"] [data-testid="stPopover"] button { background: #fff; color: #374151; border: 1px solid #d1d5db; }
 
 /* ---- small screens: the rail becomes one row of pills so it does not push everything down */
 @media (max-width: 899px) {
-  .st-key-ux_railpane { flex-direction: row !important; overflow-x: auto; gap: 6px !important; padding: 8px 10px; border-right: 0; border-bottom: 1px solid #eef0f3; }
-  .st-key-ux_railpane > div { width: auto !important; flex: 0 0 auto; }
-  .st-key-ux_railpane [data-testid="stElementContainer"]:has(.ux-rail-title), .ux-rail-title { display: none; }
+  [class*="st-key-ux_railpane_"] { flex-direction: row !important; overflow-x: auto; gap: 6px !important; padding: 8px 10px; border-right: 0; border-bottom: 1px solid #eef0f3; min-height: 0; }
+  [class*="st-key-ux_railpane_"] > div { width: auto !important; flex: 0 0 auto; }
+  [class*="st-key-ux_railpane_"] [data-testid="stElementContainer"]:has(.ux-rail-title), .ux-rail-title { display: none; }
   .ux-rail-item { border: 1px solid #e5e7eb; border-radius: 999px; padding: 5px 12px; margin: 0; }
   .ux-rail-item.ux-selected { border-color: #bcd2f6; }
 }
