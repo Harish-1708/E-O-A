@@ -1,17 +1,15 @@
-"""The two-pane Inbox: a conversation list on the left, the open conversation
-on the right (chat bubbles, newest first, with a composer under it) — shared
-by the all-campaigns Responses page and by every campaign's own Responses tab,
-so the two cannot drift apart.
+"""The Inbox, laid out like a mail app's unified inbox: a status rail on the left, a compact conversation list in the
+middle, and the open conversation on the right with each email as its own card and a Reply bar underneath — shared
+by the all-campaigns Responses page and by every campaign's own Responses tab, so the two cannot drift apart.
 
-It adds NO new way to send, mark read or look anything up. Replying uses the
-very same functions the classic layout uses (validate_reply, build_reply_
-payload, reply_payload_path, build_attachment_entries) and the same two steps —
-commit the payload file, then start the send-reply workflow — so what gets
-committed and dispatched is identical. Marking read uses the same read keys.
+It adds NO new way to send, mark read or look anything up. Replying uses the very same functions the classic layout
+uses (validate_reply, build_reply_payload, reply_payload_path, build_attachment_entries) and the same two steps —
+commit the payload file, then start the send-reply workflow — so what gets committed and dispatched is identical.
+Marking read uses the same read keys.
 
-Untrusted email text (names, subjects, previews) goes through md_escape before
-it reaches any Markdown-rendering widget; message bodies are shown with
-st.text, which does not interpret Markdown at all.
+How it looks is in inbox_html (pure builders, tested on their own). The whole page is escaped there: nothing from an
+email reaches the page except through html.escape. The only things drawn with Streamlit's own widgets are the
+invisible buttons laid over each row (so a click still works) and the Reply bar, the message box and its fields.
 """
 import time
 from dataclasses import dataclass
@@ -19,10 +17,8 @@ from typing import Callable, Dict, List, Optional, Set
 
 import streamlit as st
 
-from inbox_logic import (
-    MAX_ROWS, md_escape, build_conversation_rows, resolve_selection, conversation_key, bubble_side,
-    sender_display,
-)
+import inbox_html as H
+from inbox_logic import MAX_ROWS, md_escape, build_conversation_rows, resolve_selection, conversation_key, sender_display
 import outreach  # noqa: E402  (inbox_logic has put the repo root on sys.path)
 from config import WORKFLOW_SEND_REPLY  # noqa: E402
 from conversation_logic import (  # noqa: E402
@@ -41,8 +37,9 @@ VIEW_CLASSIC = "Classic"
 # layout its older tests were written against.
 DEFAULT_VIEW = VIEW_INBOX
 
-LIST_HEIGHT = 640
-THREAD_HEIGHT = 420
+PANE_HEIGHT = 700                                   # the three panes share one height; the lists scroll inside it
+HEADER_HEIGHT, BAR_HEIGHT = 52, 62
+EMPTY_EMAIL_NOTE = "This email has no readable text — it may be only an image or an attachment. Open it in the mailbox to see it."
 
 
 def choose_view(key: str) -> str:
@@ -73,7 +70,9 @@ def _keys(ns: str, gk: str) -> Dict[str, str]:
     return {
         "to": f"{ns}_to_{gk}", "subject": f"{ns}_subject_{gk}", "cc": f"{ns}_cc_{gk}", "bcc": f"{ns}_bcc_{gk}",
         "body": f"{ns}_body_{gk}", "send": f"{ns}_send_{gk}", "result": f"{ns}_result_{gk}",
-        "att_n": f"{ns}_attn_{gk}", "mark_read": f"{ns}_mark_read_{gk}",
+        "att_n": f"{ns}_attn_{gk}", "mark_read": f"{ns}_mark_read_{gk}", "composer": f"{ns}_composer_{gk}",
+        "draft": f"{ns}_draft_{gk}",
+        "reply": f"ux_reply_{ns}_{gk}",
     }
 
 
@@ -85,8 +84,23 @@ def _uploader_key(ns: str, gk: str) -> str:
 
 # ---------------------------------------------------------------- callbacks (run before the page redraws)
 
+def _pick(state_key: str, value: str) -> None:
+    st.session_state[state_key] = value
+
+
 def _select(selected_key: str, conversation: str) -> None:
     st.session_state[selected_key] = conversation
+
+
+def _remember_draft(body_key: str, draft_key: str) -> None:
+    """Streamlit forgets a widget's value on any run in which it is not drawn — such as when you open another
+    conversation — so a half-written reply is copied to its own key whenever it changes and put back when the box
+    is drawn again."""
+    st.session_state[draft_key] = st.session_state.get(body_key, "")
+
+
+def _toggle_composer(composer_key: str) -> None:
+    st.session_state[composer_key] = not st.session_state.get(composer_key, False)
 
 
 def _mark_read(ctx: InboxContext, group: Dict) -> None:
@@ -134,36 +148,50 @@ def _send_reply(ctx: InboxContext, group: Dict, latest: Dict, lead: Optional[Dic
     if ctx.read_keys is not None:      # replying means you have seen the whole conversation
         _mark_read(ctx, group)
     st.session_state[k["body"]] = ""
+    st.session_state[k["draft"]] = ""
     st.session_state[k["att_n"]] = st.session_state.get(k["att_n"], 0) + 1
     st.session_state[k["result"]] = {"ok": True, "messages": [
         "Reply queued — it'll be sent within a minute or two, and will then appear in this conversation."]}
 
 
-# ---------------------------------------------------------------- the left pane
+# ---------------------------------------------------------------- the left rail
 
-def _render_row(row: Dict, selected: str, selected_key: str, ctx: InboxContext) -> None:
-    dot = "🔵 " if row["unread"] else ""
-    when = f" · {row['when']}" if row["when"] else ""
-    st.button(f"{dot}{md_escape(row['name'])}{when}", key=f"{ctx.namespace}_open_{row['key']}",
-              on_click=_select, args=(selected_key, row["key"]),
-              type="primary" if row["key"] == selected else "secondary", use_container_width=True)
-    subject = md_escape(row["subject"])
-    st.caption(f"**{subject}**" if row["unread"] else subject)
-    st.caption(md_escape(row["preview"]))
-    meta = []
-    if ctx.show_campaign:
-        meta.append(md_escape(row["campaign"]))
-    if row["intent"]:
-        meta.append(f"🎯 {md_escape(row['intent'])}")
-    if row["message_count"] > 1:
-        meta.append(f"{row['message_count']} messages")
-    if row["unread_count"]:
-        meta.append(f"{row['unread_count']} new")
-    if meta:
-        st.caption(" · ".join(meta))
+def _render_rail(ctx: InboxContext, items: List, active: str, rail_key: str) -> None:
+    with st.container(key=f"ux_railpane_{ctx.namespace}"):
+        st.markdown(H.rail_title_html("Status"), unsafe_allow_html=True)
+        for index, (key, label, icon, count) in enumerate(items):
+            with st.container(key=f"ux_ritem_{ctx.namespace}_{index}"):
+                st.markdown(H.rail_item_html(label, count, icon, key == active), unsafe_allow_html=True)
+                st.button(f"Show {label}", key=f"ux_railbtn_{ctx.namespace}_{key}", on_click=_pick, args=(rail_key, key))
 
 
-# ---------------------------------------------------------------- the right pane
+# ---------------------------------------------------------------- the list
+
+def _render_list(ctx: InboxContext, shown: List[Dict], total: int, filtered: int, by_key: Dict[str, Dict], selected: Optional[str],
+                 selected_key: str) -> None:
+    with st.container(key=f"ux_listpane_{ctx.namespace}"):
+        st.markdown(H.list_header_html("Inbox", len(shown), total), unsafe_allow_html=True)
+        with st.container(key=f"ux_list_{ctx.namespace}", height=PANE_HEIGHT - 44, border=False):
+            if not shown:
+                st.markdown(H.empty_thread_html("No conversations in this view."), unsafe_allow_html=True)
+            for index, row in enumerate(shown):
+                latest = by_key[row["key"]]["latest"]
+                received = str(latest.get("MessageDate") or "").strip() or latest.get("ReceivedAt", "")
+                with st.container(key=f"ux_row_{ctx.namespace}_{index}"):
+                    st.markdown(
+                        H.row_html(row["name"], row["subject"], row["preview"], H.list_date(received),
+                                   H.status_of(row["intent"], row["classification"]), row["key"] == selected, row["unread"],
+                                   H.waiting_nudge(row["unread"], received), row["message_count"], row["unread_count"],
+                                   row["campaign"] if ctx.show_campaign else ""),
+                        unsafe_allow_html=True)
+                    # the real button, invisible, laid over the whole row; its label is only for screen readers
+                    st.button(f"Open conversation with {md_escape(row['name'])}", key=f"{ctx.namespace}_open_{row['key']}",
+                              on_click=_select, args=(selected_key, row["key"]))
+        if filtered > len(shown):
+            st.caption(f"Showing the {len(shown)} most recent of {filtered} — search or filter to narrow it.")
+
+
+# ---------------------------------------------------------------- the open conversation
 
 def _thread_for(ctx: InboxContext, group: Dict, lead: Optional[Dict], campaign_name: str):
     """(messages, note). With the lead known: everything we sent plus every
@@ -184,25 +212,35 @@ def _thread_for(ctx: InboxContext, group: Dict, lead: Optional[Dict], campaign_n
     return build_conversation_thread(ctx.get_campaign_cfg(campaign_name), lead, every_reply, sent_by_hand), sent_note
 
 
-def _render_bubble(message: Dict) -> None:
-    right = bubble_side(message) == "right"
-    who = "You" if right else md_escape(sender_display(message.get("from", ""))["name"] or "Them")
-    column = st.columns([1, 4])[1] if right else st.columns([4, 1])[0]
-    with column:
-        with st.chat_message("assistant" if right else "user", avatar="✉️" if right else "👤"):
-            st.markdown(f"**{who}** · {md_escape(message.get('timestamp', ''))}")
-            subject = (message.get("subject") or "").strip()
-            if subject:
-                st.caption(md_escape(subject))
-            body = message.get("body", "")
-            if body.strip():
-                st.text(body)
-            else:
-                # Never an empty bubble: it reads as a bug. Some emails really have no text (a lone
-                # screenshot or attachment), and replies logged before HTML emails could be read are
-                # empty until repaired — either way, say so and point at the mailbox.
-                st.caption("(This email has no readable text — it may be only an image or an attachment. "
-                           "Open it in the mailbox to see it.)")
+def _conversation_intent(group: Dict, row: Dict):
+    """(intent, confidence) for the whole conversation: from the newest message that HAS an AI reading. A later
+    follow-up that was never classified must not turn an 'interested' conversation into 'unclear', and a later
+    'not interested' still overrides an earlier 'interested'."""
+    for message in sorted(group["messages"], key=lambda m: str(m.get("MessageDate") or m.get("ReceivedAt") or ""), reverse=True):
+        intent = (message.get("Intent") or "").strip()
+        if intent:
+            return intent, (message.get("IntentConfidence") or "").strip()
+    return row["intent"], row["intent_confidence"]
+
+
+def _card_for(message: Dict, row: Dict) -> str:
+    """One email as a card. Ours go From 'You' To the person; theirs the other way round."""
+    if message.get("direction") == "outgoing":
+        from_text = "You"
+        to_text = f"{row['name']} <{row['email']}>" if row["email"] else row["name"]
+    else:
+        who = sender_display(message.get("from", ""))
+        from_text = f"{who['name']} <{who['email']}>" if who["email"] else who["name"]
+        to_text = "You"
+    return H.card_html(message.get("subject", ""), from_text, to_text, message.get("timestamp", ""), message.get("body", ""),
+                       EMPTY_EMAIL_NOTE)
+
+
+def _show_result(ns: str, gk: str) -> None:
+    result = st.session_state.pop(_keys(ns, gk)["result"], None)
+    if result:
+        for message in result["messages"]:
+            (st.success if result["ok"] else st.error)(message)
 
 
 def _render_composer(ctx: InboxContext, group: Dict, latest: Dict, lead: Optional[Dict], campaign_name: str,
@@ -210,14 +248,10 @@ def _render_composer(ctx: InboxContext, group: Dict, latest: Dict, lead: Optiona
     ns = ctx.namespace
     k = _keys(ns, gk)
     defaults = build_reply_defaults(latest, lead)
-
-    result = st.session_state.pop(k["result"], None)
-    if result:
-        for message in result["messages"]:
-            (st.success if result["ok"] else st.error)(message)
-
+    if k["body"] not in st.session_state:
+        st.session_state[k["body"]] = st.session_state.get(k["draft"], "")
     st.text_area("Write a message…", key=k["body"], height=110, label_visibility="collapsed",
-                 placeholder="Write a message…")
+                 placeholder="Write a message…", on_change=_remember_draft, args=(k["body"], k["draft"]))
     with st.expander("To, Cc, Bcc, subject and attachments"):
         st.text_input("To", value=defaults["to"], key=k["to"])
         st.text_input("Subject", value=defaults["subject"], key=k["subject"])
@@ -243,38 +277,41 @@ def _render_composer(ctx: InboxContext, group: Dict, latest: Dict, lead: Optiona
 
 def _render_conversation(group: Dict, row: Dict, ctx: InboxContext) -> None:
     ns, gk = ctx.namespace, row["key"]
+    k = _keys(ns, gk)
     latest, campaign_name = group["latest"], group["campaign"]
     lead = find_lead_for_response(latest, ctx.leads_for(campaign_name))
 
-    head_col, action_col = st.columns([3, 1])
-    with head_col:
-        st.subheader(md_escape(row["name"]))
-        st.caption(md_escape(row["email"]) + (f" · {md_escape(campaign_name)}" if ctx.show_campaign else ""))
-    with action_col:
-        if ctx.read_keys is not None and row["unread"]:
-            st.button(f"✓ Mark as read ({row['unread_count']})", key=_keys(ns, gk)["mark_read"],
-                      on_click=_mark_read, args=(ctx, group), use_container_width=True)
-
     # What the system actually did about the latest reply — a "Logged Only" outcome means the sequence was NOT stopped.
+    stopped_it = row["action"] == "Stopped Sequence"
+    chips = []
     if row["action"]:
-        stopped = row["action"] == "Stopped Sequence"
-        st.caption(f"{'🛑' if stopped else '📝'} {md_escape(row['action'])}" + ("" if stopped else " — sequence NOT stopped"))
-    if row["stopped_status"]:
-        st.caption(f"🛑 {md_escape(row['stopped_status'])} — automated follow-ups stopped; you can still reply manually below.")
-    if row["intent"]:
-        confidence = f" ({md_escape(row['intent_confidence'])} confidence)" if row["intent_confidence"] else ""
-        st.caption(f"🎯 {md_escape(row['intent'])}{confidence}")
+        chips.append("Sequence stopped" if stopped_it else f"{row['action']} — sequence NOT stopped")
+    if row["stopped_status"] and not stopped_it:           # the lead is stopped for some other reason; worth saying
+        chips.append(row["stopped_status"])
+    address = row["email"] + (f" · {campaign_name}" if ctx.show_campaign else "")
+    st.markdown(H.thread_header_html(row["name"], address, H.status_of(row["intent"], row["classification"]), chips,
+                                     f"{row['intent_confidence']} confidence" if row["intent_confidence"] else ""),
+                unsafe_allow_html=True)
 
     messages, note = _thread_for(ctx, group, lead, campaign_name)
-    newest_first = st.checkbox("Newest message first", value=True, key=f"{ns}_newest_first")
-    st.caption("Times are UTC (the Sheet's own clock)." + (f" {note}" if note else ""))
-    with st.container(height=THREAD_HEIGHT, border=True):
+    if note:
+        st.caption(note)
+    newest_first = st.session_state.get(f"{ns}_newest_first", True)          # the popover below owns this checkbox
+    with st.container(key=f"ux_threadbody_{ns}", height=PANE_HEIGHT - HEADER_HEIGHT - BAR_HEIGHT, border=False):
         if not messages:
-            st.caption("No messages found for this lead yet.")
+            st.markdown(H.empty_thread_html("No messages found for this lead yet."), unsafe_allow_html=True)
         for message in (reversed(messages) if newest_first else messages):
-            _render_bubble(message)
+            st.markdown(_card_for(message, row), unsafe_allow_html=True)
 
-    _render_composer(ctx, group, latest, lead, campaign_name, gk)
+    _show_result(ns, gk)
+    with st.container(key=f"ux_bar_{ns}"):
+        st.button("↩ Reply", key=k["reply"], on_click=_toggle_composer, args=(k["composer"],))
+        if ctx.read_keys is not None and row["unread"]:
+            st.button(f"✓ Mark as read ({row['unread_count']})", key=k["mark_read"], on_click=_mark_read, args=(ctx, group))
+        with st.popover("⋯"):
+            st.checkbox("Newest message first", value=True, key=f"{ns}_newest_first")
+    if st.session_state.get(k["composer"], False):
+        _render_composer(ctx, group, latest, lead, campaign_name, gk)
 
 
 # ---------------------------------------------------------------- the whole inbox
@@ -284,19 +321,41 @@ def render_inbox(groups: List[Dict], ctx: InboxContext) -> None:
     lead), already filtered and sorted newest first by the caller."""
     if not groups:
         return
-    shown = groups[:MAX_ROWS]
-    rows = build_conversation_rows(shown, ctx.read_keys, ctx.leads_for)
-    by_key = {conversation_key(g): g for g in shown}
-    selected_key = f"{ctx.namespace}_selected"
-    selected = resolve_selection([r["key"] for r in rows], st.session_state.get(selected_key))
+    ns = ctx.namespace
+    st.markdown(f"<style>{H.INBOX_CSS}</style>", unsafe_allow_html=True)
+    all_rows = build_conversation_rows(groups, ctx.read_keys, ctx.leads_for)
+    by_key = {conversation_key(g): g for g in groups}
+    for row in all_rows:
+        row["intent"], row["intent_confidence"] = _conversation_intent(by_key[row["key"]], row)
+    category = {r["key"]: H.status_of(r["intent"], r["classification"]) for r in all_rows}
+
+    items = [("all", "All", "📥", len(all_rows))]
+    if ctx.read_keys is not None:
+        items.append(("unread", "Unread", "🔵", sum(1 for r in all_rows if r["unread"])))
+    items += [(key, label, icon, sum(1 for r in all_rows if category[r["key"]] == key)) for key, label, icon, _ in H.STATUSES]
+    rail_key = f"{ns}_rail"
+    active = st.session_state.get(rail_key, "all")
+    if active not in [item[0] for item in items]:
+        active = "all"
+
+    def kept(row: Dict) -> bool:
+        return active == "all" or (row["unread"] if active == "unread" else category[row["key"]] == active)
+
+    filtered = [r for r in all_rows if kept(r)]
+    shown = filtered[:MAX_ROWS]
+    selected_key = f"{ns}_selected"
+    selected = resolve_selection([r["key"] for r in shown], st.session_state.get(selected_key))
     st.session_state[selected_key] = selected
 
-    list_col, thread_col = st.columns([2, 3], gap="medium")
-    with list_col:
-        hidden = f" — showing the {MAX_ROWS} most recent; search or filter to narrow it" if len(groups) > MAX_ROWS else ""
-        st.caption(f"{len(groups)} conversation{'s' if len(groups) != 1 else ''}{hidden}")
-        with st.container(height=LIST_HEIGHT, border=True):
-            for row in rows:
-                _render_row(row, selected, selected_key, ctx)
-    with thread_col:
-        _render_conversation(by_key[selected], next(r for r in rows if r["key"] == selected), ctx)
+    with st.container(key=f"ux_shell_{ns}"):
+        rail_col, list_col, thread_col = st.columns([1.5, 2.9, 6.1], gap="small")
+        with rail_col:
+            _render_rail(ctx, items, active, rail_key)
+        with list_col:
+            _render_list(ctx, shown, len(all_rows), len(filtered), by_key, selected, selected_key)
+        with thread_col:
+            with st.container(key=f"ux_threadpane_{ns}"):
+                if selected is None:
+                    st.markdown(H.empty_thread_html("No conversations in this view."), unsafe_allow_html=True)
+                else:
+                    _render_conversation(by_key[selected], next(r for r in shown if r["key"] == selected), ctx)
