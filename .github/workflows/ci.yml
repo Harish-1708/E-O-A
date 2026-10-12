@@ -28,7 +28,10 @@ jobs:
           python-version: "3.11"
       # The Streamlit suite needs streamlit + PyNaCl, which live in the app's
       # own requirements file, NOT the root one.
-      - run: pip install -r requirements.txt -r streamlit_app/requirements.txt pytest
+      # markdown-it-py is a real CommonMark renderer. The Inbox tests use it to PROVE that untrusted
+      # email text (names, subjects, previews) cannot become a link, image or markup. Without it those
+      # tests used to skip silently, so it is installed here and the tests fail if it is missing.
+      - run: pip install -r requirements.txt -r streamlit_app/requirements.txt pytest markdown-it-py
 
       # Guard rail. The suite reads a committed fixture repo instead of live
       # production campaigns. If those fixture files are ever missing from the
