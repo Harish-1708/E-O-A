@@ -168,3 +168,19 @@ def test_build_conversation_thread_only_incoming_no_outgoing_recorded(fixture_re
     thread = build_conversation_thread(_CAMPAIGN_CFG, lead, responses)
     assert len(thread) == 1
     assert thread[0]["direction"] == "incoming"
+
+
+def test_a_body_that_is_only_a_line_break_does_not_hide_the_snippet():
+    """A stray newline is 'present' but shows nothing; the snippet beside it must win."""
+    from conversation_logic import build_incoming_messages_for_responses
+    (message,) = build_incoming_messages_for_responses(
+        [{"FullBody": "\n", "Snippet": "the short version", "ReceivedAt": "2026-10-01 10:00:00", "From": "a@x.com"}])
+    assert message["body"] == "the short version"
+
+
+def test_a_real_body_still_wins_over_the_snippet_and_two_blank_ones_give_an_empty_body():
+    from conversation_logic import build_incoming_messages_for_responses
+    full, none = build_incoming_messages_for_responses([
+        {"FullBody": "the whole message", "Snippet": "short", "ReceivedAt": "1", "From": ""},
+        {"FullBody": "  \n", "Snippet": " ", "ReceivedAt": "2", "From": ""}])
+    assert full["body"] == "the whole message" and none["body"] == ""
