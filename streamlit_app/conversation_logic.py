@@ -53,7 +53,9 @@ def build_incoming_messages_for_responses(responses_for_lead: List[Dict]) -> Lis
     (so an old conversation still shows something, just shorter)."""
     messages = []
     for r in responses_for_lead:
-        body = r.get("FullBody") or r.get("Snippet", "")
+        # The first of the two that has real text: a body that is only a stray
+        # line break is "present" but shows nothing, so it must not hide a snippet.
+        body = next((value for value in (r.get("FullBody"), r.get("Snippet")) if (value or "").strip()), "")
         messages.append({
             "direction": "incoming", "timestamp": r.get("ReceivedAt", ""),
             "subject": r.get("Subject", ""), "body": body, "from": r.get("From", ""),
