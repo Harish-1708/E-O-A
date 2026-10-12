@@ -9,7 +9,7 @@ data the system already has.
 """
 import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import config
 
@@ -61,12 +61,19 @@ def build_incoming_messages_for_responses(responses_for_lead: List[Dict]) -> Lis
     return messages
 
 
-def filter_responses_for_lead(responses: List[Dict], lead_id: str) -> List[Dict]:
-    """Every logged response for one specific lead, from a campaign's
-    full response list — a conversation thread is always scoped to one
-    lead, never mixed with anyone else's replies."""
+def filter_responses_for_lead(responses: List[Dict], lead_id: str, campaign: Optional[str] = None) -> List[Dict]:
+    """Every logged response for one specific lead — a conversation thread
+    is always scoped to one lead, never mixed with anyone else's replies.
+
+    Lead IDs restart in every campaign (each has its own lead 1, 2, 3…), so
+    when `responses` spans SEVERAL campaigns — the all-campaigns Responses
+    page tags each reply with its campaign — pass `campaign` as well, or one
+    campaign's lead 5 would show another campaign's lead 5's messages, from
+    a different person. A reply with no campaign tag (a single campaign's own
+    list) always passes the campaign check, so existing callers are unchanged."""
     lead_id = str(lead_id)
-    return [r for r in responses if str(r.get("LeadID", "")) == lead_id]
+    return [r for r in responses
+            if str(r.get("LeadID", "")) == lead_id and (campaign is None or r.get("_campaign", campaign) == campaign)]
 
 
 def build_conversation_thread(campaign_cfg: Dict, lead: Dict, responses_for_lead: List[Dict]) -> List[Dict]:
