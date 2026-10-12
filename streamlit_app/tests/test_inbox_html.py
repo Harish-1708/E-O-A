@@ -62,7 +62,7 @@ def _everything_hostile(payload):
     """Every builder, with `payload` in every email-derived field."""
     return [
         H.row_html(payload, payload, payload, payload, "interested", True, True, payload, 3, 2, payload),
-        H.thread_header_html(payload, payload, "lead", [payload]),
+        H.thread_header_html(payload, payload, "lead", [payload], payload),
         H.card_html(payload, payload, payload, "2026-10-12 14:17:00", payload, payload),
         H.card_html(payload, payload, payload, "2026-10-12 14:17:00", "> " + payload + "\n>> " + payload + "\nafter\n> " + payload, payload),   # inside quoted history too
         H.card_html(payload, payload, payload, payload, "", payload),
@@ -251,6 +251,11 @@ def test_the_thread_header_has_an_avatar_name_email_and_a_coloured_status_pill()
     assert "ux-chip-muted" not in H.thread_header_html("n", "e", "lead", ["", None])
 
 
+def test_the_status_pill_can_carry_a_short_note_and_has_none_by_default():
+    assert "👍 Interested · High" in H.thread_header_html("n", "e", "interested", [], "High")
+    assert " · " not in H.thread_header_html("n", "e", "interested", [])
+
+
 def test_a_card_has_a_large_subject_from_and_to_lines_the_date_and_a_divider():
     markup = H.card_html("Re: Can I send our catalogue?", "Gertrud <g@byodo.example>", "You", "2026-10-12 14:17:00", "Hello\nWorld")
     for piece in ('class="ux-title"', "Re: Can I send our catalogue?", "<b>From:</b> Gertrud &lt;g@byodo.example&gt;", "<b>To:</b> You",
@@ -313,18 +318,20 @@ def test_the_stylesheet_is_balanced_and_has_the_rules_the_layout_depends_on():
         "margin-bottom: 0 !important",                  # undoes Streamlit's -16px wrapper margin that clipped each block
         "position: absolute !important",                # the invisible button laid over each row
         "opacity: 0",
+        "[class*=\"_open_\"] > div",                  # the button's wrapper fills the row: only its top 40px used to respond to clicks
         "@media (max-width: 899px)",                    # small screens
-        ".ux-selected", ".ux-nudge", ".ux-qline", ".st-key-ux_bar",
+        ".ux-selected", ".ux-nudge", ".ux-qline", "st-key-ux_bar_",
     ):
         assert needle in css, needle
 
 
-def test_the_stylesheet_uses_exact_key_classes_for_fixed_containers_so_nothing_else_is_caught():
-    """A prefix pattern like [class*="st-key-ux_rail"] once also matched the invisible rail BUTTONS and wrecked the layout."""
-    css = H.INBOX_CSS
-    for exact in (".st-key-ux_shell", ".st-key-ux_railpane", ".st-key-ux_listpane", ".st-key-ux_threadbody", ".st-key-ux_bar"):
-        assert exact in css
-    assert '[class*="st-key-ux_rail"]' not in css and '[class*="st-key-ux_thread"]' not in css
+def test_every_key_pattern_in_the_stylesheet_ends_in_an_underscore_so_it_cannot_catch_a_neighbour():
+    """A pattern like [class*="st-key-ux_rail"] once also matched the invisible rail BUTTONS and wrecked the layout.
+    Containers are named ux_<thing>_<page>, so each pattern must stop at the underscore after <thing>."""
+    patterns = re.findall(r'\[class\*="(st-key-ux_[a-z]+_?)"\]', H.INBOX_CSS)
+    assert patterns and all(p.endswith("_") for p in patterns), [p for p in patterns if not p.endswith("_")]
+    assert {"st-key-ux_shell_", "st-key-ux_railpane_", "st-key-ux_listpane_", "st-key-ux_list_", "st-key-ux_threadbody_",
+            "st-key-ux_bar_", "st-key-ux_row_", "st-key-ux_ritem_", "st-key-ux_reply_"} <= set(patterns)
 
 
 def test_the_stylesheet_never_loads_anything_from_outside():
