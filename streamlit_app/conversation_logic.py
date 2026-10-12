@@ -56,11 +56,29 @@ def build_incoming_messages_for_responses(responses_for_lead: List[Dict]) -> Lis
         # The first of the two that has real text: a body that is only a stray
         # line break is "present" but shows nothing, so it must not hide a snippet.
         body = next((value for value in (r.get("FullBody"), r.get("Snippet")) if (value or "").strip()), "")
+        # When the email was really SENT where known; ReceivedAt is only when the system LOGGED it,
+        # which can be an hour or more later and would put your quick answer before her question.
+        sent_at = str(r.get("MessageDate") or "").strip() or r.get("ReceivedAt", "")
         messages.append({
-            "direction": "incoming", "timestamp": r.get("ReceivedAt", ""),
+            "direction": "incoming", "timestamp": sent_at,
             "subject": r.get("Subject", ""), "body": body, "from": r.get("From", ""),
         })
     return messages
+
+
+def build_outgoing_messages_from_sent_mail(sent_mail_for_lead: List[Dict]) -> List[Dict]:
+    """The emails WE sent that the system did not send by itself — typed by hand in the mailbox, or
+    sent from the control panel (the 'Sent Mail' tab). Unlike the template emails these are the real
+    text, as sent."""
+    return [{"direction": "outgoing", "timestamp": str(r.get("SentAt") or ""), "subject": r.get("Subject", ""),
+             "body": r.get("Body", ""), "source": r.get("Source", "")} for r in sent_mail_for_lead]
+
+
+def filter_sent_mail_for_lead(sent_mail: List[Dict], lead_id: str) -> List[Dict]:
+    """One lead's rows from a campaign's Sent Mail tab (the tab belongs to one campaign, so the lead
+    ID alone identifies them)."""
+    lead_id = str(lead_id)
+    return [r for r in sent_mail if str(r.get("LeadID", "")) == lead_id]
 
 
 def filter_responses_for_lead(responses: List[Dict], lead_id: str, campaign: Optional[str] = None) -> List[Dict]:
@@ -78,11 +96,13 @@ def filter_responses_for_lead(responses: List[Dict], lead_id: str, campaign: Opt
             if str(r.get("LeadID", "")) == lead_id and (campaign is None or r.get("_campaign", campaign) == campaign)]
 
 
-def build_conversation_thread(campaign_cfg: Dict, lead: Dict, responses_for_lead: List[Dict]) -> List[Dict]:
-    """Every outgoing stage actually sent, plus every logged reply for
-    this lead, merged into one chronologically-sorted thread — oldest
-    first, matching how a real email client displays a conversation."""
+def build_conversation_thread(campaign_cfg: Dict, lead: Dict, responses_for_lead: List[Dict],
+                              sent_mail_for_lead: Optional[List[Dict]] = None) -> List[Dict]:
+    """Every outgoing stage actually sent, every logged reply, and every email sent by hand or from
+    the control panel for this lead, merged into one chronologically-sorted thread — oldest first,
+    matching how a real email client displays a conversation."""
     outgoing = build_outgoing_messages_for_lead(campaign_cfg, lead)
     incoming = build_incoming_messages_for_responses(responses_for_lead)
-    combined = outgoing + incoming
+    by_hand = build_outgoing_messages_from_sent_mail(sent_mail_for_lead or [])
+    combined = outgoing + by_hand + incoming
     return sorted(combined, key=lambda m: m.get("timestamp", ""))
