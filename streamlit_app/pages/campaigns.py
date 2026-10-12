@@ -60,7 +60,7 @@ from responses_hub_logic import (  # noqa: E402
 )
 from inbox_view import InboxContext, render_inbox, choose_view, VIEW_INBOX  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
-from conversation_logic import build_conversation_thread, filter_responses_for_lead  # noqa: E402
+from conversation_logic import build_conversation_thread, filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
     compute_campaign_status, compute_campaign_readiness, status_label,
     STATUS_DRAFT, STATUS_RUNNING, STATUS_PAUSED, STATUS_ATTENTION, STATUS_COMPLETED,
@@ -151,6 +151,14 @@ def _fetch_full_campaign_data_cached(campaign_name: str):
     leads, responses, send_log, error_log = (value for _, value in results)
     fetched_at = datetime.now().strftime("%H:%M:%S")
     return leads, responses, send_log, error_log, fetched_at
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_sent_mail_cached(campaign_name: str):
+    """This campaign's Sent Mail tab — the emails the team sent by hand or from the Inbox. Read only
+    when a conversation is open; [] until the tab exists."""
+    campaign_cfg = get_campaign_cfg(campaign_name)
+    return _get_connector().get_all_sent_mail(campaign_cfg.get("sent_mail_tab") or f"{campaign_name} Sent Mail")
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -1278,6 +1286,7 @@ def _render_inbox_for_campaign(campaign_cfg, leads, responses):
         pending_sync_keys=None,
         show_campaign=False,
         pause_before_dispatch=1.0,
+        sent_for=lambda name, lead_id: filter_sent_mail_for_lead(_load_sent_mail_cached(name), lead_id),
     ))
 
 
@@ -1815,6 +1824,7 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
         if st.button("🔄 Refresh data"):
             _fetch_full_campaign_data_cached.clear()
             _get_master_header_cached.clear()
+            _load_sent_mail_cached.clear()
 
     try:
         campaign_cfg = get_campaign_cfg(campaign_name)
