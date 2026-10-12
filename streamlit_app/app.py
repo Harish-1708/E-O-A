@@ -34,6 +34,10 @@ Use the sidebar to navigate:
   until when, and why anyone is out of play, for every running campaign.
   Read-only, and it uses the same rule Auto Send uses. Look here first
   when you wonder why something has or hasn't gone out.
+- **🎯 Performance** — the business questions behind the counts: positive
+  replies, which follow-up and template variant earn replies, how long a
+  reply takes, negotiations and rights secured, and a "what worked best"
+  report. Read-only.
 - **🗂️ Campaigns** — the everyday view, and the only place you need for
   day-to-day work. Search, see every campaign's status (Draft/Running/
   Paused/Completed/Attention needed) at a glance, create a new one right
@@ -59,12 +63,13 @@ Use the sidebar to navigate:
 # bug). Page files themselves now have plain ASCII names.
 home_page = st.Page(_home, title="Home", icon="📬", default=True)
 today_page = st.Page("pages/today.py", title="Today", icon="📋")
+performance_page = st.Page("pages/performance.py", title="Performance", icon="🎯")
 campaigns_page = st.Page("pages/campaigns.py", title="Campaigns", icon="🗂️")
 responses_page = st.Page("pages/responses.py", title="Responses", icon="💬")
 overview_page = st.Page("pages/overview.py", title="Overview", icon="📈")
 dashboard_page = st.Page("pages/dashboard.py", title="Dashboard", icon="📊")
 email_accounts_page = st.Page("pages/email_accounts.py", title="Email Accounts", icon="📧")
 
-nav = st.navigation([home_page, today_page, campaigns_page, responses_page, overview_page, dashboard_page,
+nav = st.navigation([home_page, today_page, performance_page, campaigns_page, responses_page, overview_page, dashboard_page,
                      email_accounts_page])
 nav.run()
