@@ -370,6 +370,16 @@ class StubSheets:
         return [dict(r, _row=i) for i, r in enumerate(self.responses, start=2)]
 
     date_writes = None
+    requests = None
+
+    def update_response_rows(self, updates):
+        """One call here is ONE Google write request, however many rows it carries."""
+        if self.requests is None:
+            self.requests = []
+        self.requests.append(len(updates))
+        for u in updates:
+            self.update_response_body(u["row"], u["full_body"], u["snippet"], u.get("intent_fields"), u.get("message_date"))
+        return len(updates)
 
     def update_response_body(self, row, full_body, snippet, intent_fields=None, message_date=None):
         if self.date_writes is None:
@@ -800,3 +810,115 @@ def test_a_blank_emails_date_is_still_written_on_a_real_run(monkeypatch, capsys)
     parsed = {"body": "", "snippet": "", "date": SENT_AT, "structure": "image/png (attachment)"}
     _run_dates(monkeypatch, capsys, sheets, Fetcher({"s1@x.com": {"<img@x>": parsed}}), dry_run=False)
     assert sheets.writes == [] and sheets.date_writes == [(2, "2026-09-04 17:00:00")]
+
+
+# ================================================================ writing in a few paced requests (REPORTED: 429 after 177 requests)
+
+def _many(n, text="text"):
+    return [_response(f"<m{i}@x>", full=text) for i in range(n)]
+
+
+def _many_fetch(n):
+    return Fetcher({"s1@x.com": {f"<m{i}@x>": _parsed_dated("x") for i in range(n)}})
+
+
+@pytest.fixture
+def pauses(monkeypatch):
+    seen = []
+    monkeypatch.setattr(outreach.time, "sleep", lambda seconds: seen.append(seconds))
+    return seen
+
+
+def test_177_rows_need_two_google_writes_not_177(monkeypatch, capsys, pauses):
+    """The reported run: 177 replies needed their real sent time. One write per row used up Google's 60-a-minute limit."""
+    sheets = StubSheets(LEADS, _many(177))
+    out = _run_dates(monkeypatch, capsys, sheets, _many_fetch(177), dry_run=False)
+    assert sheets.requests == [100, 77]
+    assert len(sheets.date_writes) == 177 and "recorded the real sent time of 177." in out
+
+
+def test_it_pauses_between_requests_but_not_after_the_last(monkeypatch, capsys, pauses):
+    _run_dates(monkeypatch, capsys, StubSheets(LEADS, _many(177)), _many_fetch(177), dry_run=False)
+    assert pauses == [outreach.BACKFILL_WRITE_PAUSE_SECONDS]
+
+
+@pytest.mark.parametrize("count, requests, pause_count", [(1, [1], 0), (100, [100], 0), (101, [100, 1], 1), (250, [100, 100, 50], 2)])
+def test_requests_and_pauses_at_the_boundaries(monkeypatch, capsys, pauses, count, requests, pause_count):
+    sheets = StubSheets(LEADS, _many(count))
+    _run_dates(monkeypatch, capsys, sheets, _many_fetch(count), dry_run=False)
+    assert sheets.requests == requests and len(pauses) == pause_count
+
+
+def test_long_recovered_text_is_split_so_no_single_request_is_enormous(monkeypatch, capsys, pauses):
+    rows = [_response(f"<m{i}@x>") for i in range(60)]                                   # 60 blank replies...
+    fetch = Fetcher({"s1@x.com": {f"<m{i}@x>": _parsed_dated("w" * 49_000) for i in range(60)}})   # ...each with a very long body
+    sheets = StubSheets(LEADS, rows)
+    _run_dates(monkeypatch, capsys, sheets, fetch, dry_run=False)
+    assert len(sheets.requests) > 1 and sum(sheets.requests) == 60 and max(sheets.requests) < 60
+
+
+def test_a_dry_run_makes_no_write_request_at_all(monkeypatch, capsys, pauses):
+    sheets = StubSheets(LEADS, _many(177))
+    _run_dates(monkeypatch, capsys, sheets, _many_fetch(177), dry_run=True)
+    assert not sheets.requests and pauses == []
+
+
+class QuotaExceeded(Exception):
+    pass
+
+
+class FlakySheets(StubSheets):
+    """Google accepts the first requests, then refuses (as it did after a minute of one-per-row writes)."""
+    def __init__(self, *a, refuse_from=2, **k):
+        super().__init__(*a, **k)
+        self.refuse_from = refuse_from
+
+    def update_response_rows(self, updates):
+        if len(self.requests or []) + 1 >= self.refuse_from:
+            raise QuotaExceeded("Quota exceeded for 'Write requests per minute per user'")
+        return super().update_response_rows(updates)
+
+
+def _run_expecting_stop(monkeypatch, capsys, sheets, fetch):
+    with pytest.raises(SystemExit) as stopped:
+        _run_dates(monkeypatch, capsys, sheets, fetch, dry_run=False)
+    return stopped.value.code
+
+
+def test_if_google_refuses_part_way_it_says_how_far_it_got_and_the_run_is_marked_failed(monkeypatch, capsys, pauses):
+    sheets = FlakySheets(LEADS, _many(177), refuse_from=2)
+    code = _run_expecting_stop(monkeypatch, capsys, sheets, _many_fetch(177))
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "STOPPED: wrote 100 of 177 row(s) before Google refused the next request (QuotaExceeded)." in out
+    assert "run it again to carry on" in out
+    assert len(sheets.date_writes) == 100                                             # the first request really did go through
+
+
+def test_if_the_very_first_request_is_refused_it_says_zero_were_written(monkeypatch, capsys, pauses):
+    sheets = FlakySheets(LEADS, _many(5), refuse_from=1)
+    _run_expecting_stop(monkeypatch, capsys, sheets, _many_fetch(5))
+    assert "wrote 0 of 5 row(s)" in capsys.readouterr().out and not sheets.date_writes
+
+
+def test_running_it_again_after_a_refusal_carries_on_with_only_the_rows_not_yet_done(monkeypatch, capsys, pauses):
+    first = FlakySheets(LEADS, _many(177), refuse_from=2)
+    _run_expecting_stop(monkeypatch, capsys, first, _many_fetch(177))
+    capsys.readouterr()
+    done = {row for row, _ in first.date_writes}
+    assert len(done) == 100
+    resumed = StubSheets(LEADS, first.responses)                                      # the Sheet as it now stands
+    fetch = _many_fetch(177)
+    _run_dates(monkeypatch, capsys, resumed, fetch, dry_run=False)
+    assert len(resumed.date_writes) == 77 and not ({row for row, _ in resumed.date_writes} & done)
+    assert sum(len(ids) for _, ids in fetch.asked) == 77                              # and only those 77 were looked up in the mailbox
+    assert all(r.get("MessageDate") for r in resumed.responses)                       # now every row has its date
+
+
+def test_the_stop_message_contains_nothing_private(monkeypatch, capsys, pauses):
+    rows = [dict(_response("<secret-id@private.example>", full="t"), From="Private Person <private.person@secret.example>", Subject="Re: a private subject")]
+    fetch = Fetcher({"s1@x.com": {"<secret-id@private.example>": _parsed_dated("x")}})
+    _run_expecting_stop(monkeypatch, capsys, FlakySheets(LEADS, rows, refuse_from=1), fetch)
+    out = capsys.readouterr().out
+    for private in ("Private Person", "private.person", "secret.example", "a private subject", "secret-id"):
+        assert private not in out
