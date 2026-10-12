@@ -26,7 +26,7 @@ from responses_reply_logic import (  # noqa: E402
     find_lead_for_response, build_reply_defaults, parse_email_list, validate_reply,
     build_reply_payload, reply_payload_path, build_attachment_entries, total_attachment_size_bytes,
 )
-from conversation_logic import build_conversation_thread, filter_responses_for_lead  # noqa: E402
+from conversation_logic import build_conversation_thread, filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from data_import_logic import payload_to_bytes  # noqa: E402
 from inbox_view import InboxContext, render_inbox, choose_view, VIEW_INBOX, VIEW_CLASSIC  # noqa: E402
 
@@ -66,6 +66,14 @@ def _safe_github_client():
         return _get_github_client()
     except Exception:  # noqa: BLE001 - missing/invalid token, etc.
         return None
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_sent_mail_cached(campaign_name):
+    """One campaign's Sent Mail tab (the emails the team sent by hand or from this page). Read only
+    for the campaign whose conversation is open; [] until the tab exists."""
+    campaign_cfg = get_campaign_cfg(campaign_name)
+    return _get_connector().get_all_sent_mail(campaign_cfg.get("sent_mail_tab") or f"{campaign_name} Sent Mail")
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -129,6 +137,7 @@ except Exception as exc:  # noqa: BLE001
 if st.button("🔄 Refresh"):
     _load_all_responses.clear()
     _load_all_leads.clear()
+    _load_sent_mail_cached.clear()
 
 all_responses, unavailable_campaigns = _load_all_responses(tuple(campaign_names))
 leads_by_campaign = _load_all_leads(tuple(campaign_names))
@@ -236,6 +245,7 @@ if view == VIEW_INBOX and groups:
         read_keys=read_keys,
         pending_sync_keys=pending_sync_keys,
         show_campaign=True,
+        sent_for=lambda name, lead_id: filter_sent_mail_for_lead(_load_sent_mail_cached(name), lead_id),
     ))
 
 if not groups:
