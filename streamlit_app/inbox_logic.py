@@ -36,13 +36,18 @@ def md_escape(text) -> str:
     written by strangers) safe to put inside Markdown.
 
     Streamlit renders Markdown in captions, labels and headings, so raw email
-    text could otherwise inject links, images (a tracking pixel), colour
-    directives (`:red[...]`), LaTeX (`$...$`) or emoji codes. CommonMark lets
-    ANY ASCII punctuation be backslash-escaped and the backslash vanishes on
-    display, so every punctuation character is escaped — the text reads
-    exactly as written. Line breaks become spaces so one field stays on one
-    line. Message BODIES never go through here: they are shown with st.text,
-    which does not interpret Markdown at all."""
+    text could otherwise inject DISGUISED links (`[Your bank](http://evil)`),
+    images (a tracking pixel), colour directives (`:red[...]`), LaTeX
+    (`$...$`) or emoji codes. CommonMark lets ANY ASCII punctuation be
+    backslash-escaped and the backslash vanishes on display, so every
+    punctuation character is escaped — the text reads exactly as written. Line
+    breaks become spaces so one field stays on one line.
+
+    What this does NOT stop: Streamlit's Markdown also turns a web address or
+    email address written out in plain text into a clickable link (the way an
+    email client does). That link shows its real address, so it cannot disguise
+    where it goes, and no image can load. Message BODIES never go through here:
+    they are shown with st.text, which does not interpret Markdown at all."""
     flattened = re.sub(r"\s+", " ", str(text or "")).strip()
     return _MARKDOWN_PUNCTUATION.sub(r"\\\1", flattened)
 
@@ -81,7 +86,7 @@ def relative_time(value, now: Optional[datetime] = None) -> str:
 def preview_text(snippet, limit: int = PREVIEW_LENGTH) -> str:
     text = re.sub(r"\s+", " ", str(snippet or "")).strip()
     if not text:
-        return "(no preview)"
+        return "(no text in this email)"
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
