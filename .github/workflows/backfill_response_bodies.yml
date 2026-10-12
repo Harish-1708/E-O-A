@@ -1,0 +1,70 @@
+name: Backfill Response Bodies
+
+# Repair for replies that were logged with NO text. Until the reader learned to
+# read HTML-only emails, such a reply was stored empty (and the AI intent reader
+# was shown an empty message, so it could only say "Unclear"). The email itself
+# is still in the mailbox, so this looks each one up by its Message-ID and fills
+# in the text. It only ever fills gaps — a reply that already has text is never
+# touched — so it is safe to run again.
+#
+# Run it with "dry_run" ticked first: it lists what it WOULD fill in, writes
+# nothing, and prints only row numbers and counts (this repository's logs are
+# public, so no names, addresses or message text are ever printed).
+on:
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: "Campaign name (must have a matching templates/<name>/ folder)"
+        required: true
+        default: "Kelson_Creators_Licensing"
+      dry_run:
+        description: "Preview only — show what would be filled in without writing anything"
+        required: false
+        type: boolean
+        default: true
+
+# Shares the one Google Sheets lock with every other Sheets-touching workflow,
+# so it can never run at the same moment as Auto Send or Check Replies.
+concurrency:
+  group: google-sheets-api
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Backfill response bodies
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          EMAIL_ACCOUNTS_JSON: ${{ secrets.EMAIL_ACCOUNTS_JSON }}
+          EMAIL_ACCOUNT_SLOT_1: ${{ secrets.EMAIL_ACCOUNT_SLOT_1 }}
+          EMAIL_ACCOUNT_SLOT_2: ${{ secrets.EMAIL_ACCOUNT_SLOT_2 }}
+          EMAIL_ACCOUNT_SLOT_3: ${{ secrets.EMAIL_ACCOUNT_SLOT_3 }}
+          EMAIL_ACCOUNT_SLOT_4: ${{ secrets.EMAIL_ACCOUNT_SLOT_4 }}
+          EMAIL_ACCOUNT_SLOT_5: ${{ secrets.EMAIL_ACCOUNT_SLOT_5 }}
+          EMAIL_ACCOUNT_SLOT_6: ${{ secrets.EMAIL_ACCOUNT_SLOT_6 }}
+          EMAIL_ACCOUNT_SLOT_7: ${{ secrets.EMAIL_ACCOUNT_SLOT_7 }}
+          EMAIL_ACCOUNT_SLOT_8: ${{ secrets.EMAIL_ACCOUNT_SLOT_8 }}
+          EMAIL_ACCOUNT_SLOT_9: ${{ secrets.EMAIL_ACCOUNT_SLOT_9 }}
+          EMAIL_ACCOUNT_SLOT_10: ${{ secrets.EMAIL_ACCOUNT_SLOT_10 }}
+          # Optional — when set, each recovered Genuine Reply also gets its intent
+          # read again from the real text (the earlier reading came from nothing).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -o pipefail
+          CMD=(python outreach.py backfill-response-bodies --campaign "${{ github.event.inputs.campaign }}")
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            CMD+=(--dry-run)
+          fi
+          "${CMD[@]}" | tee backfill_output.txt
+      - name: Add to job summary
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat backfill_output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
