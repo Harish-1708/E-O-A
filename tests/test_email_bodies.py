@@ -4,6 +4,7 @@ logged with no text."""
 import email
 import os
 import sys
+from datetime import datetime
 from email.message import EmailMessage
 
 import pytest
@@ -368,9 +369,17 @@ class StubSheets:
     def get_all_responses(self):
         return [dict(r, _row=i) for i, r in enumerate(self.responses, start=2)]
 
-    def update_response_body(self, row, full_body, snippet, intent_fields=None):
-        self.writes.append((row, full_body, snippet, intent_fields))
-        self.responses[row - 2].update({"FullBody": full_body, "Snippet": snippet, **(intent_fields or {})})
+    date_writes = None
+
+    def update_response_body(self, row, full_body, snippet, intent_fields=None, message_date=None):
+        if self.date_writes is None:
+            self.date_writes = []
+        if full_body is not None:
+            self.writes.append((row, full_body, snippet, intent_fields))
+            self.responses[row - 2].update({"FullBody": full_body, "Snippet": snippet, **(intent_fields or {})})
+        if message_date:
+            self.date_writes.append((row, message_date))
+            self.responses[row - 2]["MessageDate"] = message_date
 
 
 ACCTS = {"sales1": {"address": "s1@x.com", "app_password": "p"}, "sales2": {"address": "s2@x.com", "app_password": "p"}}
@@ -513,7 +522,7 @@ def test_a_real_run_writes_the_recovered_text(monkeypatch, capsys):
     sheets = StubSheets(LEADS, _secret_rows())
     out = _run(monkeypatch, capsys, sheets, Fetcher({"s1@x.com": {"<secret-id@private.example>": _parsed_msg("Private words")}}), dry_run=False)
     assert sheets.writes == [(2, "Private words", "Private words", None)]
-    assert "Wrote the text for 1 reply; read the intent again for 0." in out
+    assert "Wrote the text for 1 reply; read the intent again for 0; recorded the real sent time of 0." in out
 
 
 def test_a_real_run_with_a_key_also_reads_the_intent_again(monkeypatch, capsys):
@@ -542,7 +551,7 @@ def test_the_output_never_contains_a_name_an_address_a_subject_or_any_message_te
 def test_the_reasons_for_rows_that_could_not_be_filled_in_are_printed(monkeypatch, capsys):
     rows = [_response("<img@x>"), _response("<gone@x>"), {**_response(""), "MessageID": ""}]
     out = _run(monkeypatch, capsys, StubSheets(LEADS, rows), Fetcher({"s1@x.com": {"<img@x>": _parsed_msg("")}}, broken={"s2@x.com"}), dry_run=True)
-    assert "3 could not be filled in" in out
+    assert "3 could not be fully filled in" in out
     assert "no readable text (probably only an image or attachment)" in out
     assert "not found in any mailbox that could be checked (1 mailbox(es) could not be reached: sales2 - " in out
     assert "no Message-ID was logged for it" in out
@@ -555,3 +564,239 @@ def test_running_the_repair_twice_changes_nothing_the_second_time(monkeypatch, c
     assert len(sheets.writes) == 1
     out = _run(monkeypatch, capsys, sheets, fetch, dry_run=False)
     assert len(sheets.writes) == 1 and "Wrote the text for 0 replies" in out
+
+
+# ================================================================ quoted history keeps its markers
+
+APPLE_REPLY = ('<div>Thanks! Would $250 work?</div><div><br><blockquote type="cite"><div>On Sep 4, 2026, at 11:52 AM, Harish Dharan '
+               '&lt;h@k.agency&gt; wrote:</div><br><div><p>Hi Andrea,</p><p>We can do $200.</p>'
+               '<blockquote type="cite"><div>earlier: asks $400</div></blockquote></div></blockquote></div>')
+
+
+def test_an_apple_mail_reply_keeps_its_quoted_history_marked_so_it_is_never_mistaken_for_what_she_just_wrote():
+    assert outreach._html_to_text(APPLE_REPLY) == (
+        "Thanks! Would $250 work?\n\n"
+        "> On Sep 4, 2026, at 11:52 AM, Harish Dharan <h@k.agency> wrote:\n>\n"
+        "> Hi Andrea,\n>\n> We can do $200.\n>\n> > earlier: asks $400")
+
+
+def test_a_gmail_style_reply_marks_the_quote_but_not_the_attribution_line_above_it():
+    gmail = ('<div dir="ltr">Sounds good.</div><br><div class="gmail_quote"><div class="gmail_attr">On Fri, Sep 4, 2026 at 11:52 AM Harish '
+             'wrote:<br></div><blockquote class="gmail_quote"><div>Original offer</div></blockquote></div>')
+    assert outreach._html_to_text(gmail) == "Sounds good.\n\nOn Fri, Sep 4, 2026 at 11:52 AM Harish wrote:\n\n> Original offer"
+
+
+def test_text_written_between_quotes_is_not_marked_as_quoted():
+    inline = "<blockquote>Do you have the raw video?</blockquote><p>No, only the captioned one.</p><blockquote>Any other clips?</blockquote><p>Not right now.</p>"
+    assert outreach._html_to_text(inline) == "> Do you have the raw video?\n\nNo, only the captioned one.\n\n> Any other clips?\n\nNot right now."
+
+
+def test_a_reply_with_no_quote_is_unchanged_and_no_stray_marker_is_left_at_the_end():
+    assert outreach._html_to_text("<p>Just a reply.</p>") == "Just a reply."
+    assert not outreach._html_to_text("<p>Hi</p><blockquote><p>quoted</p></blockquote>").endswith(">")
+
+
+@pytest.mark.parametrize("markup", ["<blockquote>" * 400 + "deep" + "</blockquote>" * 400, "</blockquote></blockquote>text", "<blockquote><p>unclosed"])
+def test_odd_quoting_never_raises(markup):
+    assert isinstance(outreach._html_to_text(markup), str)
+
+
+def test_an_html_only_apple_reply_read_through_the_real_parser_shows_her_words_first_then_the_marked_history():
+    m = _message()
+    m.set_content(APPLE_REPLY, subtype="html")
+    body = outreach._parse_email_message(m.as_bytes())["body"]
+    assert body.startswith("Thanks! Would $250 work?\n\n> On Sep 4, 2026") and "> We can do $200." in body
+
+
+# ================================================================ describing an email's structure
+
+def _structure_of(m):
+    return outreach._describe_structure(_parsed(m))
+
+
+def test_the_structure_lists_content_types_only_marking_empty_text_parts_and_attachments():
+    both = _message()
+    both.set_content("\r\n")
+    both.add_alternative("<p>Real words</p>", subtype="html")
+    assert _structure_of(both) == "text/plain (empty), text/html"
+    html_only = _message()
+    html_only.set_content("<p>x</p>", subtype="html")
+    assert _structure_of(html_only) == "text/html"
+    shot = _message()
+    shot.set_content("")
+    shot.add_attachment(b"\x89PNG", maintype="image", subtype="png", filename="shot.png")
+    assert _structure_of(shot) == "text/plain (empty), image/png (attachment)"
+
+
+def test_the_structure_never_contains_any_of_the_emails_content():
+    m = _message(subject="Re: a private subject", sender="Private Person <private.person@secret.example>")
+    m.set_content("<p>very private words</p>", subtype="html")
+    m.add_attachment(b"secret-bytes", maintype="application", subtype="pdf", filename="private-name.pdf")
+    description = _structure_of(m)
+    for private in ("private", "secret", "words", "Person"):
+        assert private not in description
+
+
+def test_a_message_with_no_parts_at_all_is_described_as_such():
+    assert outreach._describe_structure(email.message_from_bytes(b"Subject: x\r\n\r\n")) == "text/plain (empty)"
+
+
+def test_the_parsed_message_carries_the_structure_for_diagnosis():
+    m = _message()
+    m.set_content("<p>hi</p>", subtype="html")
+    assert outreach._parse_email_message(m.as_bytes())["structure"] == "text/html"
+
+
+# ================================================================ a reply is logged with its REAL sent time
+
+def test_check_replies_records_when_the_email_was_really_sent_not_just_when_it_was_logged(monkeypatch):
+    m = _message(subject="Re: DudeRobe Paid Creator Collaboration", message_id="<dated@mail.gmail.com>")
+    m["Date"] = "Fri, 04 Sep 2026 17:00:00 +0000"
+    m.set_content("Interested.")
+    parsed = outreach._parse_email_message(m.as_bytes())
+    sheets = FakeSheets([make_lead(_row=2, LeadID="L1", Email="creator@gmail.com", MessageID="")])
+    monkeypatch.setattr(outreach, "imap_fetch_recent", lambda *a, **k: [parsed])
+    outreach.check_replies(sheets, {"sales1": ACCOUNTS["sales1"]}, lookback_hours=24)
+    (row,) = sheets.responses
+    assert row["MessageDate"] == "2026-09-04 17:00:00"
+    assert row["ReceivedAt"] != row["MessageDate"]                        # logged now, sent then
+
+
+def test_an_email_with_no_date_header_is_logged_with_a_blank_real_sent_time(monkeypatch):
+    parsed = {"message_id": "<nodate@x>", "in_reply_to": "", "references": "", "subject": "Re: x", "from": "creator@gmail.com",
+              "headers": {}, "body": "hi", "snippet": "hi", "date": None}
+    sheets = FakeSheets([make_lead(_row=2, LeadID="L1", Email="creator@gmail.com", MessageID="")])
+    monkeypatch.setattr(outreach, "imap_fetch_recent", lambda *a, **k: [parsed])
+    outreach.check_replies(sheets, {"sales1": ACCOUNTS["sales1"]}, lookback_hours=24)
+    assert sheets.responses[0]["MessageDate"] == ""
+
+
+def test_the_response_sheet_has_a_real_sent_time_column():
+    assert "MessageDate" in outreach.RESPONSES_COLUMNS and outreach.RESPONSES_COLUMNS[-1] == "MessageDate"   # added last: existing sheets migrate
+
+
+# ---- writing it to the Sheet
+
+def test_update_response_body_can_record_only_the_date_leaving_the_text_cells_alone():
+    c = _connector()
+    c.update_response_body(5, None, None, message_date="2026-09-04 17:00:00")
+    ((updates, kwargs),) = c.responses_ws.batches
+    assert [(u["range"], u["values"][0][0]) for u in updates] == [
+        (outreach.gspread.utils.rowcol_to_a1(5, outreach.RESPONSES_COLUMNS.index("MessageDate") + 1), "2026-09-04 17:00:00")]
+    assert kwargs.get("value_input_option") == "RAW"
+
+
+def test_update_response_body_writes_text_and_date_together_when_given_both():
+    c = _connector()
+    c.update_response_body(5, "words", "snip", {"Intent": "Interested"}, message_date="2026-09-04 17:00:00")
+    ((updates, _),) = c.responses_ws.batches
+    columns = {outreach.RESPONSES_COLUMNS[outreach.gspread.utils.a1_to_rowcol(u["range"])[1] - 1] for u in updates}
+    assert columns == {"FullBody", "Snippet", "Intent", "MessageDate"}
+
+
+# ================================================================ the repair fills in real sent times too
+
+SENT_AT = datetime(2026, 9, 4, 17, 0, 0)
+
+
+def _parsed_dated(body, date=SENT_AT):
+    return {"body": body, "snippet": body[:500], "date": date, "structure": "text/html"}
+
+
+def test_a_repaired_row_also_gets_its_real_sent_time():
+    sheets = StubSheets(LEADS, [_response("<a@x>")])
+    (r,) = outreach.backfill_response_bodies(sheets, ACCTS, fetch=Fetcher({"s1@x.com": {"<a@x>": _parsed_dated("words")}}))
+    assert r["status"] == "recovered" and r["message_date"] == "2026-09-04 17:00:00"
+
+
+def test_a_real_sent_time_already_in_the_sheet_is_never_overwritten():
+    sheets = StubSheets(LEADS, [_response("<a@x>") | {"MessageDate": "2026-09-01 08:00:00"}])
+    (r,) = outreach.backfill_response_bodies(sheets, ACCTS, fetch=Fetcher({"s1@x.com": {"<a@x>": _parsed_dated("words")}}))
+    assert r["status"] == "recovered" and r["message_date"] == ""
+
+
+def test_by_default_rows_that_have_text_but_no_date_are_left_alone():
+    sheets = StubSheets(LEADS, [_response("<a@x>", full="already here")])
+    assert outreach.backfill_response_bodies(sheets, ACCTS, fetch=Fetcher({})) == []
+
+
+def test_with_include_dates_rows_that_have_text_but_no_date_get_just_the_date():
+    rows = [_response("<has-text@x>", full="already here"), _response("<has-both@x>", full="here") | {"MessageDate": "2026-09-01 08:00:00"}]
+    fetch = Fetcher({"s1@x.com": {"<has-text@x>": _parsed_dated("DIFFERENT TEXT, must not be used")}})
+    results = outreach.backfill_response_bodies(StubSheets(LEADS, rows), ACCTS, fetch=fetch, include_dates=True)
+    assert [(r["row"], r["status"], r["message_date"]) for r in results] == [(2, "dated", "2026-09-04 17:00:00")]
+    assert "full_body" not in results[0]                                            # the text it already has is left exactly as it is
+    assert fetch.asked == [("s1@x.com", ["<has-text@x>"])]                          # asked once, in its own mailbox, and found
+
+
+def test_a_date_only_row_whose_email_carries_no_date_is_reported_as_such():
+    results = outreach.backfill_response_bodies(StubSheets(LEADS, [_response("<a@x>", full="text")]), ACCTS,
+                                                 fetch=Fetcher({"s1@x.com": {"<a@x>": _parsed_dated("x", date=None)}}), include_dates=True)
+    assert [r["status"] for r in results] == ["no_date"]
+
+
+def test_a_blank_email_still_records_its_date_and_describes_its_structure():
+    parsed = {"body": "", "snippet": "", "date": SENT_AT, "structure": "text/plain (empty), image/png (attachment)"}
+    (r,) = outreach.backfill_response_bodies(StubSheets(LEADS, [_response("<img@x>")]), ACCTS, fetch=Fetcher({"s1@x.com": {"<img@x>": parsed}}))
+    assert r["status"] == "still_empty" and r["message_date"] == "2026-09-04 17:00:00"
+    assert r["structure"] == "text/plain (empty), image/png (attachment)"
+
+
+def test_a_date_only_search_asks_about_each_message_once_in_its_own_mailbox_first():
+    rows = [_response("<one@x>", lead="1", full="t"), _response("<two@x>", lead="2", full="t")]
+    fetch = Fetcher({"s1@x.com": {"<one@x>": _parsed_dated("x")}, "s2@x.com": {"<two@x>": _parsed_dated("x")}})
+    outreach.backfill_response_bodies(StubSheets(LEADS, rows), ACCTS, fetch=fetch, include_dates=True)
+    assert fetch.asked == [("s1@x.com", ["<one@x>"]), ("s2@x.com", ["<two@x>"])]
+
+
+# ---- the command
+
+def _run_dates(monkeypatch, capsys, sheets, fetch, dry_run, include_dates=True):
+    monkeypatch.setattr(outreach, "get_campaign", lambda name, **kw: {})
+    monkeypatch.setattr(outreach, "_connect_sheets", lambda cfg: sheets)
+    monkeypatch.setattr(outreach, "load_email_accounts", lambda: ACCTS)
+    monkeypatch.setattr(outreach, "imap_fetch_by_message_ids", fetch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    outreach.cmd_backfill_response_bodies(type("Args", (), {"campaign": "C", "dry_run": dry_run, "include_dates": include_dates})())
+    return capsys.readouterr().out
+
+
+def test_a_real_run_records_dates_for_text_repairs_and_for_date_only_rows(monkeypatch, capsys):
+    rows = [_response("<blank@x>"), _response("<has-text@x>", full="text")]
+    sheets = StubSheets(LEADS, rows)
+    fetch = Fetcher({"s1@x.com": {"<blank@x>": _parsed_dated("recovered words"), "<has-text@x>": _parsed_dated("ignored")}})
+    out = _run_dates(monkeypatch, capsys, sheets, fetch, dry_run=False)
+    assert sheets.writes == [(2, "recovered words", "recovered words", None)]
+    assert sorted(sheets.date_writes) == [(2, "2026-09-04 17:00:00"), (3, "2026-09-04 17:00:00")]
+    assert "recorded the real sent time of 2." in out
+    assert sheets.responses[1]["FullBody"] == "text"                                  # the row that already had text kept it
+
+
+def test_a_dry_run_with_dates_writes_nothing_and_counts_what_it_would_do(monkeypatch, capsys):
+    sheets = StubSheets(LEADS, [_response("<has-text@x>", full="text")])
+    out = _run_dates(monkeypatch, capsys, sheets, Fetcher({"s1@x.com": {"<has-text@x>": _parsed_dated("x")}}), dry_run=True)
+    assert sheets.writes == [] and (sheets.date_writes or []) == []
+    assert "Would fill in the real sent time of 1 more reply that already had text." in out and "DRY RUN" in out
+
+
+def test_without_the_flag_the_command_does_not_chase_dates_for_rows_with_text(monkeypatch, capsys):
+    sheets, fetch = StubSheets(LEADS, [_response("<has-text@x>", full="text")]), Fetcher({})
+    out = _run_dates(monkeypatch, capsys, sheets, fetch, dry_run=True, include_dates=False)
+    assert fetch.asked == []                                                          # no mailbox was even contacted
+    assert "more reply" not in out and "more replies" not in out
+
+
+def test_a_blank_emails_parts_are_printed_for_diagnosis_but_nothing_private(monkeypatch, capsys):
+    rows = [dict(_response("<secret-id@private.example>"), From="Private Person <private.person@secret.example>", Subject="Re: a private subject")]
+    parsed = {"body": "", "snippet": "", "date": SENT_AT, "structure": "text/plain (empty), text/html (empty)"}
+    out = _run_dates(monkeypatch, capsys, StubSheets(LEADS, rows), Fetcher({"s1@x.com": {"<secret-id@private.example>": parsed}}), dry_run=True)
+    assert "its parts: text/plain (empty), text/html (empty)" in out and "its sent time is still recorded" in out
+    for private in ("Private Person", "private.person", "secret.example", "a private subject", "secret-id"):
+        assert private not in out
+
+
+def test_a_blank_emails_date_is_still_written_on_a_real_run(monkeypatch, capsys):
+    sheets = StubSheets(LEADS, [_response("<img@x>")])
+    parsed = {"body": "", "snippet": "", "date": SENT_AT, "structure": "image/png (attachment)"}
+    _run_dates(monkeypatch, capsys, sheets, Fetcher({"s1@x.com": {"<img@x>": parsed}}), dry_run=False)
+    assert sheets.writes == [] and sheets.date_writes == [(2, "2026-09-04 17:00:00")]
