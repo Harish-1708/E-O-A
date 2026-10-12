@@ -39,12 +39,16 @@ def _run_page(fake_spreadsheet=None, authorize_error=None, interact=None):
     return at
 
 
-def _sheet(leads, responses, send_log):
-    return FakeSpreadsheet({
+def _sheet(leads, responses, send_log, error_log=()):
+    """error_log=None leaves the Error Log tab out entirely (an unreadable tab)."""
+    tabs = {
         f"{FIXTURE_CAMPAIGN} Master Sheet": FakeWorksheet(leads),
         f"{FIXTURE_CAMPAIGN} Response Sheet": FakeWorksheet(responses),
         f"{FIXTURE_CAMPAIGN} Custom Log Sheet": FakeWorksheet(send_log),
-    })
+    }
+    if error_log is not None:
+        tabs[f"{FIXTURE_CAMPAIGN} Error Log"] = FakeWorksheet(list(error_log))
+    return FakeSpreadsheet(tabs)
 
 
 def _realistic_sheet():
@@ -65,7 +69,8 @@ def _realistic_sheet():
         {"Timestamp": "2026-09-01 10:15:00", "LeadID": "4", "Stage": "intro", "Variant": "A", "Status": "failed", "MessageID": "", "Error": "SMTP 550"},
         {"Timestamp": "2026-09-03 10:00:00", "LeadID": "3", "Stage": "followup1", "Variant": "C", "Status": "sent", "MessageID": "<m4@x>", "Error": ""},
     ]
-    return _sheet(leads, responses, send_log)
+    error_log = [{"ErrorType": "SMTP", "Timestamp": "2026-09-01 10:15:00", "Detail": "550"}] * 2
+    return _sheet(leads, responses, send_log, error_log)
 
 
 def _headline_and_card_metrics(at):
@@ -169,3 +174,81 @@ def test_performance_is_registered_in_the_navigation_and_listed_on_home():
     assert 'st.Page("pages/performance.py"' in source
     assert "performance_page" in source.split("st.navigation(")[1].split(")")[0]
     assert "Performance" in source.split("def _home")[1]
+
+
+# ================================================================ replacing Analytics, Overview and Dashboard
+
+def _all_dataframes(at):
+    return [df.value for df in at.dataframe]
+
+
+def test_every_figure_the_old_overview_page_showed_is_on_this_page_in_the_at_a_glance_table(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    assert "All campaigns at a glance" in [s.value for s in at.subheader]
+    glance = next(df for df in _all_dataframes(at) if "Sequence completion" in df.columns)
+    row = glance.iloc[0]
+    assert row["Campaign"] == FIXTURE_CAMPAIGN
+    assert (row["Total leads"], row["Contacted"], row["Pending"], row["Emails sent"], row["Replies"], row["Reply rate"]) == \
+        ("4", "3", "1", "4", "2", "66.7%")
+    assert list(glance.columns) == ["Campaign", "Status", "Total leads", "Contacted", "Pending", "Emails sent", "Delivered (est.)",
+                                    "Hard bounces", "Soft bounces", "Replies", "Reply rate", "Sequence completion"]
+
+
+def test_the_by_sender_and_errors_tables_the_old_analytics_tab_had_are_here(fixture_repo):
+    at = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_campaign").set_value(FIXTURE_CAMPAIGN))
+    assert list(at.exception) == [] and list(at.error) == []
+    subheaders = [s.value for s in at.subheader]
+    assert "By sender account" in subheaders and "Errors (all time)" in subheaders
+    errors = next(df for df in _all_dataframes(at) if "Error type" in df.columns)
+    assert list(errors["Error type"]) == ["SMTP"] and list(errors["Count"]) == [2]
+
+
+def test_the_full_details_the_old_dashboard_page_showed_are_available_for_one_campaign(fixture_repo):
+    at = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_campaign").set_value(FIXTURE_CAMPAIGN))
+    assert any("Full details" in e.label for e in at.expander)
+    text = " ".join(m.value for m in at.markdown)
+    for section in ("**Overview**", "**Per-Stage**"):                       # the engine's own sections, as the Dashboard page listed them
+        assert section in text
+    # all campaigns together has no single set of raw rows, so the section is not offered there
+    together = _run_page(_realistic_sheet())
+    assert not any("Full details" in e.label for e in together.expander)
+
+
+def test_a_missing_error_log_tab_does_not_lose_the_campaign(fixture_repo):
+    """Only the all-time error table depends on that tab."""
+    at = _run_page(_sheet(_realistic_sheet()._worksheets[f"{FIXTURE_CAMPAIGN} Master Sheet"]._records, [], [], error_log=None),
+                   interact=lambda a: a.selectbox(key="performance_campaign").set_value(FIXTURE_CAMPAIGN))
+    assert list(at.exception) == [] and list(at.error) == []
+    assert any("Error Log tab could not be read" in c.value for c in at.caption)
+    assert FIXTURE_CAMPAIGN in " ".join(m.value for m in at.markdown)
+
+
+def test_overview_and_dashboard_are_gone_from_the_app():
+    source = open(APP_FILE, encoding="utf-8").read()
+    nav = source.split("st.navigation(")[1].split(")")[0]
+    assert "overview" not in nav.lower() and "dashboard" not in nav.lower()
+    assert 'pages/overview.py' not in source and 'pages/dashboard.py' not in source
+    home = source.split("def _home")[1]
+    assert "Overview" not in home and "Dashboard" not in home
+    for gone in ("pages/overview.py", "pages/dashboard.py", "overview_logic.py"):
+        assert not os.path.exists(os.path.join(PAGES_DIR, "..", gone)), gone
+
+
+def test_the_shared_view_is_read_only_too():
+    forbidden = ("dispatch_workflow", "create_file", "delete_file", "update_file", "GitHubClient",
+                 "append_row", "update_cell", "update_cells", "batch_update", "add_worksheet", "smtp_send", "sendmail")
+    source = open(os.path.join(PAGES_DIR, "..", "performance_view.py"), encoding="utf-8").read()
+    assert [t for t in forbidden if t in source] == []
+    assert "st.tabs" not in source           # no nested tabs: the campaign page keeps exactly its six tabs
+
+
+def _markdown_text(at):
+    return " ".join(m.value for m in at.markdown)
+
+
+def test_ranking_campaigns_against_each_other_appears_only_when_looking_at_all_campaigns(fixture_repo):
+    together = _run_page(_realistic_sheet())
+    assert "**Campaign:**" in _markdown_text(together)                          # all campaigns: a campaign ranking makes sense
+    one = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_campaign").set_value(FIXTURE_CAMPAIGN))
+    assert "**Campaign:**" not in _markdown_text(one)                           # one campaign: nothing to rank it against
+    assert "**Template variant:**" in _markdown_text(one)
