@@ -115,6 +115,17 @@ class ReadOnlySheetsConnector:
     def get_all_error_log(self, error_log_tab: str) -> List[Dict]:
         return self._read(error_log_tab, lambda ws: ws.get_all_records())
 
+    def get_all_sent_mail(self, sent_mail_tab: str) -> List[Dict]:
+        """The emails the team sent by hand or from the control panel (see
+        outreach.SENT_MAIL_COLUMNS). Returns [] rather than raising when the tab does not
+        exist yet: it is only created the first time there is something to put in it, so a
+        campaign that has never needed it must not show an error. Any OTHER failure (a quota
+        error, say) is not swallowed."""
+        try:
+            return self._read(sent_mail_tab, lambda ws: ws.get_all_records())
+        except ReadOnlySheetsError:
+            return []
+
     def get_header(self, tab_name: str) -> List[str]:
         """The tab's actual header row — used to discover custom trailing
         columns (Title, Website, LinkedIn, ...) that exist in the real
