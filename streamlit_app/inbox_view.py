@@ -180,7 +180,18 @@ def _render_bubble(message: Dict) -> None:
     with column:
         with st.chat_message("assistant" if right else "user", avatar="✉️" if right else "👤"):
             st.markdown(f"**{who}** · {md_escape(message.get('timestamp', ''))}")
-            st.text(message.get("body", ""))
+            subject = (message.get("subject") or "").strip()
+            if subject:
+                st.caption(md_escape(subject))
+            body = message.get("body", "")
+            if body.strip():
+                st.text(body)
+            else:
+                # Never an empty bubble: it reads as a bug. Some emails really have no text (a lone
+                # screenshot or attachment), and replies logged before HTML emails could be read are
+                # empty until repaired — either way, say so and point at the mailbox.
+                st.caption("(This email has no readable text — it may be only an image or an attachment. "
+                           "Open it in the mailbox to see it.)")
 
 
 def _render_composer(ctx: InboxContext, group: Dict, latest: Dict, lead: Optional[Dict], campaign_name: str,
