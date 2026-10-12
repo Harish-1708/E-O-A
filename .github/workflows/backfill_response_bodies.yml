@@ -5,7 +5,8 @@ name: Backfill Response Bodies
 # was shown an empty message, so it could only say "Unclear"). The email itself
 # is still in the mailbox, so this looks each one up by its Message-ID and fills
 # in the text. It only ever fills gaps — a reply that already has text is never
-# touched — so it is safe to run again.
+# touched — so it is safe to run again. With include_dates it also records each
+# reply's real sent time, which the conversation view uses to put messages in order.
 #
 # Run it with "dry_run" ticked first: it lists what it WOULD fill in, writes
 # nothing, and prints only row numbers and counts (this repository's logs are
@@ -19,6 +20,11 @@ on:
         default: "Kelson_Creators_Licensing"
       dry_run:
         description: "Preview only — show what would be filled in without writing anything"
+        required: false
+        type: boolean
+        default: true
+      include_dates:
+        description: "Also record the real sent time of every logged reply that lacks one (so conversations order correctly); the text of replies that already have it is never touched"
         required: false
         type: boolean
         default: true
@@ -61,6 +67,9 @@ jobs:
           CMD=(python outreach.py backfill-response-bodies --campaign "${{ github.event.inputs.campaign }}")
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             CMD+=(--dry-run)
+          fi
+          if [ "${{ github.event.inputs.include_dates }}" = "true" ]; then
+            CMD+=(--include-dates)
           fi
           "${CMD[@]}" | tee backfill_output.txt
       - name: Add to job summary
