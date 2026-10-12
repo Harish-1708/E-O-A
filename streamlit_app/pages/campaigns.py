@@ -55,7 +55,10 @@ from responses_reply_logic import (  # noqa: E402
     find_lead_for_response, build_reply_defaults, parse_email_list, validate_reply,
     build_reply_payload, reply_payload_path, build_attachment_entries, total_attachment_size_bytes,
 )
-from responses_hub_logic import group_responses_by_lead, sort_conversation_groups_newest_first  # noqa: E402
+from responses_hub_logic import (  # noqa: E402
+    group_responses_by_lead, sort_conversation_groups_newest_first, tag_responses_with_campaign, search_responses,
+)
+from inbox_view import InboxContext, render_inbox, choose_view, VIEW_INBOX  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
 from conversation_logic import build_conversation_thread, filter_responses_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
@@ -1252,6 +1255,32 @@ def _render_schedule_tab(campaign_cfg):
                 st.error(f"Save failed: {exc}")
 
 
+def _render_inbox_for_campaign(campaign_cfg, leads, responses):
+    """This campaign's replies in the two-pane Inbox layout — the same view as
+    the Responses page, scoped to this campaign. No read tracking here (this
+    tab never had any), so nothing shows as unread."""
+    campaign_name = campaign_cfg["_campaign_name"]
+    tagged = tag_responses_with_campaign(responses, campaign_name)
+    query = st.text_input("🔍 Search this campaign's replies (sender, subject, snippet)",
+                          key=f"responses_search_{campaign_name}")
+    groups = sort_conversation_groups_newest_first(group_responses_by_lead(search_responses(tagged, query)))
+    if not groups:
+        st.info("No responses match this search.")
+        return
+    render_inbox(groups, InboxContext(
+        namespace=f"tab_{campaign_name}",
+        get_campaign_cfg=lambda _name: campaign_cfg,
+        leads_for=lambda _name: leads,
+        responses_for=lambda name, lead_id: filter_responses_for_lead(tagged, lead_id, name),
+        github_client=_get_github_client,
+        current_user=current_user,
+        read_keys=None,
+        pending_sync_keys=None,
+        show_campaign=False,
+        pause_before_dispatch=1.0,
+    ))
+
+
 def _render_responses_tab(campaign_cfg, leads, responses):
     campaign_name = campaign_cfg["_campaign_name"]
 
@@ -1259,6 +1288,12 @@ def _render_responses_tab(campaign_cfg, leads, responses):
 
     if not responses:
         st.info("No responses yet.")
+        return
+
+    # Inbox (the two-pane layout, same as the Responses page) or the previous
+    # card layout below, which is unchanged.
+    if choose_view(f"responses_view_{campaign_name}") == VIEW_INBOX:
+        _render_inbox_for_campaign(campaign_cfg, leads, responses)
         return
 
     st.caption(
