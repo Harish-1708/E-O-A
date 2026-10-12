@@ -425,7 +425,7 @@ def test_a_reply_with_no_matching_lead_still_shows_what_was_received_and_says_wh
         assert f"{FIXTURE_CAMPAIGN}:77" in _row_keys(at)
         assert at.session_state["hub_selected"] == f"{FIXTURE_CAMPAIGN}:77"          # it is the newest
         assert "Who am I replying to?" in _thread_texts(at)
-        assert any("only the messages received are shown" in c.value for c in at.caption)
+        assert any("so the emails the system sent are not shown" in c.value for c in at.caption)
         assert any("Couldn't find this lead's sender account" in c.value for c in at.caption)
 
 
@@ -451,6 +451,179 @@ def test_each_message_shows_its_subject():
     with hub() as (at, _):
         captions = [c.value.replace("\\", "") for c in at.caption]
         assert any(c == "Re: Partnership" for c in captions)
+
+
+# ---- the emails the team sent by hand, or from this page
+
+SENT_TAB = f"{FIXTURE_CAMPAIGN} Sent Mail"
+
+
+def _sent(mid, at, body, lead="1", subject="Re: Partnership", source="mailbox"):
+    return {"MessageID": mid, "LeadID": lead, "SentAt": at, "SenderAccount": "sales1", "To": "kari@abc.com", "Cc": "",
+            "Subject": subject, "Body": body, "InReplyTo": "", "Source": source}
+
+
+def _with_sent_mail(*rows, ws=None):
+    ws = ws or _two_campaign_ws()
+    ws[SENT_TAB] = FakeWorksheet(list(rows))
+    return ws
+
+
+def _chronological(at):
+    at.checkbox(key="hub_newest_first").uncheck()
+    at.run(timeout=25)
+
+
+def _order_of(texts, *needles):
+    positions = [next(i for i, t in enumerate(texts) if n in t) for n in needles]
+    return positions == sorted(positions)
+
+
+def test_what_you_typed_by_hand_appears_in_the_conversation_in_the_right_place():
+    ws = _with_sent_mail(_sent("<m1@gmail>", "2026-10-12 14:10:00", "We can offer $200 for six months."),
+                         _sent("<m2@gmail>", "2026-10-12 14:45:00", "Great, I will send the agreement now."))
+    with hub(ws) as (at, _):
+        _chronological(at)
+        assert list(at.exception) == [] and list(at.error) == []
+        texts = _thread_texts(at)
+        assert _order_of(texts, "Hi! Interested", "We can offer $200", "Also, do you cover shipping?", "Great, I will send the agreement")
+        assert [b.avatar for b in at.chat_message].count("✉️") == 3               # the template intro + the two you typed
+        assert any(m.value.replace("\\", "").startswith("**You** · 2026-10-12 14:10:00") for m in at.markdown)   # as a person reads it
+
+
+def test_your_quick_answer_never_appears_before_the_question_it_answers():
+    """Her reply was LOGGED at 14:30 but really sent at 14:20; you answered at 14:25. Ordering by the logged time
+    would show your answer first."""
+    ws = _two_campaign_ws()
+    records = ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records
+    for record in records:
+        if record["ResponseID"] == "rA2":
+            record["MessageDate"] = "2026-10-12 14:20:00"
+    ws = _with_sent_mail(_sent("<m@gmail>", "2026-10-12 14:25:00", "I have just sent the request."), ws=ws)
+    with hub(ws) as (at, _):
+        _chronological(at)
+        assert _order_of(_thread_texts(at), "Also, do you cover shipping?", "I have just sent the request.")
+
+
+def test_the_same_conversation_is_complete_inside_the_campaigns_own_tab():
+    ws = _with_sent_mail(_sent("<m1@gmail>", "2026-10-12 14:10:00", "We can offer $200 for six months."))
+    with _campaign_tab(ws) as (at, _):
+        assert list(at.exception) == [] and list(at.error) == []
+        texts = _thread_texts(at)
+        assert "We can offer $200 for six months." in texts and "Hi! Interested — what are your rates?" in texts
+
+
+def test_a_campaign_whose_sent_mail_tab_does_not_exist_yet_shows_no_error_and_no_note():
+    with hub() as (at, _):
+        assert list(at.exception) == [] and list(at.error) == []
+        assert not any("could not be loaded" in c.value for c in at.caption)
+
+
+def test_if_the_sent_mail_cannot_be_loaded_the_conversation_still_shows_with_a_note():
+    class Exploding(FakeWorksheet):
+        def get_all_records(self):
+            raise RuntimeError("quota exceeded")
+    ws = _two_campaign_ws()
+    ws[SENT_TAB] = Exploding([])
+    with hub(ws) as (at, _):
+        assert list(at.exception) == [] and list(at.error) == []
+        assert "Hi! Interested — what are your rates?" in _thread_texts(at)             # her replies are all still there
+        assert any("emails you sent yourself could not be loaded" in c.value for c in at.caption)
+
+
+def test_another_campaigns_sent_mail_for_the_same_lead_number_is_never_mixed_in():
+    ws = _with_sent_mail(_sent("<a5@gmail>", "2026-10-12 15:00:00", "Message to A's lead five", lead="5"))
+    ws[f"{OTHER} Sent Mail"] = FakeWorksheet([_sent("<b5@gmail>", "2026-10-12 15:10:00", "Message to B's lead five", lead="5")])
+    with hub(ws) as (at, _):
+        at.button(key=f"hub_open_{A5}").click()
+        at.run(timeout=25)
+        texts = _thread_texts(at)
+        assert "Message to A's lead five" in texts and "Message to B's lead five" not in texts
+        at.button(key=f"hub_open_{B5}").click()
+        at.run(timeout=25)
+        texts = _thread_texts(at)
+        assert "Message to B's lead five" in texts and "Message to A's lead five" not in texts
+
+
+def test_only_the_open_leads_messages_are_shown_not_another_leads_in_the_same_campaign():
+    ws = _with_sent_mail(_sent("<z@gmail>", "2026-10-12 15:00:00", "Written to Zed only", lead="5"))
+    with hub(ws) as (at, _):
+        assert "Written to Zed only" not in _thread_texts(at)                          # Kari (lead 1) is open
+
+
+def test_a_sent_message_with_no_text_says_so_like_any_other_empty_email():
+    ws = _with_sent_mail(_sent("<empty@gmail>", "2026-10-12 14:10:00", ""))
+    with hub(ws) as (at, _):
+        assert any("has no readable text" in c.value for c in at.caption)
+
+
+def test_the_message_after_sending_a_reply_says_it_will_appear_in_the_conversation():
+    with hub() as (at, _):
+        at.text_area(key=f"hub_body_{A1}").set_value("Thanks!")
+        at.run(timeout=25)
+        at.button(key=f"hub_send_{A1}").click()
+        at.run(timeout=25)
+        assert any("will then appear in this conversation" in s.value for s in at.success)
+
+
+def test_the_refresh_button_brings_in_messages_stored_since_the_page_loaded():
+    ws = _with_sent_mail()
+    with hub(ws) as (at, _):
+        assert "Newly stored message" not in _thread_texts(at)
+        ws[SENT_TAB]._records.append(_sent("<new@gmail>", "2026-10-12 15:00:00", "Newly stored message"))
+        at.run(timeout=25)
+        assert "Newly stored message" not in _thread_texts(at)                 # still the cached copy: it is only kept for a few seconds
+        next(b for b in at.button if b.label == "🔄 Refresh").click()
+        at.run(timeout=25)
+        assert "Newly stored message" in _thread_texts(at)
+
+
+def test_the_campaign_pages_refresh_data_button_does_the_same():
+    ws = _with_sent_mail()
+    with _campaign_tab(ws) as (at, _):
+        assert "Newly stored message" not in _thread_texts(at)
+        ws[SENT_TAB]._records.append(_sent("<new@gmail>", "2026-10-12 15:00:00", "Newly stored message"))
+        at.run(timeout=25)
+        assert "Newly stored message" not in _thread_texts(at)
+        next(b for b in at.button if b.label == "🔄 Refresh data").click()
+        at.run(timeout=25)
+        assert "Newly stored message" in _thread_texts(at)
+
+
+def test_the_reported_conversation_shows_every_message_in_true_order():
+    """The reported case, with made-up content: a creator replied five times and you answered by hand six times
+    from the mailbox. Four of her replies were stored with no text until repaired (shown here as repaired)."""
+    ws = _two_campaign_ws()
+    ws[f"{FIXTURE_CAMPAIGN} Response Sheet"] = FakeWorksheet([
+        _resp("r1", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "ask1", "2026-10-12 12:04:00", FullBody="Her message ONE", MessageDate="2026-10-12 12:00:00"),
+        _resp("r2", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "ask2", "2026-10-12 12:33:00", FullBody="Her message TWO", MessageDate="2026-10-12 12:30:00"),
+        _resp("r3", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "ask3", "2026-10-12 12:58:00", FullBody="Her message THREE", MessageDate="2026-10-12 12:55:00"),
+        _resp("r4", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "ask4", "2026-10-12 13:25:00", FullBody="Her message FOUR", MessageDate="2026-10-12 13:09:00"),
+        _resp("r5", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "ask5", "2026-10-14 15:30:00", FullBody="Her message FIVE", MessageDate="2026-10-14 15:16:00"),
+        _resp("o1", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "x", "2026-10-11 09:00:00", FullBody="Not for me, thanks."),
+    ])
+    mine = [("2026-10-12 12:22:00", "My message ONE"), ("2026-10-12 12:46:00", "My message TWO"), ("2026-10-12 12:55:00", "My message THREE"),
+            ("2026-10-12 13:13:00", "My message FOUR"), ("2026-10-14 14:32:00", "My message FIVE"), ("2026-10-14 17:47:00", "My message SIX")]
+    ws[SENT_TAB] = FakeWorksheet([_sent(f"<mine{i}@gmail>", at, text) for i, (at, text) in enumerate(mine, start=1)])
+    with hub(ws) as (at, _):
+        _chronological(at)
+        assert list(at.exception) == []
+        texts = _thread_texts(at)
+        assert _order_of(texts, "Her message ONE", "My message ONE", "Her message TWO", "My message TWO", "My message THREE",
+                         "Her message THREE", "Her message FOUR", "My message FOUR", "My message FIVE", "Her message FIVE", "My message SIX")
+        assert len([b for b in at.chat_message]) == 1 + 5 + 6                           # the template intro + all eleven
+        assert not any("has no readable text" in c.value for c in at.caption)
+
+
+def test_hand_typed_messages_still_show_when_the_lead_cannot_be_found_in_the_master_sheet():
+    orphan = _resp("rZ", "77", '"Nobody Known" <nobody@abc.com>', "Re: Who?", "Who am I?", "2026-10-12 16:00:00",
+                   FullBody="Who am I replying to?", MessageDate="2026-10-12 15:50:00")
+    ws = _with_sent_mail(_sent("<o@gmail>", "2026-10-12 15:55:00", "Replying to someone not on the sheet", lead="77"),
+                         ws=_two_campaign_ws(extra_a_responses=[orphan]))
+    with hub(ws) as (at, _):
+        _chronological(at)
+        texts = _thread_texts(at)
+        assert _order_of(texts, "Who am I replying to?", "Replying to someone not on the sheet")
 
 
 def test_a_long_list_is_capped_and_says_how_many_are_shown(monkeypatch):
