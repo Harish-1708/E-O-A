@@ -15,6 +15,7 @@ The web control panel for the outreach system. It is a **window onto** the engin
 
 | Page | Use it for |
 |---|---|
+| **Today** | What is due to be emailed now, what is waiting and until when, and why anyone is out of play, for every running campaign. Read-only — it uses the engine's own eligibility rule, so it shows what the next Auto Send run will do. Per campaign: leads due and waiting by stage, the date the next lead falls due, whether the sending window is open (and when it next opens, in the campaign's timezone and in IST), today's sends against the daily limit, and a breakdown of who is out of play. Campaigns that are not running are listed and never read. |
 | **Campaigns** | The everyday page. A searchable list of campaigns (status, counts), with ＋ New Campaign, Open and ⧉ Duplicate; a *Deleted Campaigns* list for temporarily removed ones. Opening a campaign shows six tabs (below). |
 | **Controls** | Preview, Send Batch, Check Replies and the ThreadSubject backfill in one place. |
 | **Responses** | One inbox across every campaign: conversations grouped per person, reply, mark as read, *Check Replies Now (all campaigns)*. |
@@ -72,12 +73,13 @@ streamlit run streamlit_app/app.py
 | Path | Role |
 |---|---|
 | `app.py` | Entry point: page config, login gate, navigation |
-| `pages/` | One file per page (`campaigns`, `controls`, `responses`, `email_accounts`, `new_campaign`, `overview`, `dashboard`) |
+| `pages/` | One file per page (`today`, `campaigns`, `controls`, `responses`, `email_accounts`, `new_campaign`, `overview`, `dashboard`) |
 | `sheets_readonly.py` | The viewer-only Sheets connector (looks each tab up once, retries once if a tab was replaced) |
 | `github_client.py` | Commits, workflow dispatch, run status, secrets, and the commit-keyed read cache |
 | `parallel_logic.py` | Runs independent slow reads together; results always in input order |
 | `send_logic.py` · `schedule_logic.py` · `launch_logic.py` · `settings_logic.py` | The typed-`SEND` gate; the Schedule tab; launch/pause/resume; reading and writing campaign override files |
 | `campaigns_hub_logic.py` · `overview_logic.py` · `responses_hub_logic.py` | The campaign list, the overview table, and conversation grouping |
+| `work_queue_logic.py` | The Today page: due / waiting / out-of-play per campaign, built on the engine's own eligibility and sending-window functions |
 | `auth.py` · `tools/generate_password_hash.py` | Login (salted PBKDF2) and the tool that generates a user's block |
 
 ## Tests
