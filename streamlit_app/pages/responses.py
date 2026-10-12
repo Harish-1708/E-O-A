@@ -28,6 +28,7 @@ from responses_reply_logic import (  # noqa: E402
 )
 from conversation_logic import build_conversation_thread, filter_responses_for_lead  # noqa: E402
 from data_import_logic import payload_to_bytes  # noqa: E402
+from inbox_view import InboxContext, render_inbox, choose_view, VIEW_INBOX, VIEW_CLASSIC  # noqa: E402
 
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -176,6 +177,11 @@ if pending_sync_keys:
         if failed_campaigns:
             st.warning(f"Failed to sync: {', '.join(failed_campaigns)}")
 
+# Inbox (two panes: the conversation list and the open conversation) or the
+# previous card layout. Both use the same data, filters, read state and reply
+# functions below — only how the conversations are drawn differs.
+view = choose_view("responses_view")
+
 search_query = st.text_input("🔍 Search responses (sender, subject, snippet, campaign)",
                               key="responses_search_query")
 
@@ -186,10 +192,16 @@ with col2:
     campaign_options = [STATUS_FILTER_ALL] + get_campaign_names_present(all_responses)
     campaign_filter = st.selectbox("Campaign", campaign_options, key="responses_campaign_filter")
 with col3:
-    inbox_filter = st.selectbox(
-        "More", [INBOX_FILTER_ALL, INBOX_FILTER_UNREAD], key="responses_inbox_filter",
-        format_func=lambda v: f"Inbox ({unread_count} unread)" if v == INBOX_FILTER_ALL else v,
-    )
+    if view == VIEW_INBOX:
+        inbox_filter = st.radio(
+            "Show", [INBOX_FILTER_ALL, INBOX_FILTER_UNREAD], key="responses_inbox_chip", horizontal=True,
+            format_func=lambda v: "All" if v == INBOX_FILTER_ALL else f"Unread ({unread_count})",
+        )
+    else:
+        inbox_filter = st.selectbox(
+            "More", [INBOX_FILTER_ALL, INBOX_FILTER_UNREAD], key="responses_inbox_filter",
+            format_func=lambda v: f"Inbox ({unread_count} unread)" if v == INBOX_FILTER_ALL else v,
+        )
 
 if unavailable_campaigns:
     st.caption(f"{len(unavailable_campaigns)} campaign(s) not counted yet (no Response Sheet tab exists — "
@@ -213,10 +225,25 @@ groups = group_responses_by_lead(filtered)
 groups = filter_groups_by_unread(groups, inbox_filter, read_keys)
 groups = sort_conversation_groups_newest_first(groups)
 
+if view == VIEW_INBOX and groups:
+    render_inbox(groups, InboxContext(
+        namespace="hub",
+        get_campaign_cfg=get_campaign_cfg,
+        leads_for=lambda name: leads_by_campaign.get(name, []),
+        responses_for=lambda name, lead_id: filter_responses_for_lead(all_responses, lead_id, name),
+        github_client=_get_github_client,
+        current_user=current_user,
+        read_keys=read_keys,
+        pending_sync_keys=pending_sync_keys,
+        show_campaign=True,
+    ))
+
 if not groups:
     st.info("No responses match these filters.")
 else:
-    for group in groups:
+    # The classic card layout; in the Inbox layout the conversations were
+    # already drawn above, so this loop has nothing to do.
+    for group in (groups if view == VIEW_CLASSIC else []):
         campaign_name = group["campaign"]
         latest = group["latest"]
         # A stable identifier for the WHOLE conversation — every widget
@@ -275,7 +302,7 @@ else:
                     st.caption("Can't reconstruct this conversation — no matching lead found in the "
                                "Master Sheet (the response may predate the lead being added).")
                 else:
-                    responses_for_this_lead = filter_responses_for_lead(all_responses, lead.get("LeadID", ""))
+                    responses_for_this_lead = filter_responses_for_lead(all_responses, lead.get("LeadID", ""), campaign_name)
                     campaign_cfg_for_thread = get_campaign_cfg(campaign_name)
                     thread = build_conversation_thread(campaign_cfg_for_thread, lead, responses_for_this_lead)
                     if not thread:
