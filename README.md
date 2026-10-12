@@ -148,11 +148,14 @@ One file, run as `python outreach.py <command>`. Run `python outreach.py --help`
 Full detail is in [`streamlit_app/README.md`](streamlit_app/README.md). In short, the pages are:
 
 - **Today** — what is due to be emailed right now, what is waiting and until when, and why anyone is out of play, for every running campaign. Read-only: it changes nothing and sends nothing, and it uses the engine's own eligibility rule, so it shows exactly what the next Auto Send run will do. Start here when you wonder why something has or has not gone out.
-- **Campaigns** — the everyday page. A searchable list (create, open, duplicate). Inside a campaign, the Pause / Resume / Launch controls sit at the top, above tabs for **Analytics**, **Data** (upload leads, remove, *Manage a lead*), **Sequences** (edit templates, add variants/stages), **Schedule**, **Settings** (accounts, limits, Asana, Creator Tracker, Send Batch, maintenance, Danger Zone) and **Responses** (conversations, reply, mark read, *Check Replies Now*).
+- **Performance** — the business questions behind the counts: reply rate, positive replies (as read by the AI), median time to first reply, creators in negotiation and with rights secured (from the Asana sync), which follow-up stage and which template variant earn replies, deliverability, and a *what worked best* report that only ranks groups with at least 30 contacted or sent. Read-only; its headline totals come from the same calculation as Overview. Open and click rates are deliberately not shown — mail privacy features make them unreliable.
+- **Campaigns** — the everyday page. A searchable list (create, open, duplicate). Inside a campaign, the Pause / Resume / Launch controls sit at the top, above tabs for **Performance** (this campaign's own figures — the same view as the Performance page, so you never have to go there and pick the campaign), **Data** (upload leads, remove, *Manage a lead*), **Sequences** (edit templates, add variants/stages), **Schedule**, **Settings** (accounts, limits, Asana, Creator Tracker, Send Batch, maintenance, Danger Zone) and **Responses** (conversations, reply, mark read, *Check Replies Now*).
 - **Controls** — Preview, Send Batch, Check Replies, Backfill in one place.
 - **Responses** — one inbox across every campaign.
 - **Email Accounts** — add, edit, remove sending accounts, and see their connection status.
-- **New Campaign / Add Stage**, **Overview** (totals for every campaign), **Dashboard** (per-campaign dashboards).
+- **New Campaign / Add Stage**.
+
+The former **Overview** and **Dashboard** pages and each campaign's former **Analytics** tab were replaced by **Performance**: its *All campaigns at a glance* table has every Overview column, and each campaign's *Full details* section lists the same figures as the Sheet's Dashboard tab. The Sheet's own dashboard tabs are still written by the engine.
 
 ### Google Sheets
 
@@ -383,7 +386,7 @@ Create it from the control panel (*Campaigns → ＋ New Campaign*), upload lead
 ## Day-to-day use
 
 - **Start a campaign:** ＋ New Campaign → edit templates under *Sequences* → upload leads under *Data* → set the *Schedule* → *Preview* → *Launch*. A new campaign starts as a **draft** and sends nothing until launched.
-- **Watch it:** *Analytics* (by stage, variant and sender; errors) and the *Overview* / *Dashboard* pages. Each Auto Send run writes a plain summary in the workflow's job summary — including a line for every campaign that was skipped or had nothing due.
+- **Watch it:** the *Today* page (what is due and why) and *Performance* — on its own page for every campaign together, and as the first tab of each campaign (by stage, variant and sender; errors). Each Auto Send run writes a plain summary in the workflow's job summary — including a line for every campaign that was skipped or had nothing due.
 - **Handle replies:** *Responses* shows conversations (all messages from one person grouped). Reply from there, mark as read, or click *Check Replies Now* for an immediate check.
 - **Pause:** *Pause* on the campaign. Paused, draft and deleted campaigns are never sent to.
 - **Fix one lead:** *Data → Manage a lead* (stop it, change its Asana stage, correct its reply status).
@@ -455,6 +458,7 @@ CI (`.github/workflows/ci.yml`) runs both suites on every push to `main` and eve
 ## Known limitations
 
 - **Times in the Sheet are UTC**, not IST or New York time (see the Master Sheet columns).
+- **Reply times on the Performance page are when the engine logged the reply**, not when the creator sent it, so *time to first reply* runs a little long and a day-by-day chart counts a reply on the day it was noticed. A reply is credited to the exact email it answered when its `In-Reply-To` header matches one of our message ids; otherwise to the latest email sent before it was logged.
 - **GitHub's scheduler delivers only a few runs a day on this repository** (about 4–5 per workflow, whatever the cron — see Schedule). The hourly schedule is the request; it is not a guarantee.
 - **"Completed" is calculated, not stored.** A finished campaign keeps `status: active` in its settings file, so Auto Send still opens its leads once per run (one read, nothing sent). To stop even that, set the campaign to Paused.
 - **A long Auto Send blocks the other lock-holders** until it finishes (by design — they write the same cells).
