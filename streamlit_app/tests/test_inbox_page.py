@@ -429,6 +429,30 @@ def test_a_reply_with_no_matching_lead_still_shows_what_was_received_and_says_wh
         assert any("Couldn't find this lead's sender account" in c.value for c in at.caption)
 
 
+def test_an_email_with_no_readable_text_says_so_instead_of_showing_an_empty_bubble():
+    """REPORTED: some conversations showed a name and a time, then nothing. A bubble with no text reads as a bug."""
+    blank = _resp("rE", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "", "2026-10-12 17:00:00", FullBody="")
+    with hub(_two_campaign_ws(extra_a_responses=[blank])) as (at, _):
+        at.button(key=f"hub_open_{A5}").click()
+        at.run(timeout=25)
+        assert list(at.exception) == []
+        notes = [c.value for c in at.caption if "has no readable text" in c.value]
+        assert len(notes) == 1                                                  # only the blank one; the real reply still shows
+        assert "Not for me, thanks." in _thread_texts(at)
+
+
+def test_the_list_says_when_an_email_has_no_text():
+    blank = _resp("rE", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "", "2026-10-12 17:00:00", FullBody="")
+    with hub(_two_campaign_ws(extra_a_responses=[blank])) as (at, _):
+        assert any("no text in this email" in c.value for c in at.caption)
+
+
+def test_each_message_shows_its_subject():
+    with hub() as (at, _):
+        captions = [c.value.replace("\\", "") for c in at.caption]
+        assert any(c == "Re: Partnership" for c in captions)
+
+
 def test_a_long_list_is_capped_and_says_how_many_are_shown(monkeypatch):
     monkeypatch.setattr(inbox_view, "MAX_ROWS", 2)
     with hub() as (at, _):
