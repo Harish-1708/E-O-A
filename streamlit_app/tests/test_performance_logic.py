@@ -370,3 +370,180 @@ def test_deleted_campaigns_are_left_out_and_each_one_carries_the_status_the_camp
 def test_reading_campaigns_at_the_same_time_gives_the_same_answer_as_one_by_one():
     names = [f"C{i}" for i in range(6)]
     assert pl.build_all_performance(names, _fetch_factory(), max_workers=1) == pl.build_all_performance(names, _fetch_factory(), max_workers=4)
+
+
+# ================================================================ what the old Analytics / Overview / Dashboard pages showed
+
+def _random_campaign(seed, n=120, stages=4, with_accounts=True):
+    rng = random.Random(seed)
+    c = cfg(stages)
+    leads, responses, log = [], [], []
+    for i in range(n):
+        row = lead(i, Email=rng.choice(["", f"p{i}@x.com"]),
+                   Status=rng.choice(["", "Intro Sent", "Stopped - Replied", "Stopped - Bounced"]),
+                   ReplyStatus=rng.choice(["", "", "Replied"]),
+                   SenderAccount=rng.choice(["sales1", "sales2", ""]) if with_accounts else "")
+        for k in range(rng.randint(0, stages)):
+            row[sent_field(k)] = (datetime(2026, 9, 1) + timedelta(days=k, hours=i % 9)).strftime(FMT)
+            row[variant_field(k)] = rng.choice("ABCD")
+            log.append(send(i, c["stages"][k]["name"], row[variant_field(k)], row[sent_field(k)], f"<m{i}-{k}@x>",
+                            status=rng.choice(["sent", "sent", "failed"])))
+            log[-1]["SenderAccount"] = row["SenderAccount"]
+        leads.append(row)
+        if rng.random() < 0.4:
+            # a mix, INCLUDING bounces — otherwise "delivered" would always equal "sent" and a test could not tell the columns apart
+            responses.append(reply(i, "2026-09-10 10:00:00", classification=rng.choice(
+                [GENUINE, GENUINE, outreach.CLASSIFICATION_BOUNCE_HARD, outreach.CLASSIFICATION_BOUNCE_SOFT])))
+    return c, leads, responses, log
+
+
+@pytest.mark.parametrize("seed", [11, 12, 13, 14])
+def test_pending_and_sequence_completion_equal_the_engines_own_figures(seed):
+    """The Overview page showed Pending and Sequence Completion. Both must
+    agree with the engine's number for the same data."""
+    c, leads, responses, log = _random_campaign(seed)
+    got = pl.build_campaign_performance(c, leads, responses, log)
+    engine = outreach.compute_all_campaigns_row("Camp", leads, responses, log, c["stages"])
+    assert got["pending"] == max(int(engine[1]) - int(engine[2]), 0)
+    assert pl.format_rate(got["sequence_completion"]) == (engine[9] if int(engine[2]) else "—")
+    assert pl.format_rate(got["reply_rate"]) == (engine[8] if int(engine[2]) else "—")
+
+
+@pytest.mark.parametrize("seed", [21, 22, 23])
+def test_the_by_sender_table_equals_the_engines_own_sender_rows(seed):
+    """The old Analytics tab's By sender account table — kept exactly."""
+    from campaign_analytics_logic import build_sender_table
+    c, leads, responses, log = _random_campaign(seed)
+    got = pl.build_campaign_performance(c, leads, responses, log, [])
+    engine = build_sender_table(outreach.compute_campaign_dashboard(c, leads, responses, log, []))
+    assert [r["account"] for r in got["sender_rows"]] == [e["account"] for e in engine]
+    for mine, theirs in zip(got["sender_rows"], engine):
+        assert (mine["sent"], mine["replies"]) == (int(theirs["sent"]), int(theirs["replies"]))
+        assert pl.format_rate(mine["reply_rate"]) == theirs["reply_rate"]
+
+
+def test_all_time_errors_come_from_the_error_log_and_an_unreadable_log_is_flagged_not_fatal():
+    error_log = [{"ErrorType": "SMTP", "Timestamp": "2026-09-01 10:00:00", "Detail": "x"}] * 3 + \
+                [{"ErrorType": "IMAP", "Timestamp": "2026-09-01 10:00:00", "Detail": "y"}]
+    read = perf_with_errors(error_log)
+    assert read["error_log_read"] is True
+    empty = perf_with_errors([])
+    assert empty["error_log_read"] is True and empty["error_rows"] == []
+    unreadable = perf_with_errors(None)
+    assert unreadable["error_log_read"] is False and unreadable["error_rows"] == []          # flagged, report still built
+
+
+def perf_with_errors(error_log):
+    return pl.build_campaign_performance(cfg(), [lead(1)], [], [], error_log)
+
+
+def test_error_counts_match_what_the_old_errors_table_showed():
+    from campaign_analytics_logic import build_error_summary
+    error_log = [{"ErrorType": "SMTP", "Detail": ""}] * 3 + [{"ErrorType": "IMAP", "Detail": ""}]
+    c = cfg()
+    engine = {r["error_type"]: int(r["count"]) for r in build_error_summary(
+        outreach.compute_campaign_dashboard(c, [lead(1)], [], [], error_log))}
+    mine = {r["error_type"]: r["count"] for r in pl.build_campaign_performance(c, [lead(1)], [], [], error_log)["error_rows"]}
+    assert mine == engine and sum(mine.values()) == 4
+
+
+def test_the_raw_dashboard_rows_are_kept_for_the_full_details_view_and_match_the_engine(monkeypatch):
+    c, leads, responses, log = _random_campaign(31)
+    got = pl.build_campaign_performance(c, leads, responses, log, [])
+    engine = outreach.compute_campaign_dashboard(c, leads, responses, log, [])
+    strip_time = lambda rows: [r for r in rows if r[1] != "Last Updated"]              # the only value that differs between two calls
+    assert strip_time(got["dashboard_rows"]) == strip_time(engine)
+
+
+def test_each_variant_is_reported_stage_by_stage_with_exact_credit():
+    l1 = lead(1, **{sent_field(0): "2026-09-01 10:00:00", variant_field(0): "A", sent_field(1): "2026-09-03 10:00:00", variant_field(1): "A"})
+    log = [send(1, "intro", "A", "2026-09-01 10:00:00", "<m0@x>"), send(1, "followup1", "A", "2026-09-03 10:00:00", "<m1@x>"),
+           send(2, "intro", "B", "2026-09-01 10:00:00", "<m2@x>")]
+    p = perf([l1, lead(2)], [reply(1, "2026-09-04 10:00:00", intent="Interested", in_reply_to="<m1@x>")], log)
+    rows = {(r["stage"], r["variant"]): r for r in p["variant_stage_rows"]}
+    assert set(rows) == {("intro", "A"), ("followup1", "A"), ("intro", "B")}
+    assert rows[("followup1", "A")]["replies"] == 1 and rows[("followup1", "A")]["positive"] == 1
+    assert rows[("intro", "A")]["replies"] == 0
+    assert [(r["stage"], r["variant"]) for r in p["variant_stage_rows"]] == [("intro", "A"), ("intro", "B"), ("followup1", "A")]
+
+
+def test_combined_new_figures_add_up_and_rates_are_recomputed():
+    b_leads = [lead(i, SenderAccount="sales1", Status="Stopped - Replied", **{sent_field(0): "2026-09-01 10:00:00"}) for i in range(1, 3)]
+    b = pl.build_campaign_performance(cfg(name="B"), b_leads, [], [send(i, "intro", "A", "2026-09-01 10:00:00") for i in range(1, 3)],
+                                      [{"ErrorType": "SMTP"}])
+    a = pl.build_campaign_performance(cfg(name="A"), [lead(i, SenderAccount="sales1", **{sent_field(0): "2026-09-01 10:00:00"}) for i in range(1, 11)],
+                                      [], [send(i, "intro", "A", "2026-09-01 10:00:00") for i in range(1, 11)], [{"ErrorType": "SMTP"}, {"ErrorType": "IMAP"}])
+    combined = pl.combine_performance([a, b])
+    assert combined["pending"] == a["pending"] + b["pending"] and combined["completed"] == a["completed"] + b["completed"]
+    sender = combined["sender_rows"][0]
+    assert (sender["account"], sender["leads"], sender["replies"], sender["sent"]) == ("sales1", 12, 2, 12)
+    assert sender["reply_rate"] == 2 / 12 and sender["reply_rate"] != (0 + 1.0) / 2          # never an average of rates
+    assert {r["error_type"]: r["count"] for r in combined["error_rows"]} == {"SMTP": 2, "IMAP": 1}
+    assert combined["dashboard_rows"] is None
+    assert combined["error_log_read"] is True
+
+
+def test_the_combined_error_log_is_flagged_unread_if_any_campaigns_log_was_unreadable():
+    ok = pl.build_campaign_performance(cfg(name="A"), [lead(1)], [], [], [])
+    broken = pl.build_campaign_performance(cfg(name="B"), [lead(1)], [], [], None)
+    assert pl.combine_performance([ok, broken])["error_log_read"] is False
+
+
+@pytest.mark.parametrize("seed", [41, 42])
+def test_the_at_a_glance_table_carries_every_figure_the_old_overview_page_showed(seed):
+    c, leads, responses, log = _random_campaign(seed)
+    p = pl.build_campaign_performance(c, leads, responses, log, [])
+    p["status"] = "running"
+    (row,) = pl.at_a_glance_rows([p], status_labels=lambda s: s.title())
+    engine = outreach.compute_all_campaigns_row("Camp", leads, responses, log, c["stages"])
+    pending = max(int(engine[1]) - int(engine[2]), 0)
+    assert pl.AT_A_GLANCE_COLUMNS == ["Campaign", "Status", "Total leads", "Contacted", "Pending", "Emails sent",
+                                      "Delivered (est.)", "Hard bounces", "Soft bounces", "Replies", "Reply rate", "Sequence completion"]
+    assert row[0] == "Camp" and row[1] == "Running"
+    assert engine[3] != engine[4] and engine[5] != "0"                          # the data really has bounces: sent != delivered
+    assert row[2:6] == [engine[1], engine[2], str(pending), engine[3]]            # leads, contacted, pending, sent
+    assert row[6:10] == [engine[4], engine[5], engine[6], engine[7]]              # delivered est., hard, soft, replies
+    assert row[10] == (engine[8] if int(engine[2]) else "—") and row[11] == (engine[9] if int(engine[2]) else "—")
+
+
+def test_the_loader_passes_the_error_log_through_and_still_accepts_the_old_four_part_shape():
+    def five(name):
+        return cfg(name=name), [lead(1)], [], [], [{"ErrorType": "SMTP"}]
+    perfs, _ = pl.build_all_performance(["A"], five)
+    assert perfs[0]["error_log_read"] is True and perfs[0]["error_rows"] == [{"error_type": "SMTP", "count": 1}]
+    perfs, _ = pl.build_all_performance(["A"], _fetch_factory())          # four parts: error log unknown, flagged
+    assert perfs[0]["error_log_read"] is False
+
+
+def test_a_brand_new_campaign_with_no_stages_yet_does_not_crash():
+    """The campaign page now builds this for EVERY campaign it opens,
+    including a draft that has no stages, leads or sends."""
+    empty_cfg = {"_campaign_name": "NewOne", "status": "draft", "stages": []}
+    p = pl.build_campaign_performance(empty_cfg, [], [], [], [])
+    assert p["contacted"] == 0 and p["pending"] == 0 and p["sequence_completion"] is None
+    assert p["stages"] == [] and p["variants"] == [] and p["sender_rows"] == [] and p["error_rows"] == []
+    assert pl.combine_performance([p])["contacted"] == 0
+
+
+def test_every_at_a_glance_column_shows_its_own_figure_each_number_distinct_so_no_swap_can_hide():
+    """Deliberately handcrafted so that no two figures are equal: total leads
+    7, contacted 5, pending 2, sent 11, delivered 8, hard bounces 3, soft 1,
+    replies 4, reply rate 80%, sequence completion 40%."""
+    c = cfg(2)                                                                    # intro + followup1
+    leads = [lead(i, **{sent_field(0): "2026-09-01 10:00:00"}) for i in range(1, 6)]          # 5 contacted
+    leads += [lead(6), lead(7)]                                                               # 2 not yet contacted
+    for l in leads[:2]:
+        l[sent_field(1)] = "2026-09-03 10:00:00"                                              # 2 reached the final stage
+    for l in leads[:4]:
+        l["ReplyStatus"] = "Replied"                                                          # 4 replies
+    log = [send(1 + (k % 5), "intro", "A", "2026-09-01 10:00:00") for k in range(11)] + \
+          [send(1, "intro", "A", "2026-09-01 10:00:00", status="failed"), send(2, "intro", "A", "2026-09-01 10:00:00", status="failed")]
+    responses = [reply(i, "2026-09-02 10:00:00", classification=outreach.CLASSIFICATION_BOUNCE_HARD) for i in (1, 2, 3)] + \
+                [reply(4, "2026-09-02 10:00:00", classification=outreach.CLASSIFICATION_BOUNCE_SOFT)]
+    p = pl.build_campaign_performance(c, leads, responses, log, [])
+    p["status"] = "running"
+    (row,) = pl.at_a_glance_rows([p], status_labels=lambda s: s)
+    assert dict(zip(pl.AT_A_GLANCE_COLUMNS, row)) == {
+        "Campaign": "Camp", "Status": "running", "Total leads": "7", "Contacted": "5", "Pending": "2", "Emails sent": "11",
+        "Delivered (est.)": "8", "Hard bounces": "3", "Soft bounces": "1", "Replies": "4", "Reply rate": "80.0%",
+        "Sequence completion": "40.0%"}
