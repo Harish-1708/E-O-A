@@ -126,6 +126,28 @@ def test_get_account_health_respects_custom_tab_name():
     assert len(records) == 1
 
 
+def test_get_all_sent_mail_returns_the_rows_when_the_tab_exists():
+    ws = FakeWorksheet([{"MessageID": "<a@x>", "LeadID": "1", "SentAt": "2026-09-04 16:52:00", "Body": "hi"}])
+    connector = ReadOnlySheetsConnector(_spreadsheet=FakeSpreadsheet({"Camp Sent Mail": ws}))
+    assert [r["MessageID"] for r in connector.get_all_sent_mail("Camp Sent Mail")] == ["<a@x>"]
+
+
+def test_get_all_sent_mail_is_empty_not_an_error_before_the_tab_has_ever_been_created():
+    """The tab only exists once something has been stored in it, so a campaign that never needed it
+    must not show an error."""
+    connector = ReadOnlySheetsConnector(_spreadsheet=FakeSpreadsheet({}))
+    assert connector.get_all_sent_mail("Camp Sent Mail") == []
+
+
+def test_get_all_sent_mail_does_not_hide_a_real_failure():
+    class Exploding(FakeWorksheet):
+        def get_all_records(self):
+            raise RuntimeError("quota exceeded")
+    connector = ReadOnlySheetsConnector(_spreadsheet=FakeSpreadsheet({"Camp Sent Mail": Exploding([])}))
+    with pytest.raises(RuntimeError, match="quota"):
+        connector.get_all_sent_mail("Camp Sent Mail")
+
+
 # ---------- worksheet lookup caching (a lookup used to cost a full extra Google request per read) ----------
 
 class CountingSpreadsheet(FakeSpreadsheet):
