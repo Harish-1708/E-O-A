@@ -16,19 +16,18 @@ The web control panel for the outreach system. It is a **window onto** the engin
 | Page | Use it for |
 |---|---|
 | **Today** | What is due to be emailed now, what is waiting and until when, and why anyone is out of play, for every running campaign. Read-only — it uses the engine's own eligibility rule, so it shows what the next Auto Send run will do. Per campaign: leads due and waiting by stage, the date the next lead falls due, whether the sending window is open (and when it next opens, in the campaign's timezone and in IST), today's sends against the daily limit, and a breakdown of who is out of play. Campaigns that are not running are listed and never read. |
+| **Performance** | The business questions behind the counts, for one campaign or all of them: reply rate, positive replies (as read by the AI), median time to first reply, negotiations and rights secured (from the Asana sync), activity over time, what the replies say, follow-up stage and template-variant effectiveness, deliverability, a *what worked best* report, and a card per campaign with its status. Read-only. It replaces the former Overview and Dashboard pages: *All campaigns at a glance* has every Overview column, and *Full details* (per campaign) has the Dashboard figures. Open and click rates are not shown on purpose. |
 | **Campaigns** | The everyday page. A searchable list of campaigns (status, counts), with ＋ New Campaign, Open and ⧉ Duplicate; a *Deleted Campaigns* list for temporarily removed ones. Opening a campaign shows six tabs (below). |
 | **Controls** | Preview, Send Batch, Check Replies and the ThreadSubject backfill in one place. |
 | **Responses** | One inbox across every campaign: conversations grouped per person, reply, mark as read, *Check Replies Now (all campaigns)*. |
 | **Email Accounts** | Add, edit and remove sending accounts, and see each account's connection status. |
 | **New Campaign / Add Stage** | Create a campaign or add a stage to one. New campaigns start as drafts. |
-| **Overview** | A table of totals for every campaign. |
-| **Dashboard** | The per-campaign dashboards computed by the engine. |
 
 **Inside a campaign (Campaigns → Open):** the **Pause / Resume / Launch** buttons sit at the top of the page, above these tabs.
 
 | Tab | What is there |
 |---|---|
-| **Analytics** | Counts by stage, variant and sender account, and all-time errors. |
+| **Performance** | This campaign's own Performance — the same view as the Performance page, drawn by the same code from data the page has already loaded. Headline cards, activity chart, what the replies say, stage and variant effectiveness, by sender account, deliverability, all-time errors, and a *Full details* section with the engine's own dashboard figures. |
 | **Data** | A *Diagnose* panel showing exactly what the page is reading; *Add Leads (upload CSV)* with column mapping; the leads table; *Remove leads* (soft remove); *Manage a lead* (stop one lead, set its Asana stage or reply status). |
 | **Sequences** | Edit templates (written straight to the repo — one commit per changed file), add a variant, add a follow-up stage, delete a variant or the last stage. |
 | **Schedule** | Timezone, start/end time and send days — the sending window. |
@@ -73,12 +72,14 @@ streamlit run streamlit_app/app.py
 | Path | Role |
 |---|---|
 | `app.py` | Entry point: page config, login gate, navigation |
-| `pages/` | One file per page (`today`, `campaigns`, `controls`, `responses`, `email_accounts`, `new_campaign`, `overview`, `dashboard`) |
+| `pages/` | One file per page (`today`, `performance`, `campaigns`, `controls`, `responses`, `email_accounts`, `new_campaign`) |
 | `sheets_readonly.py` | The viewer-only Sheets connector (looks each tab up once, retries once if a tab was replaced) |
 | `github_client.py` | Commits, workflow dispatch, run status, secrets, and the commit-keyed read cache |
 | `parallel_logic.py` | Runs independent slow reads together; results always in input order |
 | `send_logic.py` · `schedule_logic.py` · `launch_logic.py` · `settings_logic.py` | The typed-`SEND` gate; the Schedule tab; launch/pause/resume; reading and writing campaign override files |
-| `campaigns_hub_logic.py` · `overview_logic.py` · `responses_hub_logic.py` | The campaign list, the overview table, and conversation grouping |
+| `campaigns_hub_logic.py` · `responses_hub_logic.py` | The campaign list and conversation grouping |
+| `performance_view.py` | The Performance display, shared by the Performance page and every campaign's Performance tab |
+| `performance_logic.py` | The Performance page: totals from the engine's own function, plus intents, time to reply, stage/variant credit and rankings |
 | `work_queue_logic.py` | The Today page: due / waiting / out-of-play per campaign, built on the engine's own eligibility and sending-window functions |
 | `auth.py` · `tools/generate_password_hash.py` | Login (salted PBKDF2) and the tool that generates a user's block |
 
