@@ -147,6 +147,7 @@ One file, run as `python outreach.py <command>`. Run `python outreach.py --help`
 
 Full detail is in [`streamlit_app/README.md`](streamlit_app/README.md). In short, the pages are:
 
+- **Today** — what is due to be emailed right now, what is waiting and until when, and why anyone is out of play, for every running campaign. Read-only: it changes nothing and sends nothing, and it uses the engine's own eligibility rule, so it shows exactly what the next Auto Send run will do. Start here when you wonder why something has or has not gone out.
 - **Campaigns** — the everyday page. A searchable list (create, open, duplicate). Inside a campaign, the Pause / Resume / Launch controls sit at the top, above tabs for **Analytics**, **Data** (upload leads, remove, *Manage a lead*), **Sequences** (edit templates, add variants/stages), **Schedule**, **Settings** (accounts, limits, Asana, Creator Tracker, Send Batch, maintenance, Danger Zone) and **Responses** (conversations, reply, mark read, *Check Replies Now*).
 - **Controls** — Preview, Send Batch, Check Replies, Backfill in one place.
 - **Responses** — one inbox across every campaign.
