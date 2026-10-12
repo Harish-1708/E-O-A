@@ -17,6 +17,18 @@ NOW = datetime(2026, 10, 12, 15, 0, 0)
 
 # ================================================================ md_escape — hostile email text
 
+def _markdown_it():
+    """The real CommonMark renderer that proves untrusted email text is displayed safely. In CI its absence is
+    a FAILURE, not a skip: a safety proof must not be able to vanish quietly (it did once — 10 tests skipped)."""
+    try:
+        import markdown_it
+    except ImportError:
+        if os.environ.get("CI"):
+            pytest.fail("markdown-it-py must be installed in CI: it is what proves untrusted email text is shown safely")
+        pytest.skip("markdown-it-py is not installed (it always runs in CI)")
+    return markdown_it
+
+
 HOSTILE = [
     "[click me](http://evil.example/steal)",
     "![tracking pixel](http://evil.example/p.png)",
@@ -57,7 +69,7 @@ def test_escaped_text_renders_as_plain_text_with_no_link_image_or_markup(hostile
     """The real outcome, through a real CommonMark renderer (Streamlit's
     Markdown follows CommonMark): no link, image, emphasis, heading, quote,
     list or HTML element can come out of untrusted text."""
-    markdown_it = pytest.importorskip("markdown_it")
+    markdown_it = _markdown_it()
     html = markdown_it.MarkdownIt("commonmark").render(il.md_escape(hostile))
     for element in ("<a ", "<img", "<strong", "<em", "<h1", "<blockquote", "<ul", "<ol", "<code", "<script", "<del"):
         assert element not in html, f"{element!r} in {html!r}"
@@ -67,7 +79,7 @@ def test_escaped_text_renders_as_plain_text_with_no_link_image_or_markup(hostile
 
 def test_the_displayed_text_is_the_original_text():
     """Escaping must not change what a person READS."""
-    markdown_it = pytest.importorskip("markdown_it")
+    markdown_it = _markdown_it()
     import html as html_lib
     for original in ("Re: Hello, world!", "Price is $5 (approx.) - ok?", "50% off [today] #1 @home"):
         rendered = markdown_it.MarkdownIt("commonmark").render(il.md_escape(original))
@@ -111,7 +123,7 @@ def test_preview_collapses_whitespace_and_truncates_with_an_ellipsis():
     out = il.preview_text(long)
     assert len(out) <= il.PREVIEW_LENGTH and out.endswith("…")
     assert il.preview_text("x" * il.PREVIEW_LENGTH) == "x" * il.PREVIEW_LENGTH     # exactly at the limit: untouched
-    assert il.preview_text("") == "(no preview)" and il.preview_text(None) == "(no preview)"
+    assert il.preview_text("") == "(no text in this email)" and il.preview_text(None) == "(no text in this email)"
 
 
 @pytest.mark.parametrize("raw, name, email", [
@@ -152,7 +164,7 @@ def test_each_conversation_becomes_one_row_with_everything_the_list_shows():
     assert first["subject"] == "Re: Hi 1" and first["when"] == "5m ago" and first["message_count"] == 2
     assert (first["intent"], first["intent_confidence"]) == ("Interested", "High")
     assert first["stopped_status"] == "Stopped - Replied" and first["action"] == "Stopped Sequence"
-    assert second["key"] == "C:2" and second["preview"] == "(no preview)" and second["stopped_status"] == ""
+    assert second["key"] == "C:2" and second["preview"] == "(no text in this email)" and second["stopped_status"] == ""
     assert second["when"] == "Yesterday"
 
 
