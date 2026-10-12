@@ -32,6 +32,7 @@ if _REPO_ROOT not in sys.path:
 
 import outreach  # noqa: E402
 from campaign_status_logic import compute_campaign_status  # noqa: E402
+from campaign_analytics_logic import build_error_summary  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
 
 # A ranking of two things on a handful of emails is noise, not insight. The
@@ -87,7 +88,10 @@ def _ints(row: List[str]) -> Dict[str, int]:
 # ---------------------------------------------------------------- one campaign
 
 def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses: List[Dict],
-                               send_log: List[Dict]) -> Dict:
+                               send_log: List[Dict], error_log: Optional[List[Dict]] = None) -> Dict:
+    """`error_log=None` means the Error Log tab could not be read (as opposed
+    to read and empty): the error table is then left empty and flagged
+    (`error_log_read` False) rather than failing the whole report."""
     stages = campaign_cfg.get("stages") or []
     stage_names = [s["name"] for s in stages]
     name = campaign_cfg.get("_campaign_name", "")
@@ -105,6 +109,8 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
 
     stage_sent = Counter(r.get("Stage", "") or "" for r in sent_rows)
     variant_sent = Counter((r.get("Variant", "") or "") for r in sent_rows if r.get("Variant"))
+    stage_variant_sent = Counter((r.get("Stage", "") or "", r.get("Variant", "") or "") for r in sent_rows
+                                 if r.get("Stage") and r.get("Variant"))
 
     # ---- who replied (genuine replies only), one entry per lead
     genuine_by_lead: Dict[str, List[Dict]] = {}
@@ -117,6 +123,8 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
     stage_positive: Counter = Counter()
     variant_replies: Counter = Counter()
     variant_positive: Counter = Counter()
+    stage_variant_replies: Counter = Counter()
+    stage_variant_positive: Counter = Counter()
     reply_hours: List[float] = []
     replies_by_day: Counter = Counter()
     exact_matches = 0
@@ -155,6 +163,9 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
             if variant:
                 variant_replies[variant] += 1
                 variant_positive[variant] += positive
+            if stage and variant:
+                stage_variant_replies[(stage, variant)] += 1
+                stage_variant_positive[(stage, variant)] += positive
 
     def _group_rows(labels: List[str], sent: Counter, replies: Counter, positive: Counter, key: str) -> List[Dict]:
         rows = []
@@ -170,6 +181,28 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
     stage_rows = _group_rows(known_stage_labels, stage_sent, stage_replies, stage_positive, "stage")
     variant_rows = _group_rows(sorted(set(variant_sent) | set(variant_replies)), variant_sent, variant_replies,
                                variant_positive, "variant")
+
+    stage_order = known_stage_labels
+    variant_stage_keys = sorted(set(stage_variant_sent) | set(stage_variant_replies),
+                                key=lambda k: (stage_order.index(k[0]) if k[0] in stage_order else len(stage_order), k[1]))
+    variant_stage_rows = [{"stage": st_, "variant": v_, "sent": stage_variant_sent[(st_, v_)],
+                           "replies": stage_variant_replies[(st_, v_)], "positive": stage_variant_positive[(st_, v_)],
+                           "reply_rate": rate(stage_variant_replies[(st_, v_)], stage_variant_sent[(st_, v_)]),
+                           "positive_rate": rate(stage_variant_positive[(st_, v_)], stage_variant_sent[(st_, v_)])}
+                          for st_, v_ in variant_stage_keys]
+
+    # ---- by sender account: the engine's own definition, kept exactly (replies
+    # are leads this account contacted whose sequence stopped on a reply; the
+    # rate is over the leads it contacted) so it matches the old Analytics tab
+    contacted_leads = [l for l in leads
+                       if any((l.get(outreach.stage_field_names(i)["sent_at"]) or "").strip() for i in range(len(stages)))]
+    sender_rows = []
+    for account in sorted({(l.get("SenderAccount") or "").strip() for l in contacted_leads if (l.get("SenderAccount") or "").strip()}):
+        account_leads = [l for l in contacted_leads if (l.get("SenderAccount") or "").strip() == account]
+        replies_n = sum(1 for l in account_leads if l.get("Status") == outreach.STATUS_STOPPED_REPLIED)
+        sender_rows.append({"account": account, "leads": len(account_leads), "replies": replies_n,
+                            "sent": sum(1 for r in sent_rows if r.get("SenderAccount") == account),
+                            "reply_rate": rate(replies_n, len(account_leads))})
 
     # ---- sending problems
     failures = [r for r in send_log if (r.get("Status") or "").strip() not in ("", "sent")]
@@ -187,9 +220,30 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
 
     responders = len(genuine_by_lead)
     positive_total = intents[outreach.INTENT_INTERESTED]
+
+    # ---- the engine's own dashboard rows: the "Full details" view, and the
+    # all-time error table (read from the Error Log tab)
+    dashboard_rows = outreach.compute_campaign_dashboard(campaign_cfg, leads, responses, send_log, error_log or [])
+    error_rows = []
+    for item in build_error_summary(dashboard_rows):
+        try:
+            error_rows.append({"error_type": item["error_type"], "count": int(item["count"])})
+        except (TypeError, ValueError):
+            error_rows.append({"error_type": item["error_type"], "count": 0})
+
+    last_stage_field = outreach.stage_field_names(len(stages) - 1)["sent_at"] if stages else None
+    completed = sum(1 for l in leads if last_stage_field and (l.get(last_stage_field) or "").strip())
     return {
         "campaign": name,
         **totals,
+        "pending": max(totals["total_leads"] - totals["contacted"], 0),
+        "completed": completed,
+        "sequence_completion": rate(completed, totals["contacted"]),
+        "sender_rows": sender_rows,
+        "error_rows": error_rows,
+        "error_log_read": error_log is not None,
+        "variant_stage_rows": [{**r} for r in variant_stage_rows],
+        "dashboard_rows": dashboard_rows,
         "responders": responders,
         "reply_rate": rate(totals["replies"], totals["contacted"]),
         "intents": intents,
@@ -265,9 +319,43 @@ def combine_performance(perfs: List[Dict], name: str = "All campaigns") -> Dict:
         sent_by_day.update(p["sent_by_day"])
         replies_by_day.update(p["replies_by_day"])
 
+    senders: Dict[str, Dict] = {}
+    for p in perfs:
+        for row in p["sender_rows"]:
+            acc = senders.setdefault(row["account"], {"account": row["account"], "leads": 0, "replies": 0, "sent": 0})
+            acc["leads"] += row["leads"]
+            acc["replies"] += row["replies"]
+            acc["sent"] += row["sent"]
+    sender_rows = [{**senders[a], "reply_rate": rate(senders[a]["replies"], senders[a]["leads"])} for a in sorted(senders)]
+
+    error_totals: Counter = Counter()
+    for p in perfs:
+        for row in p["error_rows"]:
+            error_totals[row["error_type"]] += row["count"]
+    error_rows = [{"error_type": k, "count": v} for k, v in sorted(error_totals.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    variant_stage: Dict[Tuple[str, str], Dict] = {}
+    for p in perfs:
+        for row in p["variant_stage_rows"]:
+            acc = variant_stage.setdefault((row["stage"], row["variant"]),
+                                           {"stage": row["stage"], "variant": row["variant"], "sent": 0, "replies": 0, "positive": 0})
+            acc["sent"] += row["sent"]
+            acc["replies"] += row["replies"]
+            acc["positive"] += row["positive"]
+    stage_rank = {n: i for i, n in enumerate(outreach.CANONICAL_STAGE_ORDER)}
+    variant_stage_rows = [{**variant_stage[k], "reply_rate": rate(variant_stage[k]["replies"], variant_stage[k]["sent"]),
+                           "positive_rate": rate(variant_stage[k]["positive"], variant_stage[k]["sent"])}
+                          for k in sorted(variant_stage, key=lambda k: (stage_rank.get(k[0], len(stage_rank)), k[0], k[1]))]
+
     contacted, sent = total("contacted"), total("sent")
     return {
         "campaign": name,
+        "pending": total("pending"), "completed": total("completed"),
+        "sequence_completion": rate(total("completed"), contacted),
+        "sender_rows": sender_rows, "error_rows": error_rows,
+        "error_log_read": all(p["error_log_read"] for p in perfs),
+        "variant_stage_rows": variant_stage_rows,
+        "dashboard_rows": None,       # raw engine rows only make sense for one campaign
         "total_leads": total("total_leads"), "contacted": contacted, "sent": sent,
         "delivered_est": total("delivered_est"), "bounced_hard": total("bounced_hard"),
         "bounced_soft": total("bounced_soft"), "replies": total("replies"), "responders": total("responders"),
@@ -331,7 +419,7 @@ def build_best_performers(perfs: List[Dict], combined: Dict) -> Dict:
 # ---------------------------------------------------------------- loading every campaign
 
 def build_all_performance(campaign_names: List[str],
-                          fetch_campaign_data: Callable[[str], Tuple[Dict, List[Dict], List[Dict], List[Dict]]],
+                          fetch_campaign_data: Callable[[str], Tuple],
                           max_workers: int = 1) -> Tuple[List[Dict], List[Tuple[str, str]]]:
     """Returns (perfs, errors). Each perf carries `status` and `status_problems`
     (the same status the Campaigns page shows). A campaign whose data cannot
@@ -345,11 +433,26 @@ def build_all_performance(campaign_names: List[str],
         if not ok:
             errors.append((name, str(value)))
             continue
-        campaign_cfg, leads, responses, send_log = value
+        campaign_cfg, leads, responses, send_log, *rest = value
+        error_log = rest[0] if rest else None            # None = the Error Log tab could not be read
         if (campaign_cfg.get("status") or "active") == "deleted":
             continue
-        perf = build_campaign_performance(campaign_cfg, leads, responses, send_log)
+        perf = build_campaign_performance(campaign_cfg, leads, responses, send_log, error_log)
         perf["campaign"] = name
         perf["status"], perf["status_problems"] = compute_campaign_status(campaign_cfg, leads)
         perfs.append(perf)
     return perfs, errors
+
+
+AT_A_GLANCE_COLUMNS = ["Campaign", "Status", "Total leads", "Contacted", "Pending", "Emails sent", "Delivered (est.)",
+                       "Hard bounces", "Soft bounces", "Replies", "Reply rate", "Sequence completion"]
+
+
+def at_a_glance_rows(perfs: List[Dict], status_labels: Callable[[str], str] = lambda s: s) -> List[List[str]]:
+    """One row per campaign with every figure the old Overview page showed
+    (it listed Total Leads, Unique Contacted, Pending, Total Sent, Delivered
+    est., both bounce kinds, Replies, Reply Rate, Sequence Completion), in
+    AT_A_GLANCE_COLUMNS order, as display strings."""
+    return [[p["campaign"], status_labels(p.get("status", "")), str(p["total_leads"]), str(p["contacted"]),
+             str(p["pending"]), str(p["sent"]), str(p["delivered_est"]), str(p["bounced_hard"]), str(p["bounced_soft"]),
+             str(p["replies"]), format_rate(p["reply_rate"]), format_rate(p["sequence_completion"])] for p in perfs]
