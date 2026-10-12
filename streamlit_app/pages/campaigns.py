@@ -22,10 +22,8 @@ from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
 from campaigns_hub_logic import build_campaigns_hub, filter_campaigns_by_search  # noqa: E402
-from campaign_analytics_logic import (  # noqa: E402
-    build_overview_summary, build_per_stage_table, build_per_variant_table,
-    build_sender_table, build_error_summary,
-)
+from performance_logic import build_campaign_performance, build_best_performers  # noqa: E402
+from performance_view import render_performance  # noqa: E402
 from data_import_logic import (  # noqa: E402
     parse_csv_bytes, build_default_mapping, apply_mapping, validate_mapping, count_valid_rows,
     build_import_payload, import_payload_path, build_removal_payload, removal_payload_path,
@@ -476,67 +474,17 @@ def _render_hub(just_arrived: bool):
 
 
 # =============================================================================
-# Detail view — Analytics is real (Phase B); other tabs are honest stubs.
+# Detail view — Performance is the first tab; every tab is real.
 # =============================================================================
-def _render_analytics_tab(campaign_cfg, leads, responses, send_log, error_log):
-    dashboard_rows = outreach.compute_campaign_dashboard(campaign_cfg, leads, responses, send_log, error_log)
-    overview = build_overview_summary(dashboard_rows)
-
-    cols = st.columns(4)
-    cols[0].metric("Total Leads", overview.get("Total Leads (with Email)", "—"))
-    cols[1].metric("Emails Sent", overview.get("Total Emails Sent", "—"))
-    cols[2].metric("Replies", overview.get("Genuine Replies", "—"))
-    cols[3].metric("Reply Rate", overview.get("Reply Rate (Replies / Unique Contacted)", "—"))
-
-    st.divider()
-    st.subheader("By stage")
-    stage_table = build_per_stage_table(dashboard_rows)
-    if stage_table:
-        st.dataframe(
-            {"Stage": [r["stage"] for r in stage_table], "Sent": [r["sent"] for r in stage_table]},
-            width="stretch", hide_index=True,
-        )
-    else:
-        st.caption("No sends yet.")
-
-    st.subheader("By variant")
-    variant_table = build_per_variant_table(dashboard_rows)
-    if variant_table:
-        st.dataframe(
-            {
-                "Stage": [r["stage"] for r in variant_table],
-                "Variant": [r["variant"] for r in variant_table],
-                "Sent": [r.get("sent", "0") for r in variant_table],
-                "Replies": [r.get("replies", "0") for r in variant_table],
-                "Reply Rate": [r.get("reply_rate", "—") for r in variant_table],
-            },
-            width="stretch", hide_index=True,
-        )
-    else:
-        st.caption("No sends yet.")
-
-    st.subheader("By sender account")
-    sender_table = build_sender_table(dashboard_rows)
-    if sender_table:
-        st.dataframe(
-            {
-                "Account": [r["account"] for r in sender_table],
-                "Sent": [r.get("sent", "0") for r in sender_table],
-                "Replies": [r.get("replies", "0") for r in sender_table],
-                "Reply Rate": [r.get("reply_rate", "—") for r in sender_table],
-            },
-            width="stretch", hide_index=True,
-        )
-    else:
-        st.caption("No sends yet.")
-
-    error_summary = build_error_summary(dashboard_rows)
-    if error_summary:
-        st.subheader("Errors (all time)")
-        st.dataframe(
-            {"Error type": [r["error_type"] for r in error_summary], "Count": [r["count"] for r in error_summary]},
-            width="stretch", hide_index=True,
-        )
+def _render_performance_tab(campaign_cfg, leads, responses, send_log, error_log):
+    """This campaign's own performance — the same view as the Performance
+    page, drawn by the same renderer, from the data this page has already
+    loaded (no extra Sheet reads). It replaces the old Analytics tab and
+    keeps everything that tab showed (stage, variant and sender tables, and
+    all-time errors) alongside the reply-quality figures."""
+    perf = build_campaign_performance(campaign_cfg, leads, responses, send_log, error_log)
+    render_performance(perf, key_prefix=f"campaign_perf_{campaign_cfg['_campaign_name']}",
+                       best=build_best_performers([perf], perf), show_campaign_ranking=False)
 
 
 def _render_data_tab(campaign_cfg, leads):
@@ -1887,9 +1835,9 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
     _render_status_controls(campaign_cfg, leads, just_arrived)
     st.divider()
 
-    tabs = st.tabs(["📊 Analytics", "📋 Data", "✉️ Sequences", "📅 Schedule", "⚙️ Settings", "💬 Responses"])
+    tabs = st.tabs(["🎯 Performance", "📋 Data", "✉️ Sequences", "📅 Schedule", "⚙️ Settings", "💬 Responses"])
     with tabs[0]:
-        _render_analytics_tab(campaign_cfg, leads, responses, send_log, error_log)
+        _render_performance_tab(campaign_cfg, leads, responses, send_log, error_log)
     with tabs[1]:
         _render_data_tab(campaign_cfg, leads)
     with tabs[2]:
