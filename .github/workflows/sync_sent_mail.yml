@@ -1,0 +1,71 @@
+name: Sync Sent Mail
+
+# Stores the emails YOU sent yourself (typed by hand in the mailbox, or replied from a
+# phone) that belong to a lead's conversation, so the Inbox can show the whole
+# conversation and not only what the system itself sent. Each mailbox's Sent folder is
+# read-only; only messages that reply into a lead's thread are kept, and nothing the
+# system sent itself is repeated.
+#
+# The hourly Check Replies run already does this for the last day. Use this one to
+# catch up on OLDER history: choose how many days back to look. Run it with "dry_run"
+# ticked first: it lists how many messages it would store per lead (lead IDs and counts
+# only — this repository's logs are public, so no names, addresses or message text are
+# ever printed). Safe to run again: anything already stored is skipped.
+on:
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: "Campaign name (must have a matching templates/<name>/ folder)"
+        required: true
+        default: "Kelson_Creators_Licensing"
+      days:
+        description: "How many days back to look in each mailbox's Sent folder"
+        required: true
+        default: "60"
+      dry_run:
+        description: "Preview only — show what would be stored without writing anything"
+        required: false
+        type: boolean
+        default: true
+
+# One Google Sheets lock shared with every other Sheets-touching workflow.
+concurrency:
+  group: google-sheets-api
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Sync sent mail
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          EMAIL_ACCOUNTS_JSON: ${{ secrets.EMAIL_ACCOUNTS_JSON }}
+          EMAIL_ACCOUNT_SLOT_1: ${{ secrets.EMAIL_ACCOUNT_SLOT_1 }}
+          EMAIL_ACCOUNT_SLOT_2: ${{ secrets.EMAIL_ACCOUNT_SLOT_2 }}
+          EMAIL_ACCOUNT_SLOT_3: ${{ secrets.EMAIL_ACCOUNT_SLOT_3 }}
+          EMAIL_ACCOUNT_SLOT_4: ${{ secrets.EMAIL_ACCOUNT_SLOT_4 }}
+          EMAIL_ACCOUNT_SLOT_5: ${{ secrets.EMAIL_ACCOUNT_SLOT_5 }}
+          EMAIL_ACCOUNT_SLOT_6: ${{ secrets.EMAIL_ACCOUNT_SLOT_6 }}
+          EMAIL_ACCOUNT_SLOT_7: ${{ secrets.EMAIL_ACCOUNT_SLOT_7 }}
+          EMAIL_ACCOUNT_SLOT_8: ${{ secrets.EMAIL_ACCOUNT_SLOT_8 }}
+          EMAIL_ACCOUNT_SLOT_9: ${{ secrets.EMAIL_ACCOUNT_SLOT_9 }}
+          EMAIL_ACCOUNT_SLOT_10: ${{ secrets.EMAIL_ACCOUNT_SLOT_10 }}
+        run: |
+          set -o pipefail
+          CMD=(python outreach.py sync-sent-mail --campaign "${{ github.event.inputs.campaign }}" --days "${{ github.event.inputs.days }}")
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            CMD+=(--dry-run)
+          fi
+          "${CMD[@]}" | tee sync_output.txt
+      - name: Add to job summary
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat sync_output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
