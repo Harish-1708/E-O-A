@@ -1,17 +1,19 @@
-"""Page-level tests for the two-pane Inbox: on the all-campaigns Responses page
-and inside each campaign's own Responses tab. The real default layout applies
-here (Inbox); the Classic layout is covered by the older tests in
-test_pages_smoke.py."""
+"""Page-level tests for the Unibox-style Inbox: on the all-campaigns Responses page and inside each campaign's own
+Responses tab. The real default layout applies here (Inbox); the Classic layout is covered by the older tests in
+test_pages_smoke.py. The page is drawn as HTML, so these tests read it back through a small HTML parser."""
 import base64
 import contextlib
 import json
 import os
+from datetime import datetime
+from html.parser import HTMLParser
 from unittest.mock import patch
 
 import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+import inbox_html
 import inbox_view
 from github_client import GitHubActionsError
 from test_pages_smoke import (
@@ -23,6 +25,9 @@ HUB_PAGE = os.path.join(PAGES_DIR, "responses.py")
 CAMPAIGNS_PAGE = os.path.join(PAGES_DIR, "campaigns.py")
 OTHER = "OtherCampaign"
 A1, A5, B5 = f"{FIXTURE_CAMPAIGN}:1", f"{FIXTURE_CAMPAIGN}:5", f"{OTHER}:5"
+TAB = f"tab_{FIXTURE_CAMPAIGN}"
+SENT_TAB = f"{FIXTURE_CAMPAIGN} Sent Mail"
+NOW = datetime(2026, 10, 12, 15, 0, 0)
 
 
 @pytest.fixture(autouse=True)
@@ -33,9 +38,8 @@ def _every_test_uses_the_fixture_repo(fixture_repo):
 
 @pytest.fixture(autouse=True)
 def _stub_the_live_template_reads_other_tabs_make():
-    """A campaign page runs EVERY tab's body on each rerun, and the Sequences
-    tab reads templates live from GitHub (see test_pages_smoke's fixture of
-    the same purpose). Stubbed so opening a campaign never calls GitHub."""
+    """A campaign page runs EVERY tab's body on each rerun, and the Sequences tab reads templates live from GitHub.
+    Stubbed so opening a campaign never calls GitHub."""
     filenames = [f"{stage}_{v}.txt" for stage in ["intro", "followup1", "followup2", "followup3", "followup4"] for v in "ABCD"]
 
     def content(self, path, ref="main"):
@@ -53,6 +57,136 @@ def _clear_streamlit_caches():
     yield
     st.cache_resource.clear()
     st.cache_data.clear()
+
+
+@pytest.fixture(autouse=True)
+def _the_waiting_nudge_counts_from_a_fixed_now(monkeypatch):
+    real = inbox_html.waiting_nudge
+    monkeypatch.setattr(inbox_html, "waiting_nudge", lambda unread, received, now=None: real(unread, received, NOW))
+
+
+# ---------------------------------------------------------------- reading the page back
+
+class _Node:
+    def __init__(self, tag, attrs, parent=None):
+        self.tag, self.attrs, self.parent, self.children, self.parts = tag, dict(attrs), parent, [], []
+
+    @property
+    def classes(self):
+        return set((self.attrs.get("class") or "").split())
+
+    def text(self):
+        return "".join(p if isinstance(p, str) else p.text() for p in self.parts)
+
+
+class _Tree(HTMLParser):
+    VOID = {"br", "img", "hr"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = self.cur = _Node("root", [])
+
+    def handle_starttag(self, tag, attrs):
+        node = _Node(tag, attrs, self.cur)
+        self.cur.children.append(node)
+        self.cur.parts.append(node)
+        if tag not in self.VOID:
+            self.cur = node
+
+    def handle_endtag(self, tag):
+        node = self.cur
+        while node is not self.root and node.tag != tag:
+            node = node.parent
+        if node is not self.root:
+            self.cur = node.parent
+
+    def handle_data(self, data):
+        self.cur.parts.append(data)
+
+
+def _parse(markup):
+    tree = _Tree()
+    tree.feed(markup)
+    tree.close()
+    return tree.root
+
+
+def _find(node, cls):
+    for child in node.children:
+        if cls in child.classes:
+            yield child
+        yield from _find(child, cls)
+
+
+def _nodes(at, cls):
+    found = []
+    for element in at.markdown:
+        if cls in element.value:
+            found.extend(_find(_parse(element.value), cls))
+    return found
+
+
+def _first(node, cls, default=""):
+    match = next(_find(node, cls), None)
+    return match.text().strip() if match is not None else default
+
+
+def _rows(at):
+    return [{"name": _first(n, "ux-name"), "subject": _first(n, "ux-subject"), "preview": _first(n, "ux-preview"),
+             "date": _first(n, "ux-date"), "meta": _first(n, "ux-meta"), "nudge": _first(n, "ux-nudge"),
+             "selected": "ux-selected" in n.classes, "unread": "ux-unread" in n.classes} for n in _nodes(at, "ux-row")]
+
+
+def _cards(at):
+    cards = []
+    for n in _nodes(at, "ux-card"):
+        lines = []
+        body = [x for x in _find(n, "ux-body")]
+        if body:
+            for x in body[0].children:
+                lines.append((("quoted" if "ux-qline" in x.classes else "plain"), x.text().replace("\xa0", "")))
+        meta = [x.text().strip() for x in _find(n, "ux-meta-line")]
+        cards.append({"title": _first(n, "ux-title"), "from": meta[0].removeprefix("From:").strip() if meta else "",
+                      "to": meta[1].removeprefix("To:").strip() if len(meta) > 1 else "", "date": _first(n, "ux-card-date"),
+                      "lines": lines, "empty": _first(n, "ux-empty"), "body": "\n".join(t for _, t in lines).strip("\n")})
+    return cards
+
+
+def _bodies(at):
+    return [c["body"] for c in _cards(at)]
+
+
+def _header(at):
+    nodes = _nodes(at, "ux-thread-head")
+    if not nodes:
+        return None
+    return {"name": _first(nodes[0], "ux-head-name"), "email": _first(nodes[0], "ux-head-email"),
+            "chips": [c.text().strip() for c in _find(nodes[0], "ux-chip")]}
+
+
+def _rail(at):
+    return [{"label": _first(n, "ux-rail-label"), "count": _first(n, "ux-count"), "selected": "ux-selected" in n.classes}
+            for n in _nodes(at, "ux-rail-item")]
+
+
+def _rail_counts(at):
+    return {r["label"]: r["count"] for r in _rail(at)}
+
+
+def _open_buttons(at, namespace="hub"):
+    return [b for b in at.button if (b.key or "").startswith(f"{namespace}_open_")]
+
+
+def _row_keys(at, namespace="hub"):
+    return [b.key[len(f"{namespace}_open_"):] for b in _open_buttons(at, namespace)]
+
+
+def _has(widgets, key):
+    return any(w.key == key for w in widgets)
+
+
+def _committed(captured):
+    return json.loads(captured["commits"][0]["content"].decode("utf-8"))
 
 
 # ---------------------------------------------------------------- data
@@ -77,8 +211,7 @@ def _two_campaign_ws(extra_a_responses=()):
         ]),
         f"{FIXTURE_CAMPAIGN} Response Sheet": FakeWorksheet([
             _resp("rA1", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "Interested, tell me more about rates",
-                  "2026-10-12 14:00:00", FullBody="Hi! Interested — what are your rates?", Intent="Interested",
-                  IntentConfidence="High"),
+                  "2026-10-12 14:00:00", FullBody="Hi! Interested — what are your rates?", Intent="Interested", IntentConfidence="High"),
             _resp("rA2", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "Also do you cover shipping?",
                   "2026-10-12 14:30:00", FullBody="Also, do you cover shipping?"),
             _resp("rA3", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "Not for me thanks", "2026-10-11 09:00:00",
@@ -97,18 +230,31 @@ def _two_campaign_ws(extra_a_responses=()):
     }
 
 
-@contextlib.contextmanager
-def hub(ws=None, dispatch_error=None):
-    """The all-campaigns Responses page, running against fake Sheets and a fake GitHub."""
-    ws = ws or _two_campaign_ws()
-    captured, fake_create_file = _mock_github_writes()
+def _sent(mid, at, body, lead="1", subject="Re: Partnership", source="mailbox"):
+    return {"MessageID": mid, "LeadID": lead, "SentAt": at, "SenderAccount": "sales1", "To": "kari@abc.com", "Cc": "",
+            "Subject": subject, "Body": body, "InReplyTo": "", "Source": source}
 
+
+def _with_sent_mail(*rows, ws=None):
+    ws = ws or _two_campaign_ws()
+    ws[SENT_TAB] = FakeWorksheet(list(rows))
+    return ws
+
+
+def _fake_dispatch(captured, dispatch_error=None):
     def fake_dispatch(self, workflow_file, inputs, ref="main"):
         if dispatch_error:
             raise dispatch_error
         captured.setdefault("dispatches", []).append((workflow_file, inputs))
         return {"id": 1, "html_url": "https://github.com/x"}
+    return fake_dispatch
 
+
+@contextlib.contextmanager
+def hub(ws=None, dispatch_error=None):
+    """The all-campaigns Responses page, running against fake Sheets and a fake GitHub."""
+    ws = ws or _two_campaign_ws()
+    captured, fake_create_file = _mock_github_writes()
     with patch("gspread.authorize", return_value=type("C", (), {"open_by_key": lambda self, k: FakeSpreadsheet(ws)})()), \
          patch("google.oauth2.service_account.Credentials.from_service_account_info", return_value=object()), \
          patch("preview_logic.list_campaigns", return_value=[FIXTURE_CAMPAIGN, OTHER]), \
@@ -116,7 +262,7 @@ def hub(ws=None, dispatch_error=None):
              "_campaign_name": name, "master_tab": f"{name} Master Sheet", "responses_tab": f"{name} Response Sheet",
              "send_log_tab": f"{name} Custom Log Sheet", "error_log_tab": f"{name} Error Log"}), \
          patch("github_client.GitHubClient.create_file", fake_create_file), \
-         patch("github_client.GitHubClient.dispatch_workflow", fake_dispatch):
+         patch("github_client.GitHubClient.dispatch_workflow", _fake_dispatch(captured, dispatch_error)):
         at = AppTest.from_file(HUB_PAGE)
         at.secrets.update(_dashboard_secrets())
         for key, value in _authed_session().items():
@@ -125,96 +271,265 @@ def hub(ws=None, dispatch_error=None):
         yield at, captured
 
 
-def _open_buttons(at, namespace="hub"):
-    return [b for b in at.button if (b.key or "").startswith(f"{namespace}_open_")]
+@contextlib.contextmanager
+def _campaign_tab(ws=None, dispatch_error=None):
+    ws = ws or _two_campaign_ws()
+    captured, fake_create_file = _mock_github_writes()
+    with patch("gspread.authorize", return_value=type("C", (), {"open_by_key": lambda self, k: FakeSpreadsheet(ws)})()), \
+         patch("google.oauth2.service_account.Credentials.from_service_account_info", return_value=object()), \
+         patch("github_client.GitHubClient.create_file", fake_create_file), \
+         patch("github_client.GitHubClient.dispatch_workflow", _fake_dispatch(captured, dispatch_error)):
+        at = AppTest.from_file(CAMPAIGNS_PAGE)
+        at.secrets.update(_dashboard_secrets())
+        for key, value in _authed_session().items():
+            at.session_state[key] = value
+        at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
+        at.run(timeout=25)
+        yield at, captured
 
 
-def _row_keys(at, namespace="hub"):
-    return [b.key[len(f"{namespace}_open_"):] for b in _open_buttons(at, namespace)]
+def _click(at, key):
+    at.button(key=key).click()
+    at.run(timeout=25)
 
 
-def _thread_texts(at):
-    return [t.value for t in at.text]
+def _open_conversation(at, key, namespace="hub"):
+    _click(at, f"{namespace}_open_{key}")
 
 
-def _committed(captured):
-    return json.loads(captured["commits"][0]["content"].decode("utf-8"))
+def _compose(at, gk, namespace="hub"):
+    """Opens the message box (it is closed until Reply is pressed)."""
+    _click(at, f"ux_reply_{namespace}_{gk}")
 
 
-# ================================================================ the all-campaigns page
+def _chronological(at, namespace="hub"):
+    at.checkbox(key=f"{namespace}_newest_first").uncheck()
+    at.run(timeout=25)
 
-def test_the_inbox_is_the_default_layout_with_a_list_and_an_open_conversation():
+
+def _order_of(texts, *needles):
+    positions = [next(i for i, t in enumerate(texts) if n in t) for n in needles]
+    return positions == sorted(positions)
+
+
+# ================================================================ the all-campaigns page: layout
+
+def test_the_inbox_is_the_default_layout_with_a_rail_a_list_and_an_open_conversation():
     with hub() as (at, _):
         assert list(at.exception) == [], list(at.exception)
         assert list(at.error) == []
         assert at.radio(key="responses_view").value == "Inbox"
-        assert _row_keys(at) == [A1, B5, A5]                                  # newest first, one row per conversation
-        assert at.session_state["hub_selected"] == A1                         # the newest is open
-        assert "Kari B" in [s.value for s in at.subheader]
-        assert not any("View full conversation" in e.label for e in at.expander)     # not the classic cards
+        assert _row_keys(at) == [A1, B5, A5]                                    # newest first, one row per conversation
+        assert at.session_state["hub_selected"] == A1                           # the newest is open
+        assert _header(at)["name"] == "Kari B" and _header(at)["email"] == f"kari@abc.com · {FIXTURE_CAMPAIGN}"
+        assert [r["selected"] for r in _rows(at)] == [True, False, False]
+        assert not any("View full conversation" in e.label for e in at.expander)        # not the classic cards
+
+
+def test_the_list_rows_show_the_sender_subject_preview_and_date():
+    with hub() as (at, _):
+        first = _rows(at)[0]
+        assert first["name"] == "Kari B" and first["subject"] == "Re: Partnership"
+        assert first["preview"] == "Also do you cover shipping?" and first["date"] == "Oct 12, 2026"
+        assert _rows(at)[2]["name"] == "Zed Z" and _rows(at)[2]["date"] == "Oct 11, 2026"
+
+
+def test_the_list_shows_the_date_an_email_was_really_sent_not_the_day_it_was_logged():
+    ws = _two_campaign_ws()
+    for record in ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records:
+        if record["ResponseID"] == "rA3":
+            record["ReceivedAt"], record["MessageDate"] = "2026-10-13 01:00:00", "2026-10-11 20:00:00"      # logged the next day
+    with hub(ws) as (at, _):
+        rows = _rows(at)                                                          # the list is ordered by when each was LOGGED, so Zed is first
+        assert [r["name"] for r in rows] == ["Zed Z", "Kari B", "Stranger"]
+        assert [r["date"] for r in rows] == ["Oct 11, 2026", "Oct 12, 2026", "Oct 12, 2026"]       # but each shows the day it was really sent
+
+
+def test_the_stylesheet_is_put_on_the_page_exactly_once():
+    with hub() as (at, _):
+        styles = [m.value for m in at.markdown if m.value.lstrip().startswith("<style>")]
+        assert len(styles) == 1 and styles[0] == f"<style>{inbox_html.INBOX_CSS}</style>"
+
+
+def test_the_panes_are_given_the_container_names_the_stylesheet_looks_for():
+    """The stylesheet finds each pane by the name of its container; if a name drifted, the layout would silently fall apart."""
+    with hub() as (at, _):
+        names = {m.value.split('class="')[1].split('"')[0].split()[0] for m in at.markdown if "ux-" in m.value and "<style>" not in m.value}
+        assert {"ux-rail-title", "ux-rail-item", "ux-list-head", "ux-row", "ux-thread-head", "ux-card"} <= names
+        keys = {b.key for b in at.button if b.key}
+        assert "ux_railbtn_hub_all" in keys and f"ux_reply_hub_{A1}" in keys and f"hub_open_{A1}" in keys
 
 
 def test_clicking_a_conversation_opens_it():
     with hub() as (at, _):
-        at.button(key=f"hub_open_{A5}").click()
-        at.run(timeout=25)
+        _open_conversation(at, A5)
         assert at.session_state["hub_selected"] == A5
-        assert "Zed Z" in [s.value for s in at.subheader] and "Kari B" not in [s.value for s in at.subheader]
-        assert "Not for me, thanks." in _thread_texts(at)
+        assert _header(at)["name"] == "Zed Z" and "Not for me, thanks." in _bodies(at)
+        assert [r["selected"] for r in _rows(at)] == [False, False, True]
 
 
-def test_a_conversation_shows_our_emails_and_theirs_in_chat_bubbles_newest_first():
+def test_the_conversation_is_a_stack_of_email_cards_newest_first_with_ours_from_you():
     with hub() as (at, _):
-        bubbles = list(at.chat_message)
-        assert [b.avatar for b in bubbles].count("👤") == 2                  # Kari's two replies
-        assert [b.avatar for b in bubbles].count("✉️") == 1                   # our intro, re-rendered from its template
-        assert [b.avatar for b in bubbles][0] == "👤"                          # newest first: her latest reply is on top
-        texts = _thread_texts(at)
-        assert texts.index("Also, do you cover shipping?") < texts.index("Hi! Interested — what are your rates?")
+        cards = _cards(at)
+        assert len(cards) == 3                                                  # her two replies and our template intro
+        assert cards[0]["body"] == "Also, do you cover shipping?" and cards[1]["body"] == "Hi! Interested — what are your rates?"
+        assert cards[0]["from"] == "Kari B <kari@abc.com>" and cards[0]["to"] == "You"
+        assert cards[2]["from"] == "You" and cards[2]["to"] == "Kari B <kari@abc.com>"            # the intro we sent
+        assert all(c["title"] and c["date"].endswith("UTC") for c in cards)
+        assert cards[0]["title"] == "Re: Partnership" and cards[0]["date"] == "Oct 12, 2026, 2:30 PM UTC"
 
 
 def test_turning_off_newest_first_puts_the_thread_in_chronological_order():
     with hub() as (at, _):
-        at.checkbox(key="hub_newest_first").uncheck()
-        at.run(timeout=25)
-        texts = _thread_texts(at)
-        assert texts.index("Hi! Interested — what are your rates?") < texts.index("Also, do you cover shipping?")
-        assert [b.avatar for b in at.chat_message][0] == "✉️"                   # oldest first: our intro leads
+        _chronological(at)
+        cards = _cards(at)
+        assert cards[0]["from"] == "You"                                        # our intro leads
+        assert [c["body"] for c in cards[1:]] == ["Hi! Interested — what are your rates?", "Also, do you cover shipping?"]
 
+
+def test_the_header_shows_what_the_system_did_and_how_sure_the_ai_was():
+    with hub() as (at, _):
+        assert _header(at)["chips"] == ["Sequence stopped", "👍 Interested · High confidence"]
+
+
+def test_a_logged_only_reply_says_plainly_that_the_sequence_was_not_stopped():
+    ws = _two_campaign_ws()
+    for record in ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records:
+        if record["ResponseID"] == "rA2":
+            record["ActionTaken"] = "Logged Only (Unverified Match)"
+    with hub(ws) as (at, _):
+        assert "Logged Only (Unverified Match) — sequence NOT stopped" in _header(at)["chips"]
+        assert "Stopped - Replied" in _header(at)["chips"]                       # and the lead IS stopped for another reason
+
+
+# ================================================================ the status rail
+
+def test_the_rail_counts_conversations_by_status_and_unread():
+    with hub() as (at, _):
+        assert _rail_counts(at) == {"All": "3", "Unread": "3", "Lead": "0", "Interested": "1", "Not interested": "1",
+                                    "Unclear": "1", "Auto-reply": "0", "Bounced": "0"}
+        assert [r["label"] for r in _rail(at) if r["selected"]] == ["All"]
+
+
+@pytest.mark.parametrize("button, expected", [
+    ("interested", [A1]), ("not_interested", [A5]), ("unclear", [B5]), ("lead", []), ("auto", []), ("bounced", []),
+])
+def test_choosing_a_status_in_the_rail_shows_only_those_conversations(button, expected):
+    with hub() as (at, _):
+        _click(at, f"ux_railbtn_hub_{button}")
+        assert _row_keys(at) == expected
+        assert [r["label"] for r in _rail(at) if r["selected"]] != ["All"]
+
+
+def test_an_empty_status_says_so_and_the_other_pane_does_too():
+    with hub() as (at, _):
+        _click(at, "ux_railbtn_hub_bounced")
+        assert list(at.exception) == [] and _row_keys(at) == [] and _header(at) is None
+        assert sum("No conversations in this view." in m.value for m in at.markdown) == 2
+        assert at.session_state["hub_selected"] is None
+
+
+def test_choosing_all_again_brings_everything_back():
+    with hub() as (at, _):
+        _click(at, "ux_railbtn_hub_interested")
+        _click(at, "ux_railbtn_hub_all")
+        assert _row_keys(at) == [A1, B5, A5]
+
+
+def test_if_the_open_conversation_is_filtered_out_the_first_one_left_opens():
+    with hub() as (at, _):
+        _open_conversation(at, A5)
+        _click(at, "ux_railbtn_hub_interested")
+        assert at.session_state["hub_selected"] == A1 and _header(at)["name"] == "Kari B"
+
+
+def test_a_later_follow_up_that_was_never_classified_does_not_turn_an_interested_conversation_into_unclear():
+    with hub() as (at, _):
+        _click(at, "ux_railbtn_hub_unclear")
+        assert A1 not in _row_keys(at)                                          # Kari asked about shipping later, unclassified; still Interested
+
+
+def test_a_later_not_interested_overrides_an_earlier_interested():
+    ws = _two_campaign_ws(extra_a_responses=[
+        _resp("rA9", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "Actually no", "2026-10-13 09:00:00", FullBody="Actually, no thanks.",
+              Intent="Not Interested", IntentConfidence="High")])
+    with hub(ws) as (at, _):
+        _click(at, "ux_railbtn_hub_not_interested")
+        assert set(_row_keys(at)) == {A1, A5}
+        _click(at, "ux_railbtn_hub_interested")
+        assert _row_keys(at) == []
+
+
+def test_a_conversation_is_classified_by_its_latest_message():
+    ws = _two_campaign_ws(extra_a_responses=[
+        _resp("rBounce", "5", '"Mail Daemon" <mailer-daemon@x.com>', "Undelivered", "550 no such user", "2026-10-12 16:00:00",
+              Classification="Bounce (Hard)")])
+    with hub(ws) as (at, _):
+        _click(at, "ux_railbtn_hub_bounced")
+        assert _row_keys(at) == [A5]
+        _click(at, "ux_railbtn_hub_not_interested")
+        assert _row_keys(at) == []                                              # Zed's latest message is the bounce, not his refusal
+
+
+def test_the_rail_counts_follow_the_pages_own_search():
+    with hub() as (at, _):
+        at.text_input(key="responses_search_query").set_value("stranger")
+        at.run(timeout=25)
+        assert _rail_counts(at)["All"] == "1" and _rail_counts(at)["Unclear"] == "1" and _rail_counts(at)["Interested"] == "0"
+
+
+# ================================================================ unread, mark as read, the page's own filters
 
 def test_unread_conversations_show_a_dot_and_how_many_are_new():
     with hub() as (at, _):
-        labels = {b.key[len("hub_open_"):]: b.label for b in _open_buttons(at)}
-        assert all(label.startswith("🔵 ") for label in labels.values())     # nothing has been read yet
-        captions = " ".join(c.value for c in at.caption)
-        assert "2 new" in captions                                              # Kari: two unread messages
+        rows = _rows(at)
+        assert all(r["unread"] for r in rows)                                    # nothing has been read yet
+        assert "2 messages · 2 new" in rows[0]["meta"]
+        assert "ux-dot" in next(m.value for m in at.markdown if "ux-row" in m.value)
+
+
+def test_a_conversation_still_unread_after_a_day_is_marked_as_waiting_for_a_reply():
+    with hub() as (at, _):
+        nudges = [r["nudge"] for r in _rows(at)]
+        assert nudges == ["", "", "Received 1 day ago. Reply?"]                  # Zed wrote on the 11th; "now" is 15:00 on the 12th
+
+
+def test_a_read_conversation_is_no_longer_marked_as_waiting():
+    ws = _two_campaign_ws()
+    with hub(ws) as (at, _):
+        at.session_state["read_response_keys"] = {f"{FIXTURE_CAMPAIGN}:rA3"}
+        at.run(timeout=25)
+        assert [r["nudge"] for r in _rows(at)] == ["", "", ""] and [r["unread"] for r in _rows(at)] == [True, True, False]
 
 
 def test_merely_opening_or_loading_never_marks_anything_read():
     with hub() as (at, _):
-        at.button(key=f"hub_open_{A5}").click()
-        at.run(timeout=25)
-        assert at.session_state["read_response_keys"] == set()
-        assert at.session_state["pending_sync_keys"] == set()
+        _open_conversation(at, A5)
+        assert at.session_state["read_response_keys"] == set() and at.session_state["pending_sync_keys"] == set()
 
 
 def test_mark_as_read_marks_the_whole_conversation_and_queues_the_sync():
     with hub() as (at, _):
-        at.button(key=f"hub_mark_read_{A1}").click()
-        at.run(timeout=25)
+        _click(at, f"hub_mark_read_{A1}")
         expected = {f"{FIXTURE_CAMPAIGN}:rA1", f"{FIXTURE_CAMPAIGN}:rA2"}
         assert at.session_state["read_response_keys"] == expected == at.session_state["pending_sync_keys"]
-        assert not {b.key: b.label for b in _open_buttons(at)}[f"hub_open_{A1}"].startswith("🔵")
-        assert not any((b.key or "") == f"hub_mark_read_{A1}" for b in at.button)    # nothing left to mark
+        assert [r["unread"] for r in _rows(at)] == [False, True, True]
+        assert not _has(at.button, f"hub_mark_read_{A1}")                        # nothing left to mark
 
 
-def test_the_unread_chip_hides_conversations_that_have_been_read():
+def test_the_unread_item_in_the_rail_hides_conversations_that_have_been_read():
     with hub() as (at, _):
-        at.button(key=f"hub_mark_read_{A1}").click()
-        at.run(timeout=25)
+        _click(at, f"hub_mark_read_{A1}")
+        _click(at, "ux_railbtn_hub_unread")
+        assert A1 not in _row_keys(at) and set(_row_keys(at)) == {B5, A5} and _rail_counts(at)["Unread"] == "2"
+
+
+def test_the_pages_own_unread_switch_still_works_alongside_the_rail():
+    with hub() as (at, _):
+        _click(at, f"hub_mark_read_{A1}")
         at.radio(key="responses_inbox_chip").set_value("Unread only")
         at.run(timeout=25)
-        assert A1 not in _row_keys(at) and set(_row_keys(at)) == {B5, A5}
+        assert set(_row_keys(at)) == {B5, A5}
 
 
 def test_search_narrows_the_list():
@@ -229,12 +544,10 @@ def test_search_narrows_the_list():
 
 def test_filtering_out_the_open_conversation_falls_back_to_the_first_one_left():
     with hub() as (at, _):
-        at.button(key=f"hub_open_{A5}").click()
-        at.run(timeout=25)
+        _open_conversation(at, A5)
         at.text_input(key="responses_search_query").set_value("stranger")
         at.run(timeout=25)
-        assert list(at.exception) == []
-        assert at.session_state["hub_selected"] == B5
+        assert list(at.exception) == [] and at.session_state["hub_selected"] == B5
 
 
 def test_nothing_matching_says_so_and_does_not_crash():
@@ -246,40 +559,54 @@ def test_nothing_matching_says_so_and_does_not_crash():
         assert _open_buttons(at) == []
 
 
-# ---- the cross-campaign bug (found while building this)
+# ---- the cross-campaign bug
 
 def test_each_conversation_shows_only_its_own_campaigns_messages_even_when_lead_ids_match():
-    """REGRESSION: Campaign A's lead 5 and Campaign B's lead 5 are two different people.
-    The page used to build A's thread from every campaign's lead-5 replies."""
+    """REGRESSION: Campaign A's lead 5 and Campaign B's lead 5 are two different people."""
     with hub() as (at, _):
-        at.button(key=f"hub_open_{A5}").click()
-        at.run(timeout=25)
-        texts = _thread_texts(at)
-        assert "Not for me, thanks." in texts and "I am a different person entirely" not in texts
-        at.button(key=f"hub_open_{B5}").click()
-        at.run(timeout=25)
-        texts = _thread_texts(at)
-        assert "I am a different person entirely" in texts and "Not for me, thanks." not in texts
+        _open_conversation(at, A5)
+        assert "Not for me, thanks." in _bodies(at) and "I am a different person entirely" not in _bodies(at)
+        _open_conversation(at, B5)
+        assert "I am a different person entirely" in _bodies(at) and "Not for me, thanks." not in _bodies(at)
 
 
 def test_the_classic_layout_no_longer_mixes_campaigns_either():
     with hub() as (at, _):
         at.radio(key="responses_view").set_value("Classic")
         at.run(timeout=25)
-        texts = _thread_texts(at)
-        # B's message belongs to exactly one conversation (its own). Under the bug it also appeared in A's lead-5 thread.
-        assert texts.count("I am a different person entirely") == 1
-        assert texts.count("Not for me, thanks.") == 1
+        texts = [t.value for t in at.text]
+        assert texts.count("I am a different person entirely") == 1 and texts.count("Not for me, thanks.") == 1
 
 
-# ---- sending a reply
+# ================================================================ the Reply box and sending
+
+def test_the_message_box_is_closed_until_reply_is_pressed_and_pressing_it_again_closes_it():
+    with hub() as (at, _):
+        assert not _has(at.text_area, f"hub_body_{A1}") and not _has(at.button, f"hub_send_{A1}")
+        _compose(at, A1)
+        assert _has(at.text_area, f"hub_body_{A1}") and _has(at.button, f"hub_send_{A1}")
+        assert any("Sending as: sales1" in c.value for c in at.caption)
+        _compose(at, A1)
+        assert not _has(at.text_area, f"hub_body_{A1}")
+
+
+def test_each_conversation_has_its_own_message_box_and_keeps_what_was_typed_in_it():
+    with hub() as (at, _):
+        _compose(at, A1)
+        at.text_area(key=f"hub_body_{A1}").set_value("half-written reply")
+        at.run(timeout=25)
+        _open_conversation(at, A5)
+        assert not _has(at.text_area, f"hub_body_{A1}")                          # Zed's box is separate (and closed)
+        _open_conversation(at, A1)
+        assert at.text_area(key=f"hub_body_{A1}").value == "half-written reply"
+
 
 def test_sending_a_reply_commits_the_payload_starts_the_workflow_clears_the_box_and_marks_read():
     with hub() as (at, captured):
+        _compose(at, A1)
         at.text_area(key=f"hub_body_{A1}").set_value("Thanks Kari — our rate is $150.")
         at.run(timeout=25)
-        at.button(key=f"hub_send_{A1}").click()
-        at.run(timeout=25)
+        _click(at, f"hub_send_{A1}")
         assert list(at.exception) == [], list(at.exception)
         assert list(at.error) == []
         assert any("Reply queued" in s.value for s in at.success)
@@ -287,21 +614,42 @@ def test_sending_a_reply_commits_the_payload_starts_the_workflow_clears_the_box_
         assert captured["commits"][0]["path"].startswith(f"replies/{FIXTURE_CAMPAIGN}/")
         assert payload["to"] == "kari@abc.com" and payload["sender_account"] == "sales1"
         assert payload["subject"] == "Re: Partnership" and payload["body"] == "Thanks Kari — our rate is $150."
-        assert payload["in_reply_to"] == "<rA2@mail.gmail.com>"                # threaded off her LATEST message
+        assert payload["in_reply_to"] == "<rA2@mail.gmail.com>"                  # threaded off her LATEST message
         assert payload["references"] == "<our1@mail.gmail.com> <rA2@mail.gmail.com>"
         assert captured["dispatches"] == [("send_reply.yml", {"campaign": FIXTURE_CAMPAIGN, "payload_path": captured["commits"][0]["path"]})]
-        assert at.text_area(key=f"hub_body_{A1}").value == ""                  # cleared: a second click cannot send it twice
+        assert at.text_area(key=f"hub_body_{A1}").value == ""                    # cleared: a second click cannot send it twice
         assert at.session_state["pending_sync_keys"] == {f"{FIXTURE_CAMPAIGN}:rA1", f"{FIXTURE_CAMPAIGN}:rA2"}
+
+
+def test_a_reply_that_has_been_sent_does_not_come_back_when_you_return_to_that_conversation():
+    """The saved draft must be cleared on sending too, or the sent text would reappear in the box."""
+    with hub() as (at, captured):
+        _compose(at, A1)
+        at.text_area(key=f"hub_body_{A1}").set_value("Sent already")
+        at.run(timeout=25)
+        _click(at, f"hub_send_{A1}")
+        assert "commits" in captured
+        _open_conversation(at, A5)
+        _open_conversation(at, A1)
+        assert at.text_area(key=f"hub_body_{A1}").value == ""
+
+
+def test_the_message_after_sending_says_it_will_appear_in_the_conversation():
+    with hub() as (at, _):
+        _compose(at, A1)
+        at.text_area(key=f"hub_body_{A1}").set_value("Thanks!")
+        at.run(timeout=25)
+        _click(at, f"hub_send_{A1}")
+        assert any("will then appear in this conversation" in s.value for s in at.success)
 
 
 def test_a_reply_goes_out_through_the_right_campaign_when_lead_ids_collide():
     with hub() as (at, captured):
-        at.button(key=f"hub_open_{B5}").click()
-        at.run(timeout=25)
+        _open_conversation(at, B5)
+        _compose(at, B5)
         at.text_area(key=f"hub_body_{B5}").set_value("Hello Stranger")
         at.run(timeout=25)
-        at.button(key=f"hub_send_{B5}").click()
-        at.run(timeout=25)
+        _click(at, f"hub_send_{B5}")
         payload = _committed(captured)
         assert payload["to"] == "stranger@b.com" and payload["sender_account"] == "sales2"
         assert captured["dispatches"][0][1]["campaign"] == OTHER
@@ -309,84 +657,84 @@ def test_a_reply_goes_out_through_the_right_campaign_when_lead_ids_collide():
 
 def test_a_blank_message_is_refused_and_nothing_is_committed():
     with hub() as (at, captured):
-        at.button(key=f"hub_send_{A1}").click()
-        at.run(timeout=25)
-        assert list(at.exception) == []
-        assert at.error and "commits" not in captured and "dispatches" not in captured
+        _compose(at, A1)
+        _click(at, f"hub_send_{A1}")
+        assert list(at.exception) == [] and at.error and "commits" not in captured and "dispatches" not in captured
 
 
 def test_the_to_and_subject_fields_can_be_edited_before_sending():
     with hub() as (at, captured):
+        _compose(at, A1)
         at.text_input(key=f"hub_to_{A1}").set_value("someone.else@abc.com")
         at.text_input(key=f"hub_subject_{A1}").set_value("A different subject")
         at.text_area(key=f"hub_body_{A1}").set_value("Redirected.")
         at.run(timeout=25)
-        at.button(key=f"hub_send_{A1}").click()
-        at.run(timeout=25)
+        _click(at, f"hub_send_{A1}")
         payload = _committed(captured)
         assert payload["to"] == "someone.else@abc.com" and payload["subject"] == "A different subject"
 
 
-def test_a_search_narrows_the_list_but_the_open_conversation_still_shows_every_message():
-    """The list is filtered by what matches; the conversation itself must stay complete,
-    or searching for one word would silently hide the rest of a thread."""
-    with hub() as (at, _):
-        at.text_input(key="responses_search_query").set_value("rates")           # matches only Kari's FIRST message
-        at.run(timeout=25)
-        assert _row_keys(at) == [A1]
-        texts = _thread_texts(at)
-        assert "Hi! Interested — what are your rates?" in texts and "Also, do you cover shipping?" in texts
-
-
 def test_cc_and_bcc_are_sent():
     with hub() as (at, captured):
+        _compose(at, A1)
         at.text_input(key=f"hub_cc_{A1}").set_value("boss@abc.com, other@abc.com")
         at.text_input(key=f"hub_bcc_{A1}").set_value("archive@abc.com")
         at.text_area(key=f"hub_body_{A1}").set_value("Copying you in.")
         at.run(timeout=25)
-        at.button(key=f"hub_send_{A1}").click()
-        at.run(timeout=25)
+        _click(at, f"hub_send_{A1}")
         payload = _committed(captured)
         assert payload["cc"] == ["boss@abc.com", "other@abc.com"] and payload["bcc"] == ["archive@abc.com"]
 
 
 def test_an_attachment_round_trips_and_the_uploader_is_emptied_afterwards():
     with hub() as (at, captured):
-        uploader_key = f"hub_attachments_{A1}_0"
-        at.file_uploader(key=uploader_key).upload("photo.png", b"fake-png-bytes", "image/png")
+        _compose(at, A1)
+        at.file_uploader(key=f"hub_attachments_{A1}_0").upload("photo.png", b"fake-png-bytes", "image/png")
         at.text_area(key=f"hub_body_{A1}").set_value("Here is the photo.")
         at.run(timeout=25)
-        at.button(key=f"hub_send_{A1}").click()
-        at.run(timeout=25)
+        _click(at, f"hub_send_{A1}")
         assert list(at.exception) == []
-        attachments = _committed(captured)["attachments"]
-        assert attachments == [{"filename": "photo.png", "content_base64": base64.b64encode(b"fake-png-bytes").decode("ascii")}]
-        assert any((u.key or "") == f"hub_attachments_{A1}_1" for u in at.file_uploader)    # a fresh, empty uploader
-        assert not any((u.key or "") == uploader_key for u in at.file_uploader)
+        assert _committed(captured)["attachments"] == [{"filename": "photo.png", "content_base64": base64.b64encode(b"fake-png-bytes").decode("ascii")}]
+        assert _has(at.file_uploader, f"hub_attachments_{A1}_1") and not _has(at.file_uploader, f"hub_attachments_{A1}_0")
 
 
 def test_no_attachment_means_no_attachments_key_in_the_payload():
     with hub() as (at, captured):
+        _compose(at, A1)
         at.text_area(key=f"hub_body_{A1}").set_value("No file this time.")
         at.run(timeout=25)
-        at.button(key=f"hub_send_{A1}").click()
-        at.run(timeout=25)
+        _click(at, f"hub_send_{A1}")
         assert "attachments" not in _committed(captured)
 
 
 def test_a_failed_send_shows_the_reason_keeps_the_text_and_marks_nothing_read():
     with hub(dispatch_error=GitHubActionsError("boom")) as (at, captured):
+        _compose(at, A1)
         at.text_area(key=f"hub_body_{A1}").set_value("Important reply")
         at.run(timeout=25)
-        at.button(key=f"hub_send_{A1}").click()
+        _click(at, f"hub_send_{A1}")
+        assert list(at.exception) == [] and any("Failed to send: boom" in e.value for e in at.error)
+        assert at.text_area(key=f"hub_body_{A1}").value == "Important reply" and at.session_state["pending_sync_keys"] == set()
+
+
+def test_the_all_campaigns_page_does_not_pause_before_dispatch():
+    with hub() as (at, captured), patch.object(inbox_view.time, "sleep") as slept:
+        _compose(at, A1)
+        at.text_area(key=f"hub_body_{A1}").set_value("Quick reply")
         at.run(timeout=25)
-        assert list(at.exception) == []
-        assert any("Failed to send: boom" in e.value for e in at.error)
-        assert at.text_area(key=f"hub_body_{A1}").value == "Important reply"        # not lost
-        assert at.session_state["pending_sync_keys"] == set()
+        _click(at, f"hub_send_{A1}")
+        assert "dispatches" in captured and not any(call.args == (1.0,) for call in slept.call_args_list)
 
 
-# ---- the Classic switch
+# ================================================================ search keeps the whole thread, odd data, the Classic switch
+
+def test_a_search_narrows_the_list_but_the_open_conversation_still_shows_every_message():
+    with hub() as (at, _):
+        at.text_input(key="responses_search_query").set_value("rates")           # matches only Kari's FIRST message
+        at.run(timeout=25)
+        assert _row_keys(at) == [A1]
+        assert "Hi! Interested — what are your rates?" in _bodies(at) and "Also, do you cover shipping?" in _bodies(at)
+
 
 def test_switching_to_classic_shows_the_previous_card_layout():
     with hub() as (at, _):
@@ -394,90 +742,96 @@ def test_switching_to_classic_shows_the_previous_card_layout():
         at.run(timeout=25)
         assert list(at.exception) == []
         assert any("View full conversation" in e.label for e in at.expander)
-        assert _open_buttons(at) == []
-        assert any(s.key == "responses_inbox_filter" for s in at.selectbox)        # the classic "More" filter is back
+        assert _open_buttons(at) == [] and _nodes(at, "ux-row") == []
+        assert _has(at.selectbox, "responses_inbox_filter")                        # the classic "More" filter is back
 
 
-# ---- hostile text and large inboxes
-
-def test_hostile_text_in_a_sender_name_or_subject_is_shown_as_plain_text():
-    hostile = _resp("rX", "9", '"[click](http://evil.example) **BOLD** :red[x]" <x@evil.example>',
-                    "![pixel](http://evil.example/p.png) $$bad$$", "[more](http://evil.example)", "2026-10-12 15:00:00")
-    ws = _two_campaign_ws(extra_a_responses=[hostile])
-    ws[f"{FIXTURE_CAMPAIGN} Master Sheet"] = FakeWorksheet([
-        {"LeadID": "1", "Email": "kari@abc.com", "SenderAccount": "sales1"}, {"LeadID": "9", "Email": "x@evil.example", "SenderAccount": "sales1"}])
-    with hub(ws) as (at, _):
-        assert list(at.exception) == []
-        label = {b.key: b.label for b in _open_buttons(at)}[f"hub_open_{FIXTURE_CAMPAIGN}:9"]
-        assert "\\[click\\]\\(http" in label and "\\*\\*BOLD\\*\\*" in label            # every markdown character escaped
-        captions = " ".join(c.value for c in at.caption)
-        assert "\\!\\[pixel\\]" in captions and "![pixel]" not in captions
-        assert "\\[more\\]\\(http" in captions and "[more](http" not in captions     # the preview line is escaped too
+def test_an_email_with_no_readable_text_says_so_in_its_card_and_in_the_list():
+    blank = _resp("rE", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "", "2026-10-12 17:00:00", FullBody="")
+    with hub(_two_campaign_ws(extra_a_responses=[blank])) as (at, _):
+        assert _rows(at)[0]["preview"] == "(no text in this email)"
+        _open_conversation(at, A5)
+        empties = [c for c in _cards(at) if c["empty"]]
+        assert len(empties) == 1 and "has no readable text" in empties[0]["empty"] and empties[0]["lines"] == []
+        assert "Not for me, thanks." in _bodies(at)                                # the real reply still shows
 
 
 def test_a_reply_with_no_matching_lead_still_shows_what_was_received_and_says_what_cannot_be_shown():
-    """A reply can predate its lead being added (or the lead was removed): the conversation
-    cannot re-render what we sent, but must not hide what the person wrote."""
-    orphan = _resp("rZ", "77", '"Nobody Known" <nobody@abc.com>', "Re: Who?", "Who am I?", "2026-10-12 16:00:00",
-                   FullBody="Who am I replying to?")
+    orphan = _resp("rZ", "77", '"Nobody Known" <nobody@abc.com>', "Re: Who?", "Who am I?", "2026-10-12 16:00:00", FullBody="Who am I replying to?")
     with hub(_two_campaign_ws(extra_a_responses=[orphan])) as (at, _):
-        assert list(at.exception) == []
-        assert f"{FIXTURE_CAMPAIGN}:77" in _row_keys(at)
-        assert at.session_state["hub_selected"] == f"{FIXTURE_CAMPAIGN}:77"          # it is the newest
-        assert "Who am I replying to?" in _thread_texts(at)
+        assert list(at.exception) == [] and f"{FIXTURE_CAMPAIGN}:77" in _row_keys(at)
+        assert at.session_state["hub_selected"] == f"{FIXTURE_CAMPAIGN}:77"
+        assert "Who am I replying to?" in _bodies(at)
         assert any("so the emails the system sent are not shown" in c.value for c in at.caption)
+        _compose(at, f"{FIXTURE_CAMPAIGN}:77")
         assert any("Couldn't find this lead's sender account" in c.value for c in at.caption)
 
 
-def test_an_email_with_no_readable_text_says_so_instead_of_showing_an_empty_bubble():
-    """REPORTED: some conversations showed a name and a time, then nothing. A bubble with no text reads as a bug."""
-    blank = _resp("rE", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "", "2026-10-12 17:00:00", FullBody="")
-    with hub(_two_campaign_ws(extra_a_responses=[blank])) as (at, _):
-        at.button(key=f"hub_open_{A5}").click()
-        at.run(timeout=25)
-        assert list(at.exception) == []
-        notes = [c.value for c in at.caption if "has no readable text" in c.value]
-        assert len(notes) == 1                                                  # only the blank one; the real reply still shows
-        assert "Not for me, thanks." in _thread_texts(at)
+def test_quoted_history_in_a_reply_is_shown_as_a_quote_without_its_markers():
+    quoted = _resp("rQ", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "x", "2026-10-12 17:00:00",
+                   FullBody="Fine by me.\n\n> On Oct 11, Harish wrote:\n> Would you license it?")
+    with hub(_two_campaign_ws(extra_a_responses=[quoted])) as (at, _):
+        _open_conversation(at, A5)
+        newest = _cards(at)[0]
+        assert [kind for kind, _ in newest["lines"]] == ["plain", "plain", "quoted", "quoted"]
+        assert newest["lines"][2][1] == "On Oct 11, Harish wrote:" and newest["lines"][3][1] == "Would you license it?"
 
 
-def test_the_list_says_when_an_email_has_no_text():
-    blank = _resp("rE", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "", "2026-10-12 17:00:00", FullBody="")
-    with hub(_two_campaign_ws(extra_a_responses=[blank])) as (at, _):
-        assert any("no text in this email" in c.value for c in at.caption)
-
-
-def test_each_message_shows_its_subject():
+def test_a_long_list_is_capped_and_says_how_many_are_shown(monkeypatch):
+    monkeypatch.setattr(inbox_view, "MAX_ROWS", 2)
     with hub() as (at, _):
-        captions = [c.value.replace("\\", "") for c in at.caption]
-        assert any(c == "Re: Partnership" for c in captions)
+        assert len(_open_buttons(at)) == 2 and len(_rows(at)) == 2
+        assert any("Showing the 2 most recent of 3" in c.value for c in at.caption)
+        assert _rail_counts(at)["All"] == "3"                                      # the rail still counts everything
 
 
-# ---- the emails the team sent by hand, or from this page
+# ---- hostile text
 
-SENT_TAB = f"{FIXTURE_CAMPAIGN} Sent Mail"
-
-
-def _sent(mid, at, body, lead="1", subject="Re: Partnership", source="mailbox"):
-    return {"MessageID": mid, "LeadID": lead, "SentAt": at, "SenderAccount": "sales1", "To": "kari@abc.com", "Cc": "",
-            "Subject": subject, "Body": body, "InReplyTo": "", "Source": source}
+HOSTILE_NAME = '[click](http://evil.example) **BOLD** :red[x] <b>tag</b>'
+HOSTILE_SUBJECT = '![pixel](http://evil.example/p.png) $$bad$$ <script>alert(1)</script> "quoted"'
+HOSTILE_BODY = '<script>alert(1)</script>\n**bold?** :smile: $$x^2$$\n[a link](http://evil.example)\n![img](http://evil.example/p.png)\n"><img src=x onerror=alert(1)>'
 
 
-def _with_sent_mail(*rows, ws=None):
-    ws = ws or _two_campaign_ws()
-    ws[SENT_TAB] = FakeWorksheet(list(rows))
+def _hostile_ws():
+    hostile = _resp("rX", "9", f'"{HOSTILE_NAME}" <x@evil.example>', HOSTILE_SUBJECT, "[more](http://evil.example) <i>x</i>",
+                    "2026-10-12 15:00:00", FullBody=HOSTILE_BODY)
+    ws = _two_campaign_ws(extra_a_responses=[hostile])
+    ws[f"{FIXTURE_CAMPAIGN} Master Sheet"] = FakeWorksheet([
+        {"LeadID": "1", "Email": "kari@abc.com", "SenderAccount": "sales1"}, {"LeadID": "9", "Email": "x@evil.example", "SenderAccount": "sales1"}])
     return ws
 
 
-def _chronological(at):
-    at.checkbox(key="hub_newest_first").uncheck()
-    at.run(timeout=25)
+class _Whitelist(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.tags, self.attrs = set(), set()
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.add(tag)
+        self.attrs |= {name for name, _ in attrs}
 
 
-def _order_of(texts, *needles):
-    positions = [next(i for i, t in enumerate(texts) if n in t) for n in needles]
-    return positions == sorted(positions)
+def test_hostile_text_in_a_name_subject_preview_or_body_is_shown_as_plain_text_and_never_as_markup():
+    with hub(_hostile_ws()) as (at, _):
+        assert list(at.exception) == []
+        found = _Whitelist()
+        for element in at.markdown:
+            if "ux-" in element.value and "<style>" not in element.value:
+                found.feed(element.value)
+        assert found.tags <= {"div", "span", "b"} and found.attrs <= {"class", "style", "title"}, (found.tags, found.attrs)
+        row = _rows(at)[0]
+        assert row["name"] == HOSTILE_NAME and row["subject"] == HOSTILE_SUBJECT          # exactly as written, as text
+        assert _header(at)["name"] == HOSTILE_NAME and _cards(at)[0]["title"] == HOSTILE_SUBJECT
+        assert _cards(at)[0]["body"] == HOSTILE_BODY
 
+
+def test_the_invisible_buttons_labels_are_escaped_too():
+    with hub(_hostile_ws()) as (at, _):
+        label = next(b.label for b in _open_buttons(at) if b.key == f"hub_open_{FIXTURE_CAMPAIGN}:9")
+        assert "\\[click\\]\\(http" in label and "\\*\\*BOLD\\*\\*" in label
+
+
+# ================================================================ the emails the team sent by hand, or from here
 
 def test_what_you_typed_by_hand_appears_in_the_conversation_in_the_right_place():
     ws = _with_sent_mail(_sent("<m1@gmail>", "2026-10-12 14:10:00", "We can offer $200 for six months."),
@@ -485,32 +839,28 @@ def test_what_you_typed_by_hand_appears_in_the_conversation_in_the_right_place()
     with hub(ws) as (at, _):
         _chronological(at)
         assert list(at.exception) == [] and list(at.error) == []
-        texts = _thread_texts(at)
-        assert _order_of(texts, "Hi! Interested", "We can offer $200", "Also, do you cover shipping?", "Great, I will send the agreement")
-        assert [b.avatar for b in at.chat_message].count("✉️") == 3               # the template intro + the two you typed
-        assert any(m.value.replace("\\", "").startswith("**You** · 2026-10-12 14:10:00") for m in at.markdown)   # as a person reads it
+        bodies = _bodies(at)
+        assert _order_of(bodies, "Hi! Interested", "We can offer $200", "Also, do you cover shipping?", "Great, I will send the agreement")
+        assert [c["from"] for c in _cards(at)].count("You") == 3                    # the template intro + the two you typed
 
 
 def test_your_quick_answer_never_appears_before_the_question_it_answers():
-    """Her reply was LOGGED at 14:30 but really sent at 14:20; you answered at 14:25. Ordering by the logged time
-    would show your answer first."""
+    """Her reply was LOGGED at 14:30 but really sent at 14:20; you answered at 14:25."""
     ws = _two_campaign_ws()
-    records = ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records
-    for record in records:
+    for record in ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records:
         if record["ResponseID"] == "rA2":
             record["MessageDate"] = "2026-10-12 14:20:00"
     ws = _with_sent_mail(_sent("<m@gmail>", "2026-10-12 14:25:00", "I have just sent the request."), ws=ws)
     with hub(ws) as (at, _):
         _chronological(at)
-        assert _order_of(_thread_texts(at), "Also, do you cover shipping?", "I have just sent the request.")
+        assert _order_of(_bodies(at), "Also, do you cover shipping?", "I have just sent the request.")
 
 
 def test_the_same_conversation_is_complete_inside_the_campaigns_own_tab():
     ws = _with_sent_mail(_sent("<m1@gmail>", "2026-10-12 14:10:00", "We can offer $200 for six months."))
     with _campaign_tab(ws) as (at, _):
         assert list(at.exception) == [] and list(at.error) == []
-        texts = _thread_texts(at)
-        assert "We can offer $200 for six months." in texts and "Hi! Interested — what are your rates?" in texts
+        assert "We can offer $200 for six months." in _bodies(at) and "Hi! Interested — what are your rates?" in _bodies(at)
 
 
 def test_a_campaign_whose_sent_mail_tab_does_not_exist_yet_shows_no_error_and_no_note():
@@ -527,7 +877,7 @@ def test_if_the_sent_mail_cannot_be_loaded_the_conversation_still_shows_with_a_n
     ws[SENT_TAB] = Exploding([])
     with hub(ws) as (at, _):
         assert list(at.exception) == [] and list(at.error) == []
-        assert "Hi! Interested — what are your rates?" in _thread_texts(at)             # her replies are all still there
+        assert "Hi! Interested — what are your rates?" in _bodies(at)
         assert any("emails you sent yourself could not be loaded" in c.value for c in at.caption)
 
 
@@ -535,64 +885,58 @@ def test_another_campaigns_sent_mail_for_the_same_lead_number_is_never_mixed_in(
     ws = _with_sent_mail(_sent("<a5@gmail>", "2026-10-12 15:00:00", "Message to A's lead five", lead="5"))
     ws[f"{OTHER} Sent Mail"] = FakeWorksheet([_sent("<b5@gmail>", "2026-10-12 15:10:00", "Message to B's lead five", lead="5")])
     with hub(ws) as (at, _):
-        at.button(key=f"hub_open_{A5}").click()
-        at.run(timeout=25)
-        texts = _thread_texts(at)
-        assert "Message to A's lead five" in texts and "Message to B's lead five" not in texts
-        at.button(key=f"hub_open_{B5}").click()
-        at.run(timeout=25)
-        texts = _thread_texts(at)
-        assert "Message to B's lead five" in texts and "Message to A's lead five" not in texts
+        _open_conversation(at, A5)
+        assert "Message to A's lead five" in _bodies(at) and "Message to B's lead five" not in _bodies(at)
+        _open_conversation(at, B5)
+        assert "Message to B's lead five" in _bodies(at) and "Message to A's lead five" not in _bodies(at)
 
 
 def test_only_the_open_leads_messages_are_shown_not_another_leads_in_the_same_campaign():
-    ws = _with_sent_mail(_sent("<z@gmail>", "2026-10-12 15:00:00", "Written to Zed only", lead="5"))
-    with hub(ws) as (at, _):
-        assert "Written to Zed only" not in _thread_texts(at)                          # Kari (lead 1) is open
+    with hub(_with_sent_mail(_sent("<z@gmail>", "2026-10-12 15:00:00", "Written to Zed only", lead="5"))) as (at, _):
+        assert "Written to Zed only" not in _bodies(at)                             # Kari (lead 1) is open
 
 
 def test_a_sent_message_with_no_text_says_so_like_any_other_empty_email():
-    ws = _with_sent_mail(_sent("<empty@gmail>", "2026-10-12 14:10:00", ""))
+    with hub(_with_sent_mail(_sent("<empty@gmail>", "2026-10-12 14:10:00", ""))) as (at, _):
+        assert any("has no readable text" in c["empty"] for c in _cards(at))
+
+
+def test_hand_typed_messages_still_show_when_the_lead_cannot_be_found_in_the_master_sheet():
+    orphan = _resp("rZ", "77", '"Nobody Known" <nobody@abc.com>', "Re: Who?", "Who am I?", "2026-10-12 16:00:00",
+                   FullBody="Who am I replying to?", MessageDate="2026-10-12 15:50:00")
+    ws = _with_sent_mail(_sent("<o@gmail>", "2026-10-12 15:55:00", "Replying to someone not on the sheet", lead="77"),
+                         ws=_two_campaign_ws(extra_a_responses=[orphan]))
     with hub(ws) as (at, _):
-        assert any("has no readable text" in c.value for c in at.caption)
-
-
-def test_the_message_after_sending_a_reply_says_it_will_appear_in_the_conversation():
-    with hub() as (at, _):
-        at.text_area(key=f"hub_body_{A1}").set_value("Thanks!")
-        at.run(timeout=25)
-        at.button(key=f"hub_send_{A1}").click()
-        at.run(timeout=25)
-        assert any("will then appear in this conversation" in s.value for s in at.success)
+        _chronological(at)
+        assert _order_of(_bodies(at), "Who am I replying to?", "Replying to someone not on the sheet")
 
 
 def test_the_refresh_button_brings_in_messages_stored_since_the_page_loaded():
     ws = _with_sent_mail()
     with hub(ws) as (at, _):
-        assert "Newly stored message" not in _thread_texts(at)
+        assert "Newly stored message" not in _bodies(at)
         ws[SENT_TAB]._records.append(_sent("<new@gmail>", "2026-10-12 15:00:00", "Newly stored message"))
         at.run(timeout=25)
-        assert "Newly stored message" not in _thread_texts(at)                 # still the cached copy: it is only kept for a few seconds
+        assert "Newly stored message" not in _bodies(at)                          # still the cached copy
         next(b for b in at.button if b.label == "🔄 Refresh").click()
         at.run(timeout=25)
-        assert "Newly stored message" in _thread_texts(at)
+        assert "Newly stored message" in _bodies(at)
 
 
 def test_the_campaign_pages_refresh_data_button_does_the_same():
     ws = _with_sent_mail()
     with _campaign_tab(ws) as (at, _):
-        assert "Newly stored message" not in _thread_texts(at)
+        assert "Newly stored message" not in _bodies(at)
         ws[SENT_TAB]._records.append(_sent("<new@gmail>", "2026-10-12 15:00:00", "Newly stored message"))
         at.run(timeout=25)
-        assert "Newly stored message" not in _thread_texts(at)
+        assert "Newly stored message" not in _bodies(at)
         next(b for b in at.button if b.label == "🔄 Refresh data").click()
         at.run(timeout=25)
-        assert "Newly stored message" in _thread_texts(at)
+        assert "Newly stored message" in _bodies(at)
 
 
 def test_the_reported_conversation_shows_every_message_in_true_order():
-    """The reported case, with made-up content: a creator replied five times and you answered by hand six times
-    from the mailbox. Four of her replies were stored with no text until repaired (shown here as repaired)."""
+    """A creator replied five times and you answered by hand six times from the mailbox (made-up content)."""
     ws = _two_campaign_ws()
     ws[f"{FIXTURE_CAMPAIGN} Response Sheet"] = FakeWorksheet([
         _resp("r1", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "ask1", "2026-10-12 12:04:00", FullBody="Her message ONE", MessageDate="2026-10-12 12:00:00"),
@@ -604,96 +948,57 @@ def test_the_reported_conversation_shows_every_message_in_true_order():
     ])
     mine = [("2026-10-12 12:22:00", "My message ONE"), ("2026-10-12 12:46:00", "My message TWO"), ("2026-10-12 12:55:00", "My message THREE"),
             ("2026-10-12 13:13:00", "My message FOUR"), ("2026-10-14 14:32:00", "My message FIVE"), ("2026-10-14 17:47:00", "My message SIX")]
-    ws[SENT_TAB] = FakeWorksheet([_sent(f"<mine{i}@gmail>", at, text) for i, (at, text) in enumerate(mine, start=1)])
+    ws[SENT_TAB] = FakeWorksheet([_sent(f"<mine{i}@gmail>", at_, text) for i, (at_, text) in enumerate(mine, start=1)])
     with hub(ws) as (at, _):
         _chronological(at)
         assert list(at.exception) == []
-        texts = _thread_texts(at)
-        assert _order_of(texts, "Her message ONE", "My message ONE", "Her message TWO", "My message TWO", "My message THREE",
+        assert _order_of(_bodies(at), "Her message ONE", "My message ONE", "Her message TWO", "My message TWO", "My message THREE",
                          "Her message THREE", "Her message FOUR", "My message FOUR", "My message FIVE", "Her message FIVE", "My message SIX")
-        assert len([b for b in at.chat_message]) == 1 + 5 + 6                           # the template intro + all eleven
-        assert not any("has no readable text" in c.value for c in at.caption)
-
-
-def test_hand_typed_messages_still_show_when_the_lead_cannot_be_found_in_the_master_sheet():
-    orphan = _resp("rZ", "77", '"Nobody Known" <nobody@abc.com>', "Re: Who?", "Who am I?", "2026-10-12 16:00:00",
-                   FullBody="Who am I replying to?", MessageDate="2026-10-12 15:50:00")
-    ws = _with_sent_mail(_sent("<o@gmail>", "2026-10-12 15:55:00", "Replying to someone not on the sheet", lead="77"),
-                         ws=_two_campaign_ws(extra_a_responses=[orphan]))
-    with hub(ws) as (at, _):
-        _chronological(at)
-        texts = _thread_texts(at)
-        assert _order_of(texts, "Who am I replying to?", "Replying to someone not on the sheet")
-
-
-def test_a_long_list_is_capped_and_says_how_many_are_shown(monkeypatch):
-    monkeypatch.setattr(inbox_view, "MAX_ROWS", 2)
-    with hub() as (at, _):
-        assert len(_open_buttons(at)) == 2
-        assert any("3 conversations — showing the 2 most recent" in c.value for c in at.caption)
+        assert len(_cards(at)) == 1 + 5 + 6 and not any(c["empty"] for c in _cards(at))
 
 
 # ================================================================ a campaign's own Responses tab
-
-def _campaign_tab(ws=None, dispatch_error=None):
-    return _CampaignTab(ws or _two_campaign_ws(), dispatch_error)
-
-
-@contextlib.contextmanager
-def _CampaignTab(ws, dispatch_error=None):
-    captured, fake_create_file = _mock_github_writes()
-
-    def fake_dispatch(self, workflow_file, inputs, ref="main"):
-        if dispatch_error:
-            raise dispatch_error
-        captured.setdefault("dispatches", []).append((workflow_file, inputs))
-        return {"id": 1, "html_url": "https://github.com/x"}
-
-    with patch("gspread.authorize", return_value=type("C", (), {"open_by_key": lambda self, k: FakeSpreadsheet(ws)})()), \
-         patch("google.oauth2.service_account.Credentials.from_service_account_info", return_value=object()), \
-         patch("github_client.GitHubClient.create_file", fake_create_file), \
-         patch("github_client.GitHubClient.dispatch_workflow", fake_dispatch):
-        at = AppTest.from_file(CAMPAIGNS_PAGE)
-        at.secrets.update(_dashboard_secrets())
-        for key, value in _authed_session().items():
-            at.session_state[key] = value
-        at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
-        at.run(timeout=25)
-        yield at, captured
-
-
-TAB = f"tab_{FIXTURE_CAMPAIGN}"
-
 
 def test_the_campaign_tab_opens_in_the_inbox_layout_with_only_that_campaigns_conversations():
     with _campaign_tab() as (at, _):
         assert list(at.exception) == [], list(at.exception)
         assert list(at.error) == []
         assert at.radio(key=f"responses_view_{FIXTURE_CAMPAIGN}").value == "Inbox"
-        assert _row_keys(at, TAB) == [A1, A5]                                    # Campaign B's conversation is not here
+        assert _row_keys(at, TAB) == [A1, A5]                                       # Campaign B's conversation is not here
         assert at.session_state[f"{TAB}_selected"] == A1
-        assert len(at.tabs) == 6                                                  # the tab count is unchanged
+        assert len(at.tabs) == 6                                                    # the tab count is unchanged
 
 
 def test_the_campaign_tab_has_no_unread_tracking_so_nothing_is_marked_unread():
     with _campaign_tab() as (at, _):
-        assert not any(b.label.startswith("🔵") for b in _open_buttons(at, TAB))
+        assert not any(r["unread"] for r in _rows(at)) and all(r["nudge"] == "" for r in _rows(at))
         assert not any((b.key or "").startswith(f"{TAB}_mark_read_") for b in at.button)
+        assert "Unread" not in _rail_counts(at)                                     # no Unread item in the rail either
 
 
 def test_the_campaign_tab_does_not_repeat_the_campaign_name_on_every_row():
     with _campaign_tab() as (at, _):
-        captions = " ".join(c.value for c in at.caption)
-        assert f"{FIXTURE_CAMPAIGN} · " not in captions.replace("\\", "")
+        assert not any(FIXTURE_CAMPAIGN in r["meta"] for r in _rows(at)) and FIXTURE_CAMPAIGN not in _header(at)["email"]
+
+
+def test_the_all_campaigns_page_does_show_the_campaign_on_each_row_and_in_the_header():
+    with hub() as (at, _):
+        assert _header(at)["email"].endswith(f"· {FIXTURE_CAMPAIGN}")
+        rows = _rows(at)
+        assert rows[0]["meta"].startswith(FIXTURE_CAMPAIGN) and rows[1]["meta"].startswith(OTHER) and rows[2]["meta"].startswith(FIXTURE_CAMPAIGN)
 
 
 def test_the_campaign_tab_shows_the_conversation_and_opens_another():
     with _campaign_tab() as (at, _):
-        assert "Hi! Interested — what are your rates?" in _thread_texts(at)
-        at.button(key=f"{TAB}_open_{A5}").click()
-        at.run(timeout=25)
-        assert "Not for me, thanks." in _thread_texts(at)
-        assert "I am a different person entirely" not in _thread_texts(at)
+        assert "Hi! Interested — what are your rates?" in _bodies(at)
+        _open_conversation(at, A5, TAB)
+        assert "Not for me, thanks." in _bodies(at) and "I am a different person entirely" not in _bodies(at)
+
+
+def test_the_campaign_tab_rail_filters_its_own_list():
+    with _campaign_tab() as (at, _):
+        _click(at, f"ux_railbtn_{TAB}_not_interested")
+        assert _row_keys(at, TAB) == [A5] and at.session_state[f"{TAB}_selected"] == A5
 
 
 def test_the_campaign_tab_search_narrows_its_list():
@@ -708,31 +1013,22 @@ def test_the_campaign_tab_search_narrows_its_list():
 
 def test_a_reply_from_the_campaign_tab_sends_the_same_payload_and_waits_a_second_before_dispatch():
     with _campaign_tab() as (at, captured), patch.object(inbox_view.time, "sleep") as slept:
+        _compose(at, A1, TAB)
         at.text_area(key=f"{TAB}_body_{A1}").set_value("Thanks Kari!")
         at.run(timeout=25)
-        at.button(key=f"{TAB}_send_{A1}").click()
-        at.run(timeout=25)
+        _click(at, f"{TAB}_send_{A1}")
         assert list(at.exception) == [] and list(at.error) == []
         payload = _committed(captured)
         assert payload["to"] == "kari@abc.com" and payload["body"] == "Thanks Kari!"
         assert captured["dispatches"][0] == ("send_reply.yml", {"campaign": FIXTURE_CAMPAIGN, "payload_path": captured["commits"][0]["path"]})
-        assert any(call.args == (1.0,) for call in slept.call_args_list)          # as the tab always did
+        assert any(call.args == (1.0,) for call in slept.call_args_list)             # as the tab always did
         assert at.text_area(key=f"{TAB}_body_{A1}").value == ""
-
-
-def test_the_all_campaigns_page_does_not_pause_before_dispatch():
-    with hub() as (at, captured), patch.object(inbox_view.time, "sleep") as slept:
-        at.text_area(key=f"hub_body_{A1}").set_value("Quick reply")
-        at.run(timeout=25)
-        at.button(key=f"hub_send_{A1}").click()
-        at.run(timeout=25)
-        assert "dispatches" in captured and not any(call.args == (1.0,) for call in slept.call_args_list)
 
 
 def test_a_blank_reply_from_the_campaign_tab_is_refused():
     with _campaign_tab() as (at, captured):
-        at.button(key=f"{TAB}_send_{A1}").click()
-        at.run(timeout=25)
+        _compose(at, A1, TAB)
+        _click(at, f"{TAB}_send_{A1}")
         assert at.error and "commits" not in captured
 
 
@@ -740,15 +1036,13 @@ def test_the_campaign_tab_can_switch_back_to_the_classic_layout():
     with _campaign_tab() as (at, _):
         at.radio(key=f"responses_view_{FIXTURE_CAMPAIGN}").set_value("Classic")
         at.run(timeout=25)
-        assert list(at.exception) == []
-        assert any("View full conversation" in e.label for e in at.expander)
-        assert _open_buttons(at, TAB) == []
+        assert list(at.exception) == [] and any("View full conversation" in e.label for e in at.expander)
+        assert _open_buttons(at, TAB) == [] and _nodes(at, "ux-row") == []
 
 
 def test_a_campaign_with_no_replies_still_just_says_so():
     ws = _two_campaign_ws()
     ws[f"{FIXTURE_CAMPAIGN} Response Sheet"] = FakeWorksheet([])
     with _campaign_tab(ws) as (at, _):
-        assert list(at.exception) == []
-        assert any("No responses yet." in i.value for i in at.info)
-        assert not any(r.key == f"responses_view_{FIXTURE_CAMPAIGN}" for r in at.radio)    # nothing to lay out
+        assert list(at.exception) == [] and any("No responses yet." in i.value for i in at.info)
+        assert not _has(at.radio, f"responses_view_{FIXTURE_CAMPAIGN}")              # nothing to lay out
