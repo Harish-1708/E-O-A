@@ -1,0 +1,171 @@
+"""Page-level tests for the Performance page (pages/performance.py)."""
+import os
+from unittest.mock import patch
+
+import pytest
+import streamlit as st
+from streamlit.testing.v1 import AppTest
+
+from test_pages_smoke import (
+    FakeWorksheet, FakeSpreadsheet, FIXTURE_CAMPAIGN, PAGES_DIR, _dashboard_secrets, _authed_session,
+)
+
+PERFORMANCE_PAGE = os.path.join(PAGES_DIR, "performance.py")
+APP_FILE = os.path.join(PAGES_DIR, "..", "app.py")
+
+
+@pytest.fixture(autouse=True)
+def _clear_streamlit_caches():
+    st.cache_resource.clear()
+    st.cache_data.clear()
+    yield
+    st.cache_resource.clear()
+    st.cache_data.clear()
+
+
+def _run_page(fake_spreadsheet=None, authorize_error=None, interact=None):
+    authorize = {"side_effect": authorize_error} if authorize_error else {
+        "return_value": type("C", (), {"open_by_key": lambda self, k: fake_spreadsheet})()}
+    with patch("gspread.authorize", **authorize), \
+         patch("google.oauth2.service_account.Credentials.from_service_account_info", return_value=object()):
+        at = AppTest.from_file(PERFORMANCE_PAGE)
+        at.secrets.update(_dashboard_secrets())
+        for key, value in _authed_session().items():
+            at.session_state[key] = value
+        at.run(timeout=25)
+        if interact:
+            interact(at)
+            at.run(timeout=25)
+    return at
+
+
+def _sheet(leads, responses, send_log):
+    return FakeSpreadsheet({
+        f"{FIXTURE_CAMPAIGN} Master Sheet": FakeWorksheet(leads),
+        f"{FIXTURE_CAMPAIGN} Response Sheet": FakeWorksheet(responses),
+        f"{FIXTURE_CAMPAIGN} Custom Log Sheet": FakeWorksheet(send_log),
+    })
+
+
+def _realistic_sheet():
+    leads = [
+        {"LeadID": "1", "Email": "a@x.com", "IntroSentAt": "2026-09-01 10:00:00", "IntroVariant": "A", "ReplyStatus": "Replied", "Status": "Stopped - Replied"},
+        {"LeadID": "2", "Email": "b@x.com", "IntroSentAt": "2026-09-01 10:00:00", "IntroVariant": "B", "ReplyStatus": "Replied", "Status": "Stopped - Replied"},
+        {"LeadID": "3", "Email": "c@x.com", "IntroSentAt": "2026-09-01 10:00:00", "IntroVariant": "A", "ReplyStatus": "", "Status": "Intro Sent"},
+        {"LeadID": "4", "Email": "d@x.com", "IntroSentAt": "", "IntroVariant": "", "ReplyStatus": "", "Status": ""},
+    ]
+    responses = [{"ResponseID": "R1", "LeadID": "1", "ReceivedAt": "2026-09-02 10:00:00", "Classification": "Genuine Reply",
+                  "Intent": "Interested", "InReplyTo": "<m1@x>"},
+                 {"ResponseID": "R2", "LeadID": "2", "ReceivedAt": "2026-09-03 10:00:00", "Classification": "Genuine Reply",
+                  "Intent": "Not Interested", "InReplyTo": "<m2@x>"}]
+    send_log = [
+        {"Timestamp": "2026-09-01 10:00:00", "LeadID": "1", "Stage": "intro", "Variant": "A", "Status": "sent", "MessageID": "<m1@x>", "Error": ""},
+        {"Timestamp": "2026-09-01 10:05:00", "LeadID": "2", "Stage": "intro", "Variant": "B", "Status": "sent", "MessageID": "<m2@x>", "Error": ""},
+        {"Timestamp": "2026-09-01 10:10:00", "LeadID": "3", "Stage": "intro", "Variant": "A", "Status": "sent", "MessageID": "<m3@x>", "Error": ""},
+        {"Timestamp": "2026-09-01 10:15:00", "LeadID": "4", "Stage": "intro", "Variant": "A", "Status": "failed", "MessageID": "", "Error": "SMTP 550"},
+        {"Timestamp": "2026-09-03 10:00:00", "LeadID": "3", "Stage": "followup1", "Variant": "C", "Status": "sent", "MessageID": "<m4@x>", "Error": ""},
+    ]
+    return _sheet(leads, responses, send_log)
+
+
+def _headline_and_card_metrics(at):
+    """Several labels (Contacted, Reply rate) appear TWICE: once in the
+    headline row and once in the campaign card. A dict keeps only the last,
+    which would let a wrong headline hide behind a right card — so keep the
+    first occurrence (headline) and the last (campaign card) separately."""
+    pairs = [(m.label, m.value) for m in at.metric]
+    headline = {}
+    for label, value in pairs:
+        headline.setdefault(label, value)
+    card = {label: value for label, value in pairs}
+    return headline, card
+
+
+def test_performance_page_renders_with_the_right_headline_numbers(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    assert list(at.exception) == [], f"Performance page raised: {list(at.exception)}"
+    assert list(at.error) == [], f"Performance page showed an error: {[e.value for e in at.error]}"
+    headline, card = _headline_and_card_metrics(at)
+    assert headline["Contacted"] == "3"
+    assert headline["Emails sent"] == "4"               # 3 intros + 1 follow-up: deliberately not equal to Contacted
+    assert headline["Reply rate"] == "66.7%"            # 2 of 3 contacted replied...
+    assert headline["Positive replies"] == "1"          # ...but only one was positive (so the two cards can never be swapped unnoticed)
+    assert headline["Needs follow-up"] == "0"
+    assert headline["Failed sends"] == "1"
+    assert headline["Negotiating"] == "—"               # the Asana sync has not recorded stages: a dash, not a false zero
+    # the campaign card repeats the numbers, and must agree with the headline
+    assert (card["Contacted"], card["Sent"], card["Replies"], card["Reply rate"], card["Positive"]) == ("3", "4", "2", "66.7%", "1")
+    subheaders = [s.value for s in at.subheader]
+    for expected in ("Activity", "What the replies say", "What worked best?", "Follow-up stage effectiveness",
+                     "Template variants", "Deliverability", "Campaigns"):
+        assert expected in subheaders
+
+
+def test_the_page_shows_a_campaign_card_with_its_status(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    cards = " ".join(m.value for m in at.markdown)
+    assert FIXTURE_CAMPAIGN in cards
+
+
+def test_choosing_one_campaign_in_the_filter_shows_that_campaigns_numbers(fixture_repo):
+    def pick(at):
+        at.selectbox(key="performance_campaign").set_value(FIXTURE_CAMPAIGN)
+
+    at = _run_page(_realistic_sheet(), interact=pick)
+    assert list(at.exception) == []
+    headline, card = _headline_and_card_metrics(at)
+    assert headline["Contacted"] == "3" and headline["Reply rate"] == "66.7%" and card["Reply rate"] == "66.7%"
+
+
+def test_changing_the_chart_range_does_not_break_the_page(fixture_repo):
+    def pick(at):
+        at.selectbox(key="performance_range").set_value("All time")
+
+    at = _run_page(_realistic_sheet(), interact=pick)
+    assert list(at.exception) == [] and list(at.error) == []
+
+
+def test_the_page_says_so_plainly_for_a_campaign_with_no_activity(fixture_repo):
+    at = _run_page(_sheet([], [], []))
+    assert list(at.exception) == [] and list(at.error) == []
+    headline, card = _headline_and_card_metrics(at)
+    assert headline["Reply rate"] == "—" and headline["Contacted"] == "0"          # no data is a dash, never "0.0%"
+    assert card["Reply rate"] == "—"
+    infos = " ".join(i.value for i in at.info)
+    assert "Nothing has been sent or replied to yet." in infos and "No genuine replies yet." in infos
+
+
+def test_the_page_survives_a_sheet_that_cannot_be_read(fixture_repo):
+    at = _run_page(authorize_error=RuntimeError("no access to the Sheet"))
+    assert list(at.exception) == [], f"Performance page raised: {list(at.exception)}"
+    assert any("not shown yet" in e.label for e in at.expander)
+    assert any("No campaign has any activity" in i.value for i in at.info)
+
+
+def test_the_page_survives_a_campaign_whose_tabs_do_not_exist_yet(fixture_repo):
+    at = _run_page(FakeSpreadsheet({}))
+    assert list(at.exception) == []
+    assert any("not shown yet" in e.label for e in at.expander)
+
+
+def test_open_and_click_rates_are_deliberately_not_shown(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    labels = " ".join(m.label.lower() for m in at.metric)
+    assert "open" not in labels and "click" not in labels
+    assert "open and click rates are deliberately not shown" in " ".join(c.value.lower() for c in at.caption)
+
+
+def test_performance_page_is_strictly_read_only():
+    forbidden = ("dispatch_workflow", "create_file", "delete_file", "update_file", "GitHubClient",
+                 "append_row", "update_cell", "update_cells", "batch_update", "add_worksheet", "smtp_send", "sendmail")
+    for path in (PERFORMANCE_PAGE, os.path.join(PAGES_DIR, "..", "performance_logic.py")):
+        source = open(path, encoding="utf-8").read()
+        found = [token for token in forbidden if token in source]
+        assert found == [], f"{os.path.basename(path)} mentions write operations: {found}"
+
+
+def test_performance_is_registered_in_the_navigation_and_listed_on_home():
+    source = open(APP_FILE, encoding="utf-8").read()
+    assert 'st.Page("pages/performance.py"' in source
+    assert "performance_page" in source.split("st.navigation(")[1].split(")")[0]
+    assert "Performance" in source.split("def _home")[1]
