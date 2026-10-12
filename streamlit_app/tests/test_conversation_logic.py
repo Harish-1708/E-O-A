@@ -184,3 +184,58 @@ def test_a_real_body_still_wins_over_the_snippet_and_two_blank_ones_give_an_empt
         {"FullBody": "the whole message", "Snippet": "short", "ReceivedAt": "1", "From": ""},
         {"FullBody": "  \n", "Snippet": " ", "ReceivedAt": "2", "From": ""}])
     assert full["body"] == "the whole message" and none["body"] == ""
+
+
+# ================================================================ emails sent by hand / from the control panel
+
+def _sent(mid, at, lead="1", subject="Re: Hi", body="we can do $200", source="mailbox"):
+    return {"MessageID": mid, "LeadID": lead, "SentAt": at, "Subject": subject, "Body": body, "Source": source}
+
+
+def test_sent_mail_rows_become_outgoing_messages_with_their_real_text():
+    from conversation_logic import build_outgoing_messages_from_sent_mail
+    (message,) = build_outgoing_messages_from_sent_mail([_sent("<m@x>", "2026-09-04 16:52:30", subject="Re: Deal", body="We can do $200.")])
+    assert message == {"direction": "outgoing", "timestamp": "2026-09-04 16:52:30", "subject": "Re: Deal",
+                       "body": "We can do $200.", "source": "mailbox"}
+
+
+def test_only_the_leads_own_sent_mail_is_used():
+    from conversation_logic import filter_sent_mail_for_lead
+    rows = [_sent("<a@x>", "t", lead="1"), _sent("<b@x>", "t", lead="2"), _sent("<c@x>", "t", lead=1)]
+    assert [r["MessageID"] for r in filter_sent_mail_for_lead(rows, "1")] == ["<a@x>", "<c@x>"]      # a number from the Sheet matches too
+
+
+def test_a_reply_is_placed_by_when_it_was_really_sent_not_when_it_was_logged():
+    """REGRESSION in waiting: ReceivedAt is when the system LOGGED a reply, up to an hour or more after
+    she sent it. Once YOUR answers appear in the thread, ordering by that would put your answer BEFORE her question."""
+    from conversation_logic import build_conversation_thread
+    inbound = [{"ReceivedAt": "2026-09-04 17:27:14", "MessageDate": "2026-09-04 17:25:10", "FullBody": "Sounds great", "From": "a@x.com", "Subject": "Re: x"}]
+    mine = [_sent("<m@x>", "2026-09-04 17:26:00", body="I have sent the request")]
+    thread = build_conversation_thread({"_campaign_name": "Camp"}, {"LeadID": "1"}, inbound, mine)
+    assert [m["body"] for m in thread] == ["Sounds great", "I have sent the request"]               # she wrote at 17:25, you answered at 17:26
+
+
+def test_without_a_real_sent_time_a_reply_falls_back_to_when_it_was_logged():
+    from conversation_logic import build_incoming_messages_for_responses
+    (a, b) = build_incoming_messages_for_responses([
+        {"ReceivedAt": "2026-09-04 17:00:00", "MessageDate": "", "FullBody": "old row", "From": ""},
+        {"ReceivedAt": "2026-09-04 18:00:00", "MessageDate": "  ", "FullBody": "blank date", "From": ""}])
+    assert (a["timestamp"], b["timestamp"]) == ("2026-09-04 17:00:00", "2026-09-04 18:00:00")
+
+
+def test_the_whole_conversation_is_in_true_order_across_all_three_sources():
+    from conversation_logic import build_conversation_thread
+    lead = {"LeadID": "1", "IntroSentAt": "2026-09-04 14:36:00", "IntroVariant": "A", "FirstName": "Ann"}
+    inbound = [{"ReceivedAt": "2026-09-04 16:52:02", "MessageDate": "2026-09-04 16:48:00", "FullBody": "her first", "From": "", "Subject": ""},
+               {"ReceivedAt": "2026-09-04 17:03:32", "MessageDate": "2026-09-04 17:00:00", "FullBody": "her second", "From": "", "Subject": ""}]
+    mine = [_sent("<1@x>", "2026-09-04 16:52:00", body="my offer"), _sent("<2@x>", "2026-09-04 17:16:00", body="my agreement")]
+    bodies = [m["body"] for m in build_conversation_thread({"_campaign_name": "NoSuchTemplates"}, lead, inbound, mine)]
+    assert bodies == ["her first", "my offer", "her second", "my agreement"]       # the unrendered intro is skipped, as before
+
+
+def test_a_thread_built_the_old_way_without_sent_mail_is_unchanged():
+    from conversation_logic import build_conversation_thread
+    inbound = [{"ReceivedAt": "2026-09-04 17:00:00", "FullBody": "hi", "From": "", "Subject": ""}]
+    assert [m["body"] for m in build_conversation_thread({"_campaign_name": "C"}, {"LeadID": "1"}, inbound)] == ["hi"]
+    assert [m["body"] for m in build_conversation_thread({"_campaign_name": "C"}, {"LeadID": "1"}, inbound, None)] == ["hi"]
+    assert [m["body"] for m in build_conversation_thread({"_campaign_name": "C"}, {"LeadID": "1"}, inbound, [])] == ["hi"]
