@@ -37,20 +37,18 @@ Use the sidebar to navigate:
 - **🎯 Performance** — the business questions behind the counts: positive
   replies, which follow-up and template variant earn replies, how long a
   reply takes, negotiations and rights secured, and a "what worked best"
-  report. Read-only.
+  report — for all campaigns together, with a table of every campaign at a
+  glance. Each campaign shows its own Performance as its first tab. Read-only.
 - **🗂️ Campaigns** — the everyday view, and the only place you need for
   day-to-day work. Search, see every campaign's status (Draft/Running/
   Paused/Completed/Attention needed) at a glance, create a new one right
-  from here, and open any campaign for Analytics, Preview, Data,
-  Sequences, Schedule, Settings (with Send), and Responses (with Check
-  Replies). Start here.
+  from here, and open any campaign for its Performance, Data, Sequences,
+  Schedule, Settings (with Send), and Responses (with Check Replies).
+  Start here.
 - **💬 Responses** — every reply across every campaign in one place,
   filterable by status, campaign, and unread. Reply directly from here
   too — same tools as each campaign's own Responses tab, just spanning
   everything at once instead of one campaign at a time.
-- **📈 Overview** — every campaign at a glance: sent, pending, replies.
-- **📊 Dashboard** — deep-dive into one campaign's leads, sends, replies,
-  and errors.
 - **📧 Email Accounts** — add, edit, or remove sender accounts, see how
   much each has sent today, and their live connection status.
         """
@@ -66,10 +64,7 @@ today_page = st.Page("pages/today.py", title="Today", icon="📋")
 performance_page = st.Page("pages/performance.py", title="Performance", icon="🎯")
 campaigns_page = st.Page("pages/campaigns.py", title="Campaigns", icon="🗂️")
 responses_page = st.Page("pages/responses.py", title="Responses", icon="💬")
-overview_page = st.Page("pages/overview.py", title="Overview", icon="📈")
-dashboard_page = st.Page("pages/dashboard.py", title="Dashboard", icon="📊")
 email_accounts_page = st.Page("pages/email_accounts.py", title="Email Accounts", icon="📧")
 
-nav = st.navigation([home_page, today_page, performance_page, campaigns_page, responses_page, overview_page, dashboard_page,
-                     email_accounts_page])
+nav = st.navigation([home_page, today_page, performance_page, campaigns_page, responses_page, email_accounts_page])
 nav.run()
