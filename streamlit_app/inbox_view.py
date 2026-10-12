@@ -25,7 +25,9 @@ from inbox_logic import (
 )
 import outreach  # noqa: E402  (inbox_logic has put the repo root on sys.path)
 from config import WORKFLOW_SEND_REPLY  # noqa: E402
-from conversation_logic import build_conversation_thread, build_incoming_messages_for_responses  # noqa: E402
+from conversation_logic import (  # noqa: E402
+    build_conversation_thread, build_incoming_messages_for_responses, build_outgoing_messages_from_sent_mail,
+)
 from data_import_logic import payload_to_bytes  # noqa: E402
 from responses_hub_logic import all_response_keys_in_group  # noqa: E402
 from responses_reply_logic import (  # noqa: E402
@@ -62,6 +64,7 @@ class InboxContext:
     pending_sync_keys: Optional[Set[str]] = None
     show_campaign: bool = True
     pause_before_dispatch: float = 0.0                     # a campaign's own tab waits a second between commit and dispatch, as it always has
+    sent_for: Optional[Callable[[str, str], List[Dict]]] = None   # (campaign, lead_id) -> emails the team sent by hand / from the panel
 
 
 # ---------------------------------------------------------------- widget keys
@@ -132,7 +135,8 @@ def _send_reply(ctx: InboxContext, group: Dict, latest: Dict, lead: Optional[Dic
         _mark_read(ctx, group)
     st.session_state[k["body"]] = ""
     st.session_state[k["att_n"]] = st.session_state.get(k["att_n"], 0) + 1
-    st.session_state[k["result"]] = {"ok": True, "messages": ["Reply queued — it'll be sent within a minute or two."]}
+    st.session_state[k["result"]] = {"ok": True, "messages": [
+        "Reply queued — it'll be sent within a minute or two, and will then appear in this conversation."]}
 
 
 # ---------------------------------------------------------------- the left pane
@@ -166,11 +170,18 @@ def _thread_for(ctx: InboxContext, group: Dict, lead: Optional[Dict], campaign_n
     reply, in order. Without it we cannot re-render what was sent, so only the
     replies that arrived are shown — and the note says so."""
     every_reply = ctx.responses_for(campaign_name, group["lead_id"]) or group["messages"]
+    sent_by_hand, sent_note = [], ""
+    if ctx.sent_for is not None:
+        try:
+            sent_by_hand = ctx.sent_for(campaign_name, group["lead_id"]) or []
+        except Exception:  # noqa: BLE001 - the conversation must still show; only these messages are missing
+            sent_note = "The emails you sent yourself could not be loaded just now."
     if lead is None:
-        messages = sorted(build_incoming_messages_for_responses(every_reply), key=lambda m: m.get("timestamp", ""))
+        messages = sorted(build_incoming_messages_for_responses(every_reply)
+                          + build_outgoing_messages_from_sent_mail(sent_by_hand), key=lambda m: m.get("timestamp", ""))
         return messages, ("No matching lead was found in the Master Sheet (the reply may predate the lead being added), "
-                          "so only the messages received are shown, not the emails we sent.")
-    return build_conversation_thread(ctx.get_campaign_cfg(campaign_name), lead, every_reply), ""
+                          "so the emails the system sent are not shown." + (f" {sent_note}" if sent_note else ""))
+    return build_conversation_thread(ctx.get_campaign_cfg(campaign_name), lead, every_reply, sent_by_hand), sent_note
 
 
 def _render_bubble(message: Dict) -> None:
