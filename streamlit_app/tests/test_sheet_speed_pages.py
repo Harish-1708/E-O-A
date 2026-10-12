@@ -94,7 +94,7 @@ def test_campaign_page_reads_its_four_sheet_tabs_at_the_same_time(fixture_repo):
         at.run(timeout=30)
     assert list(at.exception) == []
     assert not gate["barrier"].broken           # all four really did meet
-    assert "By stage" in [h.value for h in at.subheader]   # and the page rendered with their data
+    assert "Follow-up stage effectiveness" in [h.value for h in at.subheader]   # and the Performance tab rendered with their data
 
 
 def test_google_worksheet_lookups_are_made_once_not_before_every_read(fixture_repo):
@@ -163,10 +163,13 @@ def test_campaigns_list_page_asks_for_concurrent_fetching(fixture_repo):
     assert seen.get("max_workers", 1) > 1
 
 
-def test_overview_page_asks_for_concurrent_fetching(fixture_repo):
-    import overview_logic
+def test_performance_page_asks_for_concurrent_fetching(fixture_repo):
+    """The Performance page reads every campaign's tabs; it must read the
+    campaigns at the same time (the speed-up the Overview page had), not one
+    after another."""
+    import performance_logic
     seen = {}
-    real = overview_logic.build_all_campaigns_overview
+    real = performance_logic.build_all_performance
 
     def spy(*args, **kwargs):
         seen.update(kwargs)
@@ -180,8 +183,8 @@ def test_overview_page_asks_for_concurrent_fetching(fixture_repo):
     })
     with patch("gspread.authorize", return_value=type("C", (), {"open_by_key": lambda self, k: ss})()), \
          patch("google.oauth2.service_account.Credentials.from_service_account_info", return_value=object()), \
-         patch("overview_logic.build_all_campaigns_overview", spy):
-        at = AppTest.from_file(os.path.join(PAGES_DIR, "overview.py"))
+         patch("performance_logic.build_all_performance", spy):
+        at = AppTest.from_file(os.path.join(PAGES_DIR, "performance.py"))
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
