@@ -230,8 +230,12 @@ def test_overview_and_dashboard_are_gone_from_the_app():
     assert 'pages/overview.py' not in source and 'pages/dashboard.py' not in source
     home = source.split("def _home")[1]
     assert "Overview" not in home and "Dashboard" not in home
-    for gone in ("pages/overview.py", "pages/dashboard.py", "overview_logic.py"):
-        assert not os.path.exists(os.path.join(PAGES_DIR, "..", gone)), gone
+    leftovers = [gone for gone in ("pages/overview.py", "pages/dashboard.py", "overview_logic.py", "tests/test_overview_logic.py")
+                 if os.path.exists(os.path.join(PAGES_DIR, "..", gone))]
+    assert not leftovers, (
+        "These old files should have been DELETED from the repo when the Overview and Dashboard pages were replaced by "
+        "Performance — nothing uses them any more. Delete: " + ", ".join(f"streamlit_app/{path}" for path in leftovers) +
+        ". (Delete tests/test_overview_logic.py together with overview_logic.py, or it will fail to import.)")
 
 
 def test_the_shared_view_is_read_only_too():
