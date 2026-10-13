@@ -56,7 +56,7 @@ PERFORMANCE_CSS = """
 .pf-table { width: 100%; border-collapse: collapse; border: 0 !important; margin: 0 !important; font-size: 13.5px; }
 .pf-table th, .pf-table td { border-left: 0 !important; border-right: 0 !important; border-top: 0 !important; background: transparent !important; }
 .pf-table th { text-align: left; color: #6b7280; font-weight: 600; font-size: 12.5px; text-transform: none; letter-spacing: 0; padding: 8px 10px; border-bottom: 1px solid #e5e7eb !important; white-space: nowrap; }
-.pf-table td { padding: 11px 10px; border-bottom: 1px solid #f0f2f5 !important; color: #111827; overflow-wrap: anywhere; }
+.pf-table td { padding: 11px 10px; border-bottom: 1px solid #f0f2f5 !important; color: #111827 !important; overflow-wrap: anywhere; }       /* (the theme colour otherwise leaks into some cells) */
 .pf-table tr:last-child td { border-bottom: 0 !important; } .pf-table td:first-child { font-weight: 600; }
 .pf-scroll { overflow-x: auto; }
 .pf-bar-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; font-size: 13px; }
@@ -176,9 +176,9 @@ def area_chart_svg(series: Sequence[Dict]) -> str:
         y = base - k * inner_h / 4
         value = k * step
         grid += (f'<line x1="{CHART_PAD_X}" x2="{CHART_WIDTH - CHART_PAD_X}" y1="{y:.1f}" y2="{y:.1f}" stroke="#eef0f4"/>'
-                 f'<text x="{CHART_PAD_X - 8}" y="{y + 4:.1f}" font-size="11" fill="#9ca3af" text-anchor="end">{value:g}</text>')
+                 f'<text x="{CHART_PAD_X - 8}" y="{y + 4:.1f}" font-size="9.5" fill="#9ca3af" text-anchor="end">{value:g}</text>')
     picks = sorted({0, count // 4, count // 2, (3 * count) // 4, count - 1})
-    labels = "".join(f'<text x="{x_at(i):.1f}" y="{CHART_HEIGHT - 8}" font-size="11" fill="#9ca3af" text-anchor="middle">{esc(_label_for(series[i].get("date")))}</text>' for i in picks)
+    labels = "".join(f'<text x="{x_at(i):.1f}" y="{CHART_HEIGHT - 8}" font-size="9.5" fill="#9ca3af" text-anchor="middle">{esc(_label_for(series[i].get("date")))}</text>' for i in picks)
 
     def line(values):
         return "M" + " L".join(f"{x_at(i):.1f},{y_at(v):.1f}" for i, v in enumerate(values))
