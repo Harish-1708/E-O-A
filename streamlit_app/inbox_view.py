@@ -18,6 +18,7 @@ from typing import Callable, Dict, List, Optional, Set
 import streamlit as st
 
 import inbox_html as H
+import inbox_keywords as K
 from inbox_logic import MAX_ROWS, md_escape, build_conversation_rows, resolve_selection, conversation_key, sender_display
 import outreach  # noqa: E402  (inbox_logic has put the repo root on sys.path)
 from config import WORKFLOW_SEND_REPLY  # noqa: E402
@@ -213,14 +214,29 @@ def _thread_for(ctx: InboxContext, group: Dict, lead: Optional[Dict], campaign_n
 
 
 def _conversation_intent(group: Dict, row: Dict):
-    """(intent, confidence) for the whole conversation: from the newest message that HAS an AI reading. A later
-    follow-up that was never classified must not turn an 'interested' conversation into 'unclear', and a later
-    'not interested' still overrides an earlier 'interested'."""
+    """(intent, note) for the whole conversation, newest message first:
+      1. the AI's reading, if it gave a definite one (anything but Unclear) — it always wins;
+      2. otherwise what the words say, by keywords (inbox_keywords): 'not interested', 'no thank you', 'sounds good'…
+    A later follow-up that says nothing clear must not turn an 'interested' conversation into 'unclear', and a later
+    'not interested' still overrides an earlier 'interested'. A keyword reading of Lead (a question, a mention of money)
+    is only a hint: it is used when nothing clearer exists anywhere in the conversation. The note says where the
+    reading came from, so a label worked out from keywords is never passed off as the AI's."""
+    weak = None
     for message in sorted(group["messages"], key=lambda m: str(m.get("MessageDate") or m.get("ReceivedAt") or ""), reverse=True):
         intent = (message.get("Intent") or "").strip()
-        if intent:
-            return intent, (message.get("IntentConfidence") or "").strip()
-    return row["intent"], row["intent_confidence"]
+        if intent and intent.lower() != "unclear":
+            confidence = (message.get("IntentConfidence") or "").strip()
+            return intent, (f"{confidence} confidence" if confidence else "")
+        if not str(message.get("Classification") or "").lower().startswith("genuine"):
+            continue                                              # an auto-reply's words are not the person's answer
+        words = next((v for v in (message.get("FullBody"), message.get("Snippet")) if (v or "").strip()), "")
+        reading = K.keyword_reading(words)
+        if reading and not K.is_weak(reading[0]):
+            return reading[0], "by keywords"
+        weak = weak or reading
+    if weak:
+        return weak[0], "by keywords"
+    return row["intent"], (f"{row['intent_confidence']} confidence" if row["intent_confidence"] else "")
 
 
 def _card_for(message: Dict, row: Dict) -> str:
@@ -290,7 +306,7 @@ def _render_conversation(group: Dict, row: Dict, ctx: InboxContext) -> None:
         chips.append(row["stopped_status"])
     address = row["email"] + (f" · {campaign_name}" if ctx.show_campaign else "")
     st.markdown(H.thread_header_html(row["name"], address, H.status_of(row["intent"], row["classification"]), chips,
-                                     f"{row['intent_confidence']} confidence" if row["intent_confidence"] else ""),
+                                     row["intent_note"]),
                 unsafe_allow_html=True)
 
     messages, note = _thread_for(ctx, group, lead, campaign_name)
@@ -310,6 +326,7 @@ def _render_conversation(group: Dict, row: Dict, ctx: InboxContext) -> None:
             st.button(f"✓ Mark as read ({row['unread_count']})", key=k["mark_read"], on_click=_mark_read, args=(ctx, group))
         with st.popover("⋯"):
             st.checkbox("Newest message first", value=True, key=f"{ns}_newest_first")
+            st.radio("Text size", list(H.SIZES), index=list(H.SIZES).index(H.DEFAULT_SIZE), key=f"{ns}_size", horizontal=True)
     if st.session_state.get(k["composer"], False):
         _render_composer(ctx, group, latest, lead, campaign_name, gk)
 
@@ -322,11 +339,12 @@ def render_inbox(groups: List[Dict], ctx: InboxContext) -> None:
     if not groups:
         return
     ns = ctx.namespace
-    st.markdown(f"<style>{H.INBOX_CSS}</style>", unsafe_allow_html=True)
+    scale = H.SIZES.get(st.session_state.get(f"{ns}_size", H.DEFAULT_SIZE), H.SIZES[H.DEFAULT_SIZE])
+    st.markdown(f"<style>{H.inbox_css(scale)}</style>", unsafe_allow_html=True)
     all_rows = build_conversation_rows(groups, ctx.read_keys, ctx.leads_for)
     by_key = {conversation_key(g): g for g in groups}
     for row in all_rows:
-        row["intent"], row["intent_confidence"] = _conversation_intent(by_key[row["key"]], row)
+        row["intent"], row["intent_note"] = _conversation_intent(by_key[row["key"]], row)
     category = {r["key"]: H.status_of(r["intent"], r["classification"]) for r in all_rows}
 
     items = [("all", "All", "📥", len(all_rows))]
@@ -348,7 +366,7 @@ def render_inbox(groups: List[Dict], ctx: InboxContext) -> None:
     st.session_state[selected_key] = selected
 
     with st.container(key=f"ux_shell_{ns}"):
-        rail_col, list_col, thread_col = st.columns([1.5, 2.9, 6.1], gap="small")
+        rail_col, list_col, thread_col = st.columns([1.35, 3.0, 5.9], gap="small")
         with rail_col:
             _render_rail(ctx, items, active, rail_key)
         with list_col:
