@@ -285,3 +285,28 @@ def test_table_headers_are_plain_case_with_no_letter_spacing_because_spaced_capi
     css = P.PERFORMANCE_CSS
     header_rule = css[css.index(".pf-table th {"):css.index("}", css.index(".pf-table th {"))]
     assert "letter-spacing: 0" in header_rule and "text-transform: none" in header_rule and "uppercase" not in header_rule
+
+
+# ================================================================ table cells with a small bar
+
+@pytest.mark.parametrize("fraction, width", [(0, 0), (0.5, 50), (1, 100), (0.333, 33), (1.7, 100), (-0.2, 0), (float("nan"), 0), (None, 0), ("lots", 0), ("0.25", 25)])
+def test_a_bar_cell_is_scaled_clamped_and_never_breaks_on_a_bad_number(fraction, width):
+    markup = P.table_html(["Account", "Rate"], [["a", P.bar_cell(fraction, "12.0%")]])
+    assert f'class="pf-minibar"><i style="width:{width}%"></i></span><span>12.0%</span>' in markup
+
+
+def test_a_bar_cells_text_is_escaped_and_the_width_can_never_carry_markup():
+    markup = P.table_html(["A", "B"], [["x", P.bar_cell('"><script>alert(1)</script>', HOSTILE)]])
+    assert "<script" not in markup and "&lt;script&gt;" in markup and 'style="width:0%"' in markup
+    found = _scan(markup)
+    assert found.tags <= SAFE_TAGS and found.attrs <= SAFE_ATTRS
+
+
+def test_an_ordinary_cell_and_a_bar_cell_can_share_a_row_and_a_short_row_is_still_padded():
+    markup = P.table_html(["A", "B", "C"], [["1", P.bar_cell(1, "x")], ["only"]])
+    assert markup.count("<td>") == 6 and markup.count("pf-cellbar") == 1
+
+
+def test_the_bar_is_styled_in_the_stylesheet():
+    css = P.PERFORMANCE_CSS
+    assert ".pf-cellbar { display: flex; align-items: center;" in css and ".pf-minibar i { display: block; height: 100%;" in css
