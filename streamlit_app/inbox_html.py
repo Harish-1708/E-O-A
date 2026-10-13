@@ -11,7 +11,7 @@ Nothing here reads a Sheet, sends anything or knows about Streamlit.
 """
 import html
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 # ----------------------------------------------------------------------------- small pure helpers
@@ -78,7 +78,7 @@ def waiting_nudge(unread: bool, received_at, now: Optional[datetime] = None) -> 
     moment = _parse(received_at)
     if not unread or not moment:
         return ""
-    days = ((now or datetime.utcnow()) - moment).days
+    days = ((now or datetime.now(timezone.utc).replace(tzinfo=None)) - moment).days
     if days < 1:
         return ""
     return f"Received {days} day{'s' if days != 1 else ''} ago. Reply?"
@@ -191,11 +191,24 @@ def _body_lines_html(body: str) -> str:
     return "".join(out)
 
 
-def card_html(subject: str, from_text: str, to_text: str, timestamp, body: str, empty_note: str = "") -> str:
-    """One email as a card: large subject, From / To with the date at the right, a divider, then the body."""
+CLAMP_LINES, CLAMP_CHARS = 12, 1100
+
+
+def needs_clamp(body) -> bool:
+    """True for an email long enough that it is worth cropping with a "Read more": more than 12 lines, or more than
+    ~1,100 characters (a long paragraph can be a single line)."""
+    text = str(body or "")
+    return text.count("\n") + 1 > CLAMP_LINES or len(text) > CLAMP_CHARS
+
+
+def card_html(subject: str, from_text: str, to_text: str, timestamp, body: str, empty_note: str = "", clamp: bool = False) -> str:
+    """One email as a card: large subject, From / To with the date at the right, a divider, then the body.
+    With `clamp=True` a long body is cropped to about a dozen lines and faded out (the whole email is still on the
+    page; the view offers "Read more" to remove the crop)."""
     shown_date = card_date(timestamp)
     date_html = f'<span class="ux-card-date">{esc(shown_date)} UTC</span>' if shown_date else ""
-    content = (f'<div class="ux-body">{_body_lines_html(body)}</div>' if str(body or "").strip()
+    cropped = " ux-clamped" if clamp and needs_clamp(body) else ""
+    content = (f'<div class="ux-body{cropped}">{_body_lines_html(body)}</div>' if str(body or "").strip()
                else f'<div class="ux-empty">{esc(empty_note)}</div>')
     return (f'<div class="ux-card"><div class="ux-title">{esc(subject) or "(no subject)"}</div>'
             f'<div class="ux-fromrow"><div class="ux-meta-line"><b>From:</b> {esc(from_text)}</div>{date_html}</div>'
@@ -295,9 +308,17 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
 .ux-rule { height: 1px; background: #e5e7eb; margin: 14px 0 18px; }
 .ux-body { font-size: 14px; line-height: 1.6; color: #111827; word-break: break-word; }
 .ux-line { min-height: 1.6em; white-space: pre-wrap; }
+.ux-body.ux-clamped { position: relative; max-height: 20em; overflow: hidden; }
+.ux-body.ux-clamped::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 5em; background: linear-gradient(to bottom, rgba(255,255,255,0), #fff); }
 .ux-qline { min-height: 1.6em; white-space: pre-wrap; color: #6b7280; border-left: 3px solid #e5e7eb; padding-left: 12px; }
 .ux-empty { font-size: 13px; color: #6b7280; background: #f9fafb; border-radius: 8px; padding: 12px 14px; }
 .ux-placeholder { text-align: center; color: #6b7280; font-size: 14px; padding: 80px 20px; }
+
+/* ---- "Read more" under a long email, and "Show earlier emails" in a long conversation */
+[class*="st-key-ux_more_"] button { background: transparent; border: 0; color: #2563eb; font-size: 13px; font-weight: 600; padding: 0 4px; min-height: 0; margin: -6px 0 14px; box-shadow: none; }
+[class*="st-key-ux_more_"] button:hover { color: #1d4ed8; background: transparent; text-decoration: underline; }
+[class*="st-key-ux_expand_"] button { width: 100%; background: #f3f6fb; border: 1px solid #dbe3f0; color: #1f3b73; border-radius: 10px; font-size: 13px; font-weight: 600; min-height: 38px; margin: 0 0 14px; }
+[class*="st-key-ux_expand_"] button:hover { background: #e8eef9; border-color: #c5d3ec; color: #16295a; }
 
 /* ---- the Reply bar: a row of buttons sized to their text */
 [class*="st-key-ux_bar_"] { flex-direction: row !important; align-items: center; background: #fff; border-top: 1px solid #e5e7eb; padding: 12px 20px; gap: 10px !important; }
