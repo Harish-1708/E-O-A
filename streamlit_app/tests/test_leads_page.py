@@ -4,14 +4,16 @@ import contextlib
 import html
 import os
 import re
+from datetime import date, timedelta
 from unittest.mock import patch
 
 import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+import leads_actions
 import preview_logic
-from leads_logic import manage_label
+from github_client import GitHubActionsError
 from test_pages_smoke import (
     FakeWorksheet, FakeSpreadsheet, FIXTURE_CAMPAIGN, PAGES_DIR, _dashboard_secrets, _authed_session, _mock_github_writes,
 )
@@ -60,10 +62,12 @@ def _ws(leads, extra=None):
 
 
 @contextlib.contextmanager
-def data_tab(leads):
+def data_tab(leads, dispatch_error=None):
     captured, fake_create_file = _mock_github_writes()
 
     def fake_dispatch(self, workflow_file, inputs, ref="main"):
+        if dispatch_error:
+            raise dispatch_error
         captured.setdefault("dispatches", []).append((workflow_file, inputs))
         return {"id": 1, "html_url": "https://github.com/x"}
 
@@ -117,6 +121,10 @@ def _click(at, key):
 
 def _stage_count():
     return len(preview_logic.get_campaign_cfg(FIXTURE_CAMPAIGN)["stages"])
+
+
+def _has(widgets, key):
+    return any(w.key == key for w in widgets)
 
 
 def _caption(at):
@@ -233,10 +241,10 @@ def test_exactly_one_page_has_no_next_button_enabled():
 
 # ================================================================ the side panel and the Manage menu
 
-def test_with_nothing_chosen_the_panel_says_to_select_a_lead_and_manage_stays_on_its_default():
+def test_with_nothing_chosen_the_panel_says_to_select_a_lead_and_shows_no_controls():
     with data_tab([lead(1)]) as (at, _):
-        assert "Select a lead in the table" in _markup(at) and at.selectbox(key="manage_lead_select").value == "-- Select --"
-        assert not any(r["selected"] for r in _rows(at))
+        assert "Select a lead in the table" in _markup(at) and not any(r["selected"] for r in _rows(at))
+        assert not any((w.key or "").startswith(("manage_", "remove_")) for w in list(at.button) + list(at.selectbox))
 
 
 def test_clicking_a_row_opens_that_lead_in_the_panel_with_its_timeline():
@@ -248,44 +256,6 @@ def test_clicking_a_row_opens_that_lead_in_the_panel_with_its_timeline():
         panel = _panel(at)
         for text in ("First2 Last2", "lead2@example.com", "Replied", "Lead ID", "Company 2", "sales2@x.com", "Negotiating", "Intro sent", "Follow-up 1 sent", "Oct 9", "Oct 11", "Replied", "Follow-ups stopped automatically"):
             assert text in panel, text
-
-
-def test_clicking_a_row_points_the_existing_manage_menu_at_that_lead_and_opens_it():
-    leads = [lead(1), lead(2)]
-    with data_tab(leads) as (at, _):
-        _click(at, "data_open_2")
-        assert at.selectbox(key="manage_lead_select").value == manage_label(leads[1]) == "2 — First2 Last2 <lead2@example.com>"
-        assert at.selectbox(key="manage_lead_select").value in at.selectbox(key="manage_lead_select").options
-        manage = next(e for e in at.expander if "Manage a lead" in e.label)
-        assert manage.proto.expanded is True
-
-
-def test_the_manage_expander_stays_closed_until_a_lead_is_chosen():
-    with data_tab([lead(1)]) as (at, _):
-        assert next(e for e in at.expander if "Manage a lead" in e.label).proto.expanded is False
-
-
-def test_a_row_click_then_save_sends_the_change_for_exactly_that_lead():
-    """The whole chain: click a row, pick a status in the existing menu, Save — the workflow gets THAT lead's address."""
-    with data_tab([lead(1), lead(2), lead(3)]) as (at, captured):
-        _click(at, "data_open_3")
-        at.selectbox(key="manage_lead_status").set_value("Stop sending to this lead")
-        at.run(timeout=30)
-        _click(at, "manage_lead_save")
-        assert list(at.exception) == [] and list(at.error) == []
-        assert captured["dispatches"] == [("set_lead_override.yml", {"campaign": FIXTURE_CAMPAIGN, "email": "lead3@example.com", "status": "Stop sending to this lead", "asana_stage": "(no change)"})]
-
-
-def test_a_lead_chosen_then_filtered_out_closes_the_panel_and_resets_the_manage_menu_without_an_error():
-    leads = [lead(1, Status="Stopped - Replied"), lead(2)]
-    with data_tab(leads) as (at, _):
-        _click(at, "data_open_2")
-        assert at.selectbox(key="manage_lead_select").value != "-- Select --"
-        at.radio(key="data_filter").set_value("Replied")
-        at.run(timeout=30)
-        assert list(at.exception) == [] and list(at.error) == []
-        assert _open_keys(at) == ["1"] and not any(r["selected"] for r in _rows(at)) and "Select a lead in the table" in _markup(at)
-        assert at.selectbox(key="manage_lead_select").value == "-- Select --"
 
 
 def test_the_chosen_lead_stays_chosen_when_you_turn_to_another_page_and_back():
@@ -331,17 +301,6 @@ def test_hostile_text_from_a_csv_is_shown_as_text_in_the_table_and_the_panel_and
 
 # ================================================================ the writes are untouched
 
-def test_the_remove_and_manage_sections_are_still_there_with_their_original_widgets():
-    with data_tab([lead(1), lead(2)]) as (at, _):
-        assert any("Remove leads" in e.label for e in at.expander) and any("Manage a lead" in e.label for e in at.expander)
-        assert any(ms.key == "remove_select" for ms in at.multiselect)
-        assert any(sb.key == "manage_lead_select" for sb in at.selectbox)
-        assert not any(sb.key in ("manage_lead_status", "manage_lead_asana_stage") for sb in at.selectbox)       # these only appear once a lead is chosen, as always
-        at.selectbox(key="manage_lead_select").set_value(manage_label(lead(2)))
-        at.run(timeout=30)
-        assert [sb.key for sb in at.selectbox if sb.key in ("manage_lead_status", "manage_lead_asana_stage")] == ["manage_lead_status", "manage_lead_asana_stage"]
-
-
 # ================================================================ gaps found by deliberately breaking the view
 
 def test_a_new_search_returns_to_page_one_even_when_there_are_still_several_pages():
@@ -370,7 +329,7 @@ def test_a_leads_key_is_the_same_whatever_the_filter_even_when_ids_repeat():
         at.run(timeout=30)
         assert _open_keys(at) == ["5#2"]                                               # it is still the SECOND lead 5, not "5"
         _click(at, "data_open_5#2")
-        assert "second@example.com" in _panel(at) and at.selectbox(key="manage_lead_select").value.endswith("<second@example.com>")
+        assert "second@example.com" in _panel(at) and _has(at.button, "manage_save_5#2") and not _has(at.button, "manage_save_5")
 
 
 def test_the_stylesheet_is_put_on_the_page_exactly_once():
@@ -393,3 +352,285 @@ def test_using_the_lead_browser_never_re_reads_the_google_sheet():
         at.radio(key="data_filter").set_value("In Progress")
         at.run(timeout=30)
         assert list(at.exception) == [] and captured["master"].read_call_count == reads
+
+
+
+# ================================================================ managing and removing the open lead, in its own panel
+
+def _days_ago(n):
+    return (date.today() - timedelta(days=n)).strftime("%Y-%m-%d 09:00:00")
+
+
+def _commits(captured):
+    return captured.get("commits", [])
+
+
+def test_opening_a_lead_shows_its_manage_and_remove_controls_with_nothing_chosen_yet():
+    with data_tab([lead(1), lead(2)]) as (at, captured):
+        _click(at, "data_open_2")
+        assert at.selectbox(key="manage_status_2").value == "(no change)" and at.selectbox(key="manage_asana_2").value == "(no change)"
+        assert at.selectbox(key="manage_status_2").options == ["(no change)", "Stop sending to this lead", "Clear override (resume normal sending)"]
+        assert "Rights Secured" in at.selectbox(key="manage_asana_2").options and "Clear override (resume automatic tracking)" in at.selectbox(key="manage_asana_2").options
+        assert _has(at.button, "manage_save_2") and _has(at.button, "remove_ask_2")
+        assert not _has(at.button, "manage_save_1") and not _has(at.button, "remove_ask_1")                  # only for the lead that is open
+        assert "commits" not in captured and "dispatches" not in captured
+
+
+def test_saving_with_nothing_changed_says_so_and_sends_nothing():
+    with data_tab([lead(1)]) as (at, captured):
+        _click(at, "data_open_1")
+        _click(at, "manage_save_1")
+        assert list(at.exception) == [] and any("Nothing selected to change." in w.value for w in at.warning) and "dispatches" not in captured
+
+
+def test_stopping_sending_to_the_open_lead_sends_exactly_its_address_and_the_choice():
+    with data_tab([lead(1), lead(2), lead(3)]) as (at, captured):
+        _click(at, "data_open_3")
+        at.selectbox(key="manage_status_3").set_value("Stop sending to this lead")
+        at.run(timeout=30)
+        _click(at, "manage_save_3")
+        assert list(at.exception) == [] and list(at.error) == []
+        assert captured["dispatches"] == [("set_lead_override.yml", {"campaign": FIXTURE_CAMPAIGN, "email": "lead3@example.com", "status": "Stop sending to this lead", "asana_stage": "(no change)"})]
+        assert any("Update triggered for lead3@example.com" in s.value for s in at.success)
+
+
+def test_setting_only_the_asana_stage_sends_that_and_no_status_change():
+    with data_tab([lead(1)]) as (at, captured):
+        _click(at, "data_open_1")
+        at.selectbox(key="manage_asana_1").set_value("Negotiating")
+        at.run(timeout=30)
+        _click(at, "manage_save_1")
+        assert captured["dispatches"][0][1] == {"campaign": FIXTURE_CAMPAIGN, "email": "lead1@example.com", "status": "(no change)", "asana_stage": "Negotiating"}
+
+
+def test_a_status_chosen_for_one_lead_is_not_still_chosen_when_you_open_another():
+    """The dangerous case this panel must never allow: choose 'Stop sending' for lead 1, click lead 2, press Save."""
+    with data_tab([lead(1), lead(2)]) as (at, captured):
+        _click(at, "data_open_1")
+        at.selectbox(key="manage_status_1").set_value("Stop sending to this lead")
+        at.run(timeout=30)
+        _click(at, "data_open_2")
+        assert at.selectbox(key="manage_status_2").value == "(no change)"
+        _click(at, "manage_save_2")
+        assert any("Nothing selected to change." in w.value for w in at.warning) and "dispatches" not in captured
+        _click(at, "data_open_1")
+        assert at.selectbox(key="manage_status_1").value == "(no change)"                                    # and lead 1's own choice did not linger either
+
+
+def test_a_failed_save_shows_the_reason_and_changes_nothing_else():
+    with data_tab([lead(1)], dispatch_error=GitHubActionsError("boom")) as (at, _):
+        _click(at, "data_open_1")
+        at.selectbox(key="manage_status_1").set_value("Stop sending to this lead")
+        at.run(timeout=30)
+        _click(at, "manage_save_1")
+        assert list(at.exception) == [] and any("Failed to trigger update: boom" in e.value for e in at.error)
+
+
+def test_the_current_status_and_override_are_shown_and_escaped():
+    with data_tab([lead(1, Status="Stopped - Manual", ManualAsanaStage="Negotiating"), lead(2, Status="[x](http://evil.example) **bold**")]) as (at, _):
+        _click(at, "data_open_1")
+        assert "Current status: **Stopped \\- Manual** · Asana stage override: **Negotiating**" in _caption(at)
+        _click(at, "data_open_2")
+        assert "\\[x\\]\\(http" in _caption(at) and "\\*\\*bold\\*\\*" in _caption(at)
+
+
+def test_a_lead_with_no_email_cannot_be_changed_from_the_panel_but_the_page_still_works():
+    with data_tab([lead(1, Email="")]) as (at, _):
+        _click(at, "data_open_1")
+        assert list(at.exception) == [] and "no email address" in _caption(at) and not _has(at.button, "manage_save_1")
+
+
+# ---- removing one lead
+
+def _remove_one(at, key):
+    _click(at, f"data_open_{key}")
+    _click(at, f"remove_ask_{key}")
+
+
+def test_removing_asks_for_a_second_click_and_writes_nothing_until_it_is_given():
+    with data_tab([lead(1), lead(2)]) as (at, captured):
+        _remove_one(at, "2")
+        assert any("Remove" in w.value and "lead2\\@example\\.com" in w.value for w in at.warning)          # the address is escaped like all text from the Sheet
+        assert _has(at.button, "remove_yes_2") and _has(at.button, "remove_cancel_2") and not _has(at.button, "remove_ask_2")
+        assert _commits(captured) == [] and "dispatches" not in captured
+
+
+def test_cancelling_a_removal_goes_back_and_writes_nothing():
+    with data_tab([lead(1)]) as (at, captured):
+        _remove_one(at, "1")
+        _click(at, "remove_cancel_1")
+        assert _has(at.button, "remove_ask_1") and not _has(at.button, "remove_yes_1") and _commits(captured) == [] and "dispatches" not in captured
+
+
+def test_confirming_removes_exactly_that_lead_with_the_same_payload_and_workflow_as_always():
+    import json
+    with data_tab([lead(1), lead(2), lead(3)]) as (at, captured), patch.object(leads_actions.time, "sleep"):
+        _remove_one(at, "3")
+        _click(at, "remove_yes_3")
+        assert list(at.exception) == [] and list(at.error) == []
+        assert json.loads(_commits(captured)[0]["content"].decode("utf-8")) == {"lead_ids": ["3"]}
+        path = _commits(captured)[0]["path"]
+        assert path.startswith("removals/") and FIXTURE_CAMPAIGN in path
+        assert captured["dispatches"] == [("remove_leads.yml", {"campaign": FIXTURE_CAMPAIGN, "payload_path": path})]
+        assert any("Removal triggered" in s.value for s in at.success)
+        assert _has(at.button, "remove_ask_3")                                                                 # back to the plain button, not stuck on the question
+
+
+def test_a_failed_removal_shows_the_reason():
+    with data_tab([lead(1)], dispatch_error=GitHubActionsError("boom")) as (at, _), patch.object(leads_actions.time, "sleep"):
+        _remove_one(at, "1")
+        _click(at, "remove_yes_1")
+        assert list(at.exception) == [] and any("Removal failed: boom" in e.value for e in at.error)
+
+
+def test_a_removal_waiting_for_confirmation_is_cancelled_by_opening_another_lead():
+    with data_tab([lead(1), lead(2)]) as (at, captured):
+        _remove_one(at, "1")
+        _click(at, "data_open_2")
+        assert _has(at.button, "remove_ask_2") and not _has(at.button, "remove_yes_2")
+        _click(at, "data_open_1")
+        assert _has(at.button, "remove_ask_1") and not _has(at.button, "remove_yes_1") and _commits(captured) == []     # not waiting any more
+
+
+def test_a_lead_with_no_id_cannot_be_removed_from_the_panel():
+    with data_tab([lead("", Email="noid@example.com")]) as (at, _):
+        _click(at, "data_open_noid@example.com")
+        assert "no Lead ID" in _caption(at) and not any((b.key or "").startswith("remove_") for b in at.button)
+
+
+def test_removing_several_leads_at_once_is_still_available_and_unchanged():
+    with data_tab([lead(1), lead(2)]) as (at, _):
+        assert any("Remove several leads at once" in e.label for e in at.expander) and _has(at.multiselect, "remove_select")
+        assert not any("Manage a lead" in e.label for e in at.expander)                                       # the common Manage section is gone
+
+
+# ================================================================ the extra filters
+
+def _filter_leads():
+    return [lead(1, SenderAccount="sales1", IntroSentAt=_days_ago(0)), lead(2, SenderAccount="sales2", IntroSentAt=_days_ago(10), FollowUp1SentAt=_days_ago(3)),
+            lead(3, SenderAccount="sales1", IntroSentAt=_days_ago(60)), lead(4, SenderAccount="", IntroSentAt=_days_ago(5), FollowUp1SentAt=_days_ago(5), FollowUp2SentAt=_days_ago(5)),
+            lead(5, SenderAccount="sales2")]
+
+
+def test_the_three_extra_filters_are_offered_with_the_real_options():
+    with data_tab(_filter_leads()) as (at, _):
+        assert at.selectbox(key="data_filter_sender").options == ["All senders", "sales1", "sales2", "(no sender yet)"]
+        stages = at.selectbox(key="data_filter_stage").options
+        assert stages[:3] == ["Any stage", "Not contacted yet", "At Intro"] and len(stages) == 2 + _stage_count() and stages[3] == "At Follow-up 1"
+        assert at.selectbox(key="data_filter_recent").options == ["Any time", "Today", "Last 7 days", "Last 30 days", "Older than 30 days"]
+        assert [at.selectbox(key=k).value for k in ("data_filter_sender", "data_filter_stage", "data_filter_recent")] == ["All senders", "Any stage", "Any time"]
+
+
+@pytest.mark.parametrize("key, choice, expected", [
+    ("data_filter_sender", "sales1", ["1", "3"]), ("data_filter_sender", "(no sender yet)", ["4"]),
+    ("data_filter_stage", "Not contacted yet", ["5"]), ("data_filter_stage", "At Intro", ["1", "3"]), ("data_filter_stage", "At Follow-up 1", ["2"]),
+    ("data_filter_recent", "Today", ["1"]), ("data_filter_recent", "Last 7 days", ["1", "2", "4"]), ("data_filter_recent", "Older than 30 days", ["3"]),
+])
+def test_each_extra_filter_narrows_the_table_and_the_count(key, choice, expected):
+    with data_tab(_filter_leads()) as (at, _):
+        at.selectbox(key=key).set_value(choice)
+        at.run(timeout=30)
+        assert list(at.exception) == [] and _open_keys(at) == expected and f"Showing {len(expected)} of 5 lead(s)" in _caption(at)
+
+
+def test_the_extra_filters_combine_with_each_other_the_status_chips_and_search():
+    with data_tab(_filter_leads()) as (at, _):
+        at.selectbox(key="data_filter_sender").set_value("sales1")
+        at.selectbox(key="data_filter_recent").set_value("Last 30 days")
+        at.run(timeout=30)
+        assert _open_keys(at) == ["1"]
+        at.text_input(key="data_search").set_value("lead3")
+        at.run(timeout=30)
+        assert _open_keys(at) == [] and "No leads match this search or filter." in _markup(at)
+
+
+def test_changing_an_extra_filter_goes_back_to_page_one():
+    leads = [lead(i, SenderAccount="sales1" if i % 2 else "sales2", IntroSentAt=_days_ago(1)) for i in range(1, 91)]
+    with data_tab(leads) as (at, _):
+        _click(at, "data_next")
+        assert at.session_state["data_page"] == 1
+        at.selectbox(key="data_filter_sender").set_value("sales1")
+        at.run(timeout=30)
+        assert at.session_state["data_page"] == 0 and _open_keys(at)[0] == "1" and "page 1 of 2" in _caption(at)
+
+
+def test_the_clear_filters_button_appears_only_while_something_filters_and_puts_everything_back():
+    with data_tab(_filter_leads()) as (at, _):
+        assert not _has(at.button, "data_filters_clear")
+        at.selectbox(key="data_filter_sender").set_value("sales1")
+        at.selectbox(key="data_filter_stage").set_value("At Intro")
+        at.selectbox(key="data_filter_recent").set_value("Today")
+        at.text_input(key="data_search").set_value("lead")
+        at.radio(key="data_filter").set_value("Replied")
+        at.run(timeout=30)
+        assert _has(at.button, "data_filters_clear")
+        _click(at, "data_filters_clear")
+        assert list(at.exception) == [] and not _has(at.button, "data_filters_clear")
+        assert at.text_input(key="data_search").value == "" and at.radio(key="data_filter").value.startswith("All")
+        assert [at.selectbox(key=k).value for k in ("data_filter_sender", "data_filter_stage", "data_filter_recent")] == ["All senders", "Any stage", "Any time"]
+        assert _open_keys(at) == ["1", "2", "3", "4", "5"]
+
+
+def test_a_remembered_choice_that_no_longer_exists_goes_back_to_the_first_option_without_hiding_anyone():
+    """E.g. the only lead from one sender was removed while that sender was chosen. The stale value is planted from inside the
+    script (AppTest cannot inject an invalid widget value from outside), the way it would arise in a real session."""
+    def script():
+        import streamlit as st
+        from leads_view import render_extra_filters
+        if "planted" not in st.session_state:
+            st.session_state.update({"planted": True, "data_filter_sender": "ghost@nowhere", "data_filter_stage": "At Follow-up 9", "data_filter_recent": "Sometime"})
+        st.session_state["chosen"] = render_extra_filters([{"SenderAccount": "sales1", "IntroSentAt": "2026-10-01 09:00:00"}], None)
+
+    at = AppTest.from_function(script)
+    at.run(timeout=30)
+    assert list(at.exception) == [] and at.session_state["chosen"] == ("All senders", "Any stage", "Any time")
+
+
+
+def test_empty_company_and_approval_are_not_shown_as_blank_rows_in_the_panel():
+    with data_tab([lead(1, Company="", Approval="")]) as (at, _):
+        _click(at, "data_open_1")
+        panel = _panel(at)
+        assert "Company" not in panel and "Approval" not in panel and "Lead ID" in panel and "Last sent" in panel
+
+
+def test_using_the_extra_filters_and_the_panel_controls_never_re_reads_the_google_sheet():
+    with data_tab(_filter_leads()) as (at, captured):
+        reads = captured["master"].read_call_count
+        at.selectbox(key="data_filter_sender").set_value("sales1")
+        at.run(timeout=30)
+        at.selectbox(key="data_filter_recent").set_value("Last 7 days")
+        at.run(timeout=30)
+        _click(at, "data_open_1")
+        _click(at, "remove_ask_1")
+        _click(at, "remove_cancel_1")
+        _click(at, "data_filters_clear")
+        assert list(at.exception) == [] and captured["master"].read_call_count == reads
+
+
+# ================================================================ gaps found by deliberately breaking the actions
+
+def test_the_removal_message_is_shown_once_and_not_on_every_later_redraw():
+    with data_tab([lead(1), lead(2)]) as (at, captured), patch.object(leads_actions.time, "sleep"):
+        _remove_one(at, "1")
+        _click(at, "remove_yes_1")
+        assert any("Removal triggered" in s.value for s in at.success)
+        at.selectbox(key="manage_status_1").set_value("Stop sending to this lead")                    # any later interaction
+        at.run(timeout=30)
+        assert not any("Removal triggered" in s.value for s in at.success) and len(_commits(captured)) == 1
+
+
+def test_there_is_a_pause_between_committing_the_removal_file_and_starting_its_workflow_as_there_always_was():
+    with data_tab([lead(1)]) as (at, captured), patch.object(leads_actions.time, "sleep") as slept:
+        _remove_one(at, "1")
+        _click(at, "remove_yes_1")
+        one_second_pauses = [c for c in slept.call_args_list if c.args == (1,)]                  # (the test harness itself also sleeps, a millisecond at a time)
+        assert len(one_second_pauses) == 1
+        assert len(_commits(captured)) == 1 and len(captured["dispatches"]) == 1
+
+
+def test_manage_and_remove_are_separated_by_a_divider():
+    with data_tab([lead(1)]) as (at, _):
+        before = len(at.get("divider"))
+        _click(at, "data_open_1")
+        assert len(at.get("divider")) == before + 1
