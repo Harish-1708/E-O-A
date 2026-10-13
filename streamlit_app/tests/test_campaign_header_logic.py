@@ -1,11 +1,12 @@
 """The campaign header's chips and sub-line: what the settings and logs say, never anything invented."""
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))        # the repo root, for the engine
 
 import campaign_header_logic as H  # noqa: E402
 
@@ -124,3 +125,93 @@ def test_a_now_without_a_zone_is_utc_even_when_the_server_runs_in_another_zone(s
     naive_now = datetime(2026, 10, 13, 5, 0)                                    # read as Auckland time this would be the 12th, 16:00 UTC
     assert H.sent_today([row("2026-10-13 04:00:00")], "UTC", naive_now) == 1
     assert H.sent_today([row("2026-10-12 20:00:00")], "UTC", naive_now) == 0
+
+
+# ================================================================ the next automatic send
+
+import outreach  # noqa: E402  (the engine's own window rule is the one used for real)
+
+CHICAGO_FRIDAYS = {"timezone": "America/Chicago", "window_start": "09:00", "window_end": "17:00", "send_days": ["fri"]}
+
+
+@pytest.mark.parametrize("text, expected", [
+    ('    - cron: "43 * * * *"   # :43 past every hour', 43), ("cron: '5 * * * *'", 5), ('cron: "0 * * * *"', 0), ('cron: "59 * * * *"', 59),
+    ('cron: "60 * * * *"', None), ('cron: "*/15 * * * *"', None), ('cron: "43 9 * * 1-5"', None), ("no schedule here", None), ("", None), (None, None),
+])
+def test_the_run_minute_is_read_from_the_workflow_file_only_when_it_is_a_plain_hourly_schedule(text, expected):
+    assert H.read_cron_minute(text) == expected
+
+
+def test_the_real_auto_send_workflow_file_is_understood():
+    path = os.path.join(os.path.dirname(__file__), "..", "..", ".github", "workflows", "auto_send.yml")
+    with open(path, encoding="utf-8") as handle:
+        assert H.read_cron_minute(handle.read()) == 43
+
+
+@pytest.mark.parametrize("seconds, expected", [(0, "1 min"), (30, "1 min"), (60, "1 min"), (3300, "55 min"), (3599, "59 min"), (3600, "1 h"), (10800, "3 h"), (86399, "23 h"), (86400, "1 d"),
+                                               (2 * 86400 + 19 * 3600 + 120, "2 d 19 h"), (-5, "1 min")])
+def test_waits_are_shown_in_the_largest_sensible_unit(seconds, expected):
+    assert H.humanize_wait(seconds) == expected
+
+
+def always(schedule, when):
+    return True, ""
+
+
+def test_with_no_schedule_the_next_send_is_simply_the_next_run():
+    now = datetime(2026, 10, 13, 14, 10, tzinfo=timezone.utc)
+    assert H.next_automatic_send({}, now, 43, outreach.is_within_sending_window) == datetime(2026, 10, 13, 14, 43, tzinfo=timezone.utc)
+    assert H.next_automatic_send({}, datetime(2026, 10, 13, 14, 43, tzinfo=timezone.utc), 43, always) == datetime(2026, 10, 13, 15, 43, tzinfo=timezone.utc)    # strictly after now
+
+
+def test_with_a_schedule_the_next_send_is_the_first_run_inside_the_window_by_the_engines_own_rule():
+    tuesday = datetime(2026, 10, 13, 14, 0, tzinfo=timezone.utc)              # a Tuesday: Fridays only, so the next send is Friday morning in Chicago
+    when = H.next_automatic_send(CHICAGO_FRIDAYS, tuesday, 43, outreach.is_within_sending_window)
+    assert when == datetime(2026, 10, 16, 14, 43, tzinfo=timezone.utc)        # Fri 09:43 CDT
+    assert outreach.is_within_sending_window(CHICAGO_FRIDAYS, when)[0] and not outreach.is_within_sending_window(CHICAGO_FRIDAYS, when - timedelta(hours=1))[0]
+
+
+def test_inside_the_window_the_very_next_run_is_the_answer():
+    friday_noon = datetime(2026, 10, 16, 17, 20, tzinfo=timezone.utc)         # Fri 12:20 CDT
+    assert H.next_automatic_send(CHICAGO_FRIDAYS, friday_noon, 43, outreach.is_within_sending_window) == datetime(2026, 10, 16, 17, 43, tzinfo=timezone.utc)
+
+
+def test_after_the_window_closes_it_waits_for_the_next_allowed_day():
+    friday_evening = datetime(2026, 10, 16, 23, 0, tzinfo=timezone.utc)       # Fri 18:00 CDT, window closed
+    assert H.next_automatic_send(CHICAGO_FRIDAYS, friday_evening, 43, outreach.is_within_sending_window) == datetime(2026, 10, 23, 14, 43, tzinfo=timezone.utc)
+
+
+def test_a_schedule_that_can_never_send_gives_none_and_a_broken_one_cannot_break_the_page():
+    never = {"timezone": "America/Chicago", "window_start": "09:00", "window_end": "17:00", "send_days": ["xyz"]}          # no real day: the engine never allows it
+    assert H.next_automatic_send(never, NOW, 43, outreach.is_within_sending_window) is None
+    assert H.next_automatic_send(CHICAGO_FRIDAYS, NOW, 43, lambda s, w: (False, "closed")) is None
+    def explode(schedule, when):
+        raise RuntimeError("bad timezone")
+    assert H.next_automatic_send(CHICAGO_FRIDAYS, NOW, 43, explode) is None
+
+
+@pytest.mark.parametrize("when, tz, expected", [
+    (datetime(2026, 10, 13, 19, 43, tzinfo=timezone.utc), "America/Chicago", "today 2:43 PM"), (datetime(2026, 10, 14, 14, 43, tzinfo=timezone.utc), "America/Chicago", "tomorrow 9:43 AM"),
+    (datetime(2026, 10, 16, 14, 43, tzinfo=timezone.utc), "America/Chicago", "Fri 9:43 AM"), (datetime(2026, 10, 23, 14, 43, tzinfo=timezone.utc), "America/Chicago", "Oct 23 9:43 AM"),
+    (datetime(2026, 10, 13, 0, 5, tzinfo=timezone.utc), "UTC", "today 12:05 AM"), (datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc), None, "today 12:00 PM"),
+    (datetime(2026, 10, 14, 2, 0, tzinfo=timezone.utc), "America/Chicago", "today 9:00 PM"), (datetime(2026, 10, 13, 19, 43, tzinfo=timezone.utc), "Mars/Olympus", "today 7:43 PM"),
+])
+def test_a_moment_is_described_in_the_campaigns_own_time_zone_the_way_a_person_says_it(when, tz, expected):
+    assert H.describe_moment(when, NOW, tz) == expected
+
+
+def test_the_whole_line():
+    line = H.next_send_line({"schedule": CHICAGO_FRIDAYS}, datetime(2026, 10, 13, 14, 0, tzinfo=timezone.utc), 43, outreach.is_within_sending_window)
+    assert line == "Next automatic send: Fri 9:43 AM (in 3 d)"
+    assert H.next_send_line({}, datetime(2026, 10, 13, 14, 0), 43, always) == "Next automatic send: today 2:43 PM (in 43 min)"
+
+
+def test_no_line_when_the_run_minute_is_unknown_or_nothing_is_due():
+    assert H.next_send_line({}, NOW, None, always) is None
+    assert H.next_send_line({"schedule": CHICAGO_FRIDAYS}, NOW, 43, lambda s, w: (False, "")) is None
+
+
+def test_the_sub_line_puts_the_next_send_first_when_there_is_one():
+    cfg = {"sending": {"daily_limit": 100}, "schedule": {"timezone": "UTC"}}
+    assert H.subline(cfg, [], NOW, "Next automatic send: today 2:43 PM (in 43 min)") == "Next automatic send: today 2:43 PM (in 43 min) · 0 sent today · daily limit 100"
+    assert H.subline(cfg, [], NOW) == "0 sent today · daily limit 100"
