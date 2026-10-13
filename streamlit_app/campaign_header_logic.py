@@ -4,8 +4,9 @@ PURE and READ-ONLY: everything is worked out from the campaign's own settings an
 Nothing here decides anything about sending; it only DESCRIBES what the settings and the logs already say, and it says
 "sends anytime" for a campaign with no schedule rather than inventing hours.
 """
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Dict, List, Optional, Tuple
 
 try:                                         # Python 3.9+; the app's own schedule code uses it too
     from zoneinfo import ZoneInfo
@@ -102,8 +103,96 @@ def sent_today(send_log: List[Dict], timezone_name: Optional[str] = None, now: O
     return sum(1 for row in send_log if str(row.get("Status") or "").strip().lower() == "sent" and _local_date(row.get("Timestamp"), zone) == today)
 
 
-def subline(campaign_cfg: Dict, send_log: List[Dict], now: Optional[datetime] = None) -> str:
-    """'41 sent today · daily limit 100' (the limit only when there is one)."""
+def subline(campaign_cfg: Dict, send_log: List[Dict], now: Optional[datetime] = None, next_send: Optional[str] = None) -> str:
+    """'Next automatic send: Fri 9:43 AM (in 2 d 19 h) · 41 sent today · daily limit 100' (the first part only when given, the
+    limit only when there is one)."""
     sent = sent_today(send_log, (campaign_cfg.get("schedule") or {}).get("timezone"), now)
     limit = daily_limit(campaign_cfg)
-    return f"{sent} sent today" + (f" · daily limit {limit}" if limit else "")
+    parts = [next_send] if next_send else []
+    parts.append(f"{sent} sent today" + (f" · daily limit {limit}" if limit else ""))
+    return " · ".join(parts)
+
+
+# ---------------------------------------------------------------- the next automatic send
+
+def read_cron_minute(workflow_text: str) -> Optional[int]:
+    """The minute past each hour at which the auto-send workflow is scheduled, read from its own file ('43 * * * *' -> 43), or None
+    when the file does not have a plain hourly schedule (then the page simply shows no 'next automatic send')."""
+    match = re.search(r"cron:\s*[\"']\s*(\d{1,2})\s+\*\s+\*\s+\*\s+\*\s*[\"']", str(workflow_text or ""))
+    if not match or int(match.group(1)) > 59:
+        return None
+    return int(match.group(1))
+
+
+def next_automatic_send(schedule: Dict, now_utc: datetime, minute: int, within_window: Callable[[Dict, datetime], Tuple[bool, str]],
+                        horizon_hours: int = 24 * 8) -> Optional[datetime]:
+    """The first hourly run (at `minute` past each UTC hour, strictly after now) at which the campaign's sending window is open,
+    judged by the ENGINE's own rule (`within_window`, outreach.is_within_sending_window), so this can never disagree with what the
+    sender will really do. None when no run within `horizon_hours` qualifies (for example a schedule with no send days)."""
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    now_utc = now_utc.astimezone(timezone.utc)
+    candidate = now_utc.replace(minute=minute, second=0, microsecond=0)
+    if candidate <= now_utc:
+        candidate += timedelta(hours=1)
+    for _ in range(horizon_hours):
+        try:
+            allowed, _reason = within_window(schedule, candidate)
+        except Exception:  # noqa: BLE001 - an invalid schedule must hide the line, never break the page
+            return None
+        if allowed:
+            return candidate
+        candidate += timedelta(hours=1)
+    return None
+
+
+def humanize_wait(seconds: float) -> str:
+    """'55 min', '3 h', '2 d 19 h' — rounded down to minutes, then hours, then days and hours."""
+    minutes = max(0, int(seconds // 60))
+    if minutes < 60:
+        return f"{max(minutes, 1)} min"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} h"
+    days, rest = divmod(hours, 24)
+    return f"{days} d" + (f" {rest} h" if rest else "")
+
+
+def _clock(moment: datetime) -> str:
+    return f"{moment.hour % 12 or 12}:{moment.minute:02d} {'AM' if moment.hour < 12 else 'PM'}"
+
+
+def describe_moment(when_utc: datetime, now_utc: datetime, timezone_name: Optional[str] = None) -> str:
+    """'today 2:43 PM', 'tomorrow 9:43 AM', 'Fri 9:43 AM' (within a week), else 'Oct 20 9:43 AM' — in the campaign's own time zone when it
+    has one, otherwise in UTC."""
+    zone = None
+    if timezone_name and ZoneInfo is not None:
+        try:
+            zone = ZoneInfo(timezone_name)
+        except Exception:  # noqa: BLE001
+            zone = None
+    zone = zone or timezone.utc
+    local, local_now = when_utc.astimezone(zone), now_utc.astimezone(zone)
+    gap = (local.date() - local_now.date()).days
+    if gap == 0:
+        day = "today"
+    elif gap == 1:
+        day = "tomorrow"
+    elif 1 < gap < 7:
+        day = _DAY_NAMES[_DAY_ORDER[local.weekday()]]
+    else:
+        day = f"{local.strftime('%b')} {local.day}"
+    return f"{day} {_clock(local)}"
+
+
+def next_send_line(campaign_cfg: Dict, now_utc: datetime, minute: Optional[int], within_window: Callable[[Dict, datetime], Tuple[bool, str]]) -> Optional[str]:
+    """'Next automatic send: Fri 9:43 AM (in 2 d 19 h)', or None when the schedule of runs is unknown or nothing is due in the next 8 days."""
+    if minute is None:
+        return None
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    schedule = campaign_cfg.get("schedule") or {}
+    when = next_automatic_send(schedule, now_utc, minute, within_window)
+    if when is None:
+        return None
+    return f"Next automatic send: {describe_moment(when, now_utc, schedule.get('timezone'))} (in {humanize_wait((when - now_utc).total_seconds())})"
