@@ -244,10 +244,10 @@ def test_every_figure_the_old_overview_page_showed_is_on_this_page_in_the_at_a_g
 def test_the_by_sender_and_errors_tables_the_old_analytics_tab_had_are_here(fixture_repo):
     at = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_campaign").set_value(FIXTURE_CAMPAIGN))
     assert list(at.exception) == [] and list(at.error) == []
-    subheaders = [s.value for s in at.subheader]
-    assert "By sender account" in subheaders and "Errors (all time)" in subheaders
-    errors = next(df for df in _all_dataframes(at) if "Error type" in df.columns)
-    assert list(errors["Error type"]) == ["SMTP"] and list(errors["Count"]) == [2]
+    headings = [s.value for s in at.subheader] + _card_titles(at)
+    assert "By sender account" in headings and "Errors (all time)" in headings
+    errors = next(t for t in _tables(at) if t[0] == ["Error type", "Count"])                       # now a card with a table, not a bare dataframe
+    assert errors == [["Error type", "Count"], ["SMTP", "2"]]
 
 
 def test_the_full_details_the_old_dashboard_page_showed_are_available_for_one_campaign(fixture_repo):
@@ -323,7 +323,7 @@ def test_every_headline_figure_is_right_for_the_realistic_campaign(fixture_repo)
 def test_the_stage_and_variant_tables_show_the_right_counts(fixture_repo):
     stages, variants = _tables(_one_campaign(_realistic_sheet()))[:2]
     header = ["Stage", "Emails sent", "Replies", "Reply rate", "Positive", "Positive rate"]
-    assert stages == [header, ["intro", "3", "2", "66.7%", "1", "33.3%"], ["followup1", "1", "0", "0.0%", "0", "0.0%"]]
+    assert stages == [header, ["Intro", "3", "2", "66.7%", "1", "33.3%"], ["Follow-up 1", "1", "0", "0.0%", "0", "0.0%"]]        # readable names, not "intro" / "followup1"
     assert variants == [["Variant"] + header[1:], ["A", "2", "1", "50.0%", "1", "50.0%"], ["B", "1", "1", "100.0%", "0", "0.0%"], ["C", "1", "0", "0.0%", "0", "0.0%"]]
 
 
@@ -411,3 +411,56 @@ def test_replies_the_ai_has_not_read_are_counted_and_the_page_says_how_many(fixt
 def test_the_no_ai_reading_note_is_absent_when_every_reply_has_one(fixture_repo):
     at = _one_campaign(_realistic_sheet())
     assert "have no AI reading yet" not in _markup(at) and "2 replying creators" in _markup(at)
+
+
+
+# ================================================================ matching the approved design: readable names, equal-height pairs, a calm range control
+
+def test_stage_names_are_readable_everywhere_they_appear(fixture_repo):
+    at = _one_campaign(_realistic_sheet())
+    stage_column = [row[0] for row in _tables(at)[0][1:]]
+    assert stage_column == ["Intro", "Follow-up 1"] and "followup1" not in _markup(at) and ">intro<" not in _markup(at)
+    expander_table = next(df for df in _all_dataframes(at) if "Variant" in df.columns and "Stage" in df.columns)
+    assert set(expander_table["Stage"]) <= {"Intro", "Follow-up 1"}
+
+
+def test_the_stage_and_variant_cards_are_in_one_grid_so_they_are_always_the_same_height(fixture_repo):
+    at = _one_campaign(_sheet_with_senders())
+    grids = [m.value for m in at.markdown if 'pf-grid pf-g2e' in m.value]
+    assert len(grids) == 2                                                                         # stage + variants, and sender + deliverability
+    assert "Follow-up stage effectiveness" in grids[0] and "Template variants" in grids[0]
+
+
+def test_with_no_sender_accounts_only_the_first_pair_is_a_grid_and_the_rest_says_so(fixture_repo):
+    at = _one_campaign(_realistic_sheet())
+    one_grid = [m.value for m in at.markdown if "pf-grid pf-g2e" in m.value]
+    assert len(one_grid) == 1 and "Follow-up stage effectiveness" in one_grid[0] and any("No sends yet." in c.value for c in at.caption)
+
+
+def test_the_sender_card_and_the_deliverability_card_share_a_grid_when_there_are_senders(fixture_repo):
+    at = _one_campaign(_sheet_with_senders())
+    grid = next(m.value for m in at.markdown if "pf-g2e" in m.value and "By sender account" in m.value)
+    assert "Deliverability" in grid
+
+
+def test_the_chart_range_has_no_visible_label_of_its_own_but_keeps_one_for_screen_readers(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    radio = at.radio(key="performance_range")
+    assert radio.label == "Chart range" and radio.proto.label_visibility.value == 2          # collapsed (2) = hidden but still announced
+
+
+def test_the_most_common_sending_errors_are_listed_with_how_many_times_each_happened(fixture_repo):
+    sheet = _realistic_sheet()
+    log = sheet._worksheets[f"{FIXTURE_CAMPAIGN} Custom Log Sheet"]._records
+    for error in ("550 mailbox full", "550 mailbox full", "421 try again later"):
+        log.append({"Timestamp": "2026-09-05 10:00:00", "LeadID": "1", "Stage": "intro", "Variant": "A", "Status": "failed", "MessageID": "", "Error": error, "SenderAccount": ""})
+    at = _one_campaign(sheet)
+    assert list(at.exception) == [] and any("Most common sending errors" in e.label for e in at.expander)
+    text = " ".join(m.value for m in at.markdown)
+    assert "2 × 550 mailbox full" in text and "1 × 421 try again later" in text
+    assert text.index("2 × 550 mailbox full") < text.index("1 × 421 try again later")                   # the most common first
+
+
+def test_with_no_failed_sends_there_is_no_most_common_errors_section(fixture_repo):
+    at = _run_page(_sheet([], [], []))
+    assert list(at.exception) == [] and not any("Most common sending errors" in e.label for e in at.expander)
