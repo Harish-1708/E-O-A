@@ -94,7 +94,7 @@ def _tables(at):
     """Every table the shared view drew, as a list of rows of cell text (the header row first)."""
     out = []
     for table in re.findall(r'<table class="pf-table">(.*?)</table>', _markup(at)):
-        out.append([[html.unescape(c) for c in re.findall(r"<t[hd]>(.*?)</t[hd]>", row)] for row in re.findall(r"<tr>(.*?)</tr>", table)])
+        out.append([[html.unescape(re.sub(r"<[^>]+>", "", c)) for c in re.findall(r"<t[hd]>(.*?)</t[hd]>", row)] for row in re.findall(r"<tr>(.*?)</tr>", table)])        # the visible text of each cell
     return out
 
 
@@ -464,3 +464,84 @@ def test_the_most_common_sending_errors_are_listed_with_how_many_times_each_happ
 def test_with_no_failed_sends_there_is_no_most_common_errors_section(fixture_repo):
     at = _run_page(_sheet([], [], []))
     assert list(at.exception) == [] and not any("Most common sending errors" in e.label for e in at.expander)
+
+
+
+# ================================================================ the toolbar (Export), the sender bars and the best-variant star
+
+def test_the_performance_page_offers_an_export_of_what_it_shows(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    buttons = at.get("download_button")
+    assert len(buttons) == 1 and buttons[0].proto.label == "⤓ Export"
+
+
+def test_the_sender_bars_are_scaled_to_the_best_account_and_an_account_with_no_replies_has_an_empty_bar(fixture_repo):
+    at = _one_campaign(_sheet_with_senders())
+    widths = [int(w) for w in re.findall(r'class="pf-minibar"><i style="width:(\d+)%"', _markup(at))]
+    assert widths == [100, 0]                                                    # sales1: 2 of 2 replied (the best); the other account: none
+    table = next(t for t in _tables(at) if t[0][0] == "Account")
+    assert [row[4] for row in table[1:]] == ["100.0%", "0.0%"]                      # the bar sits beside the percentage, which is still shown
+
+
+def _best_variant_script(sent_per_variant):
+    """A page that draws the Performance view for a campaign whose variant B earns the replies (12 positive on B, none on A)."""
+    return f"""
+import streamlit as st
+import preview_logic
+from performance_logic import build_campaign_performance, build_best_performers
+from performance_view import render_performance
+cfg = preview_logic.get_campaign_cfg("{FIXTURE_CAMPAIGN}")
+leads, log, resp = [], [], []
+for i in range(1, 2 * {sent_per_variant} + 1):
+    variant = "A" if i <= {sent_per_variant} else "B"
+    leads.append({{"LeadID": str(i), "Email": f"p{{i}}@x.com", "SenderAccount": "s1", "Status": "Intro Sent", "IntroVariant": variant, "IntroSentAt": "2026-09-01 10:00:00"}})
+    log.append({{"Timestamp": "2026-09-01 10:00:00", "LeadID": str(i), "Stage": "intro", "Variant": variant, "Status": "sent", "MessageID": f"<m{{i}}@x>", "Error": "", "SenderAccount": "s1"}})
+    if variant == "B" and i <= {sent_per_variant} + 12:
+        resp.append({{"ResponseID": f"R{{i}}", "LeadID": str(i), "ReceivedAt": "2026-09-02 10:00:00", "Classification": "Genuine Reply", "Intent": "Interested", "InReplyTo": f"<m{{i}}@x>"}})
+perf = build_campaign_performance(cfg, leads, resp, log, [])
+render_performance(perf, key_prefix="demo", best=build_best_performers([perf], perf), show_campaign_ranking=False)
+"""
+
+
+def test_the_variant_the_what_worked_best_box_names_gets_a_star_in_the_table(fixture_repo):
+    at = AppTest.from_string(_best_variant_script(40))
+    at.run(timeout=30)
+    assert list(at.exception) == []
+    variants = next(t for t in _tables(at) if t[0][0] == "Variant")
+    assert [row[0] for row in variants[1:]] == ["A", "B  ★ best"]                   # B earns the replies, and the box names B too
+    assert "<b>Template variant:</b> B" in _markup(at)
+
+
+def test_with_too_few_emails_to_compare_no_variant_is_starred(fixture_repo):
+    at = AppTest.from_string(_best_variant_script(14))                                # 14 per variant: under the 30 needed to rank
+    at.run(timeout=30)
+    variants = next(t for t in _tables(at) if t[0][0] == "Variant")
+    assert [row[0] for row in variants[1:]] == ["A", "B"] and "★" not in _markup(at)
+
+
+def _two_senders_script():
+    """sales A: 4 leads, 2 replied (50%); sales B: 4 leads, 1 replied (25%) — so the bars must be 100% and 50% (relative to the best), not 50% and 25%."""
+    return f"""
+import preview_logic
+from performance_logic import build_campaign_performance, build_best_performers
+from performance_view import render_performance
+cfg = preview_logic.get_campaign_cfg("{FIXTURE_CAMPAIGN}")
+leads, log, resp = [], [], []
+for i in range(1, 9):
+    account = "salesA" if i <= 4 else "salesB"
+    leads.append({{"LeadID": str(i), "Email": f"p{{i}}@x.com", "SenderAccount": account, "Status": "Stopped - Replied" if i in (1, 2, 5) else "Intro Sent", "IntroVariant": "A", "IntroSentAt": "2026-09-01 10:00:00"}})
+    log.append({{"Timestamp": "2026-09-01 10:00:00", "LeadID": str(i), "Stage": "intro", "Variant": "A", "Status": "sent", "MessageID": f"<m{{i}}@x>", "Error": "", "SenderAccount": account}})
+    if i in (1, 2, 5):
+        resp.append({{"ResponseID": f"R{{i}}", "LeadID": str(i), "ReceivedAt": "2026-09-02 10:00:00", "Classification": "Genuine Reply", "Intent": "Interested", "InReplyTo": f"<m{{i}}@x>"}})
+perf = build_campaign_performance(cfg, leads, resp, log, [])
+render_performance(perf, key_prefix="demo", best=build_best_performers([perf], perf), show_campaign_ranking=False)
+"""
+
+
+def test_the_sender_bars_are_relative_to_the_best_account_not_to_one_hundred_percent(fixture_repo):
+    at = AppTest.from_string(_two_senders_script())
+    at.run(timeout=30)
+    assert list(at.exception) == []
+    table = next(t for t in _tables(at) if t[0][0] == "Account")
+    assert [(row[0], row[4]) for row in table[1:]] == [("salesA", "50.0%"), ("salesB", "25.0%")]
+    assert [int(w) for w in re.findall(r'class="pf-minibar"><i style="width:(\d+)%"', _markup(at))] == [100, 50]
