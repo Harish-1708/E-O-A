@@ -102,7 +102,7 @@ def sender_display(raw_from) -> Dict[str, str]:
 
 
 def conversation_key(group: Dict) -> str:
-    """The same identifier the classic layout keys its widgets by — one per
+    """The identifier every widget of a conversation is keyed by — one per
     (campaign, lead), stable whichever message is latest."""
     return f"{group['campaign']}:{group['lead_id']}"
 
