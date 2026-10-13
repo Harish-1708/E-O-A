@@ -15,6 +15,7 @@ from performance_logic import (  # noqa: E402
     format_rate,
 )
 from performance_view import render_performance  # noqa: E402
+from campaign_html import CAMPAIGN_SKIN_CSS  # noqa: E402
 
 # Page config is set once, centrally, in app.py via st.navigation/st.Page —
 # calling st.set_page_config here too would raise an error.
@@ -24,6 +25,7 @@ mark_active_page("performance")
 if not login_gate():
     st.stop()
 
+st.markdown(f"<style>{CAMPAIGN_SKIN_CSS}</style>", unsafe_allow_html=True)         # the same look as a campaign's own Performance tab
 st.title("🎯 Performance")
 st.caption(
     "The business questions behind the email counts: how many replies were positive, which follow-up and "
