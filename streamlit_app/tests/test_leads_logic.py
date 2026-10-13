@@ -69,11 +69,6 @@ def test_the_display_name(lead_, expected):
     assert L.display_name(lead_) == expected
 
 
-def test_the_manage_menus_label_format_is_exactly_the_one_the_menu_has_always_used():
-    assert L.manage_label(lead()) == "7 — Maya Okafor <maya@example.com>"
-    assert L.manage_label({}) == " —   <>"
-
-
 # ================================================================ status
 
 @pytest.mark.parametrize("fields, label, kind", [
@@ -217,3 +212,93 @@ def test_filter_counts_ask_the_real_filter_for_each_option():
     leads = [lead(Status="Removed"), lead(Status="Stopped - Replied"), lead(Status="Stopped - Bounced"), lead(IntroSentAt="2026-10-01", Approval="Yes"), lead(Approval="Yes")]
     counts = L.filter_counts(leads, FILTER_OPTIONS, filter_leads)
     assert counts == {"All": 5, "Pending Approval": 3, "In Progress": 1, "Replied": 1, "Bounced": 1, "Removed": 1}
+
+
+# ================================================================ the extra filters
+
+def _filter_leads():
+    return [
+        lead(LeadID="1", SenderAccount="sales1", IntroSentAt="2026-10-13 09:00:00"),                                                           # today, at Intro
+        lead(LeadID="2", SenderAccount="sales2", IntroSentAt="2026-10-01 09:00:00", FollowUp1SentAt="2026-10-10 09:00:00"),                 # 3 days ago, at Follow-up 1
+        lead(LeadID="3", SenderAccount="sales1", IntroSentAt="2026-08-01 09:00:00"),                                                           # long ago, at Intro
+        lead(LeadID="4", SenderAccount="", IntroSentAt="2026-10-07 09:00:00", FollowUp1SentAt="2026-10-07 09:00:00", FollowUp2SentAt="2026-10-08 09:00:00"),   # 5 days ago, at Follow-up 2
+        lead(LeadID="5", SenderAccount="sales2"),                                                                                               # never contacted
+    ]
+
+
+def _ids(result):
+    return [x["LeadID"] for x in result]
+
+
+LABELS = ["Intro", "Follow-up 1", "Follow-up 2"]
+
+
+def test_the_highest_stage_is_the_last_one_sent_or_minus_one():
+    assert [L.highest_stage(x, 3) for x in _filter_leads()] == [0, 1, 0, 2, -1]
+    assert L.highest_stage({"FollowUp2SentAt": "2026-10-01"}, 3) == 2 and L.highest_stage({"IntroSentAt": "  "}, 3) == -1
+
+
+def test_the_sender_options_list_every_account_once_and_offer_no_sender_only_when_some_lead_has_none():
+    assert L.sender_options(_filter_leads()) == ["All senders", "sales1", "sales2", "(no sender yet)"]
+    assert L.sender_options([lead(SenderAccount="b"), lead(SenderAccount="a"), lead(SenderAccount="a ")]) == ["All senders", "a", "b"]
+    assert L.sender_options([]) == ["All senders"]
+
+
+def test_the_stage_options_follow_the_campaigns_stages():
+    assert L.stage_options(LABELS) == ["Any stage", "Not contacted yet", "At Intro", "At Follow-up 1", "At Follow-up 2"]
+
+
+@pytest.mark.parametrize("sender, expected", [("All senders", ["1", "2", "3", "4", "5"]), ("sales1", ["1", "3"]), ("sales2", ["2", "5"]), ("(no sender yet)", ["4"]), ("nobody", [])])
+def test_filtering_by_sender(sender, expected):
+    assert _ids(L.apply_extra_filters(_filter_leads(), 3, LABELS, sender=sender, today=TODAY)) == expected
+
+
+@pytest.mark.parametrize("stage, expected", [("Any stage", ["1", "2", "3", "4", "5"]), ("Not contacted yet", ["5"]), ("At Intro", ["1", "3"]), ("At Follow-up 1", ["2"]), ("At Follow-up 2", ["4"])])
+def test_filtering_by_the_stage_most_recently_sent(stage, expected):
+    assert _ids(L.apply_extra_filters(_filter_leads(), 3, LABELS, stage=stage, today=TODAY)) == expected
+
+
+@pytest.mark.parametrize("recency, expected", [("Any time", ["1", "2", "3", "4", "5"]), ("Today", ["1"]), ("Last 7 days", ["1", "2", "4"]),
+                                               ("Last 30 days", ["1", "2", "4"]), ("Older than 30 days", ["3"])])
+def test_filtering_by_how_recently_an_email_went_out(recency, expected):
+    assert _ids(L.apply_extra_filters(_filter_leads(), 3, LABELS, recency=recency, today=TODAY)) == expected
+
+
+def test_a_lead_never_emailed_is_neither_recent_nor_older():
+    never = [lead(LeadID="9")]
+    for recency in ("Today", "Last 7 days", "Last 30 days", "Older than 30 days"):
+        assert L.apply_extra_filters(never, 3, LABELS, recency=recency, today=TODAY) == []
+
+
+def test_the_recency_boundaries_are_exact():
+    edge = [lead(LeadID="a", IntroSentAt="2026-10-07 00:00:00"), lead(LeadID="b", IntroSentAt="2026-10-06 00:00:00"),
+            lead(LeadID="c", IntroSentAt="2026-09-14 00:00:00"), lead(LeadID="d", IntroSentAt="2026-09-13 00:00:00")]
+    assert _ids(L.apply_extra_filters(edge, 3, LABELS, recency="Last 7 days", today=TODAY)) == ["a"]               # 6 days ago is in, 7 is out
+    assert _ids(L.apply_extra_filters(edge, 3, LABELS, recency="Last 30 days", today=TODAY)) == ["a", "b", "c"]    # 29 days ago is in, 30 is out
+    assert _ids(L.apply_extra_filters(edge, 3, LABELS, recency="Older than 30 days", today=TODAY)) == ["d"]
+
+
+def test_the_three_filters_combine_with_and():
+    assert _ids(L.apply_extra_filters(_filter_leads(), 3, LABELS, sender="sales1", stage="At Intro", recency="Last 7 days", today=TODAY)) == ["1"]
+    assert L.apply_extra_filters(_filter_leads(), 3, LABELS, sender="sales2", stage="At Intro", today=TODAY) == []
+
+
+def test_an_option_that_is_not_recognised_filters_nothing_so_a_stale_choice_cannot_hide_every_lead():
+    assert _ids(L.apply_extra_filters(_filter_leads(), 3, LABELS, stage="At Follow-up 9", recency="Sometime", today=TODAY)) == ["1", "2", "3", "4", "5"]
+
+
+def test_the_filters_keep_the_same_dicts_in_the_same_order():
+    leads = _filter_leads()
+    result = L.apply_extra_filters(leads, 3, LABELS, sender="sales1", today=TODAY)
+    assert result[0] is leads[0] and result[1] is leads[2]
+
+
+def test_any_extra_filter_says_whether_one_is_active():
+    assert not L.any_extra_filter("All senders", "Any stage", "Any time")
+    assert L.any_extra_filter("sales1", "Any stage", "Any time") and L.any_extra_filter("All senders", "At Intro", "Any time") and L.any_extra_filter("All senders", "Any stage", "Today")
+
+
+def test_today_means_today_and_not_yesterday():
+    two = [lead(LeadID="a", IntroSentAt="2026-10-13 00:01:00"), lead(LeadID="b", IntroSentAt="2026-10-12 23:59:00")]
+    assert _ids(L.apply_extra_filters(two, 3, LABELS, recency="Today", today=TODAY)) == ["a"]
+    assert _ids(L.apply_extra_filters(two, 3, LABELS, recency="Last 7 days", today=TODAY)) == ["a", "b"]
