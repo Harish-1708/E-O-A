@@ -415,3 +415,37 @@ def test_the_three_panes_stay_in_one_row_on_wide_screens_and_stack_only_on_small
     wide = css[css.index("@media (min-width: 900px)"):css.index("@media (max-width: 899px)")]
     assert "flex-wrap: nowrap !important" in wide and ":nth-child(2) { flex: 1 1 0" in wide and ":nth-child(3) { flex: 2 1 0" in wide
     assert "nowrap !important" not in css[css.index("@media (max-width: 899px)"):]                     # on a phone they stack as before
+
+
+# ================================================================ Read more / Read less
+
+@pytest.mark.parametrize("body, expected", [
+    ("", False), (None, False), ("short", False), ("\n".join(["line"] * 12), False), ("\n".join(["line"] * 13), True),
+    ("x" * 1100, False), ("x" * 1101, True), ("a\n\n\n\n\n\n\n\n\n\n\nb", False), ("a\n\n\n\n\n\n\n\n\n\n\n\nb", True),
+])
+def test_how_long_an_email_must_be_before_it_gets_a_read_more(body, expected):
+    assert H.needs_clamp(body) is expected
+
+
+def test_a_long_email_is_cropped_only_when_asked_and_a_short_one_never_is():
+    long, short = "\n".join(f"line {i}" for i in range(40)), "Thanks!"
+    assert "ux-clamped" in H.card_html("s", "f", "t", "", long, clamp=True)
+    assert "ux-clamped" not in H.card_html("s", "f", "t", "", long) and "ux-clamped" not in H.card_html("s", "f", "t", "", long, clamp=False)
+    assert "ux-clamped" not in H.card_html("s", "f", "t", "", short, clamp=True)
+
+
+def test_cropping_hides_nothing_from_the_page_it_only_fades_it():
+    long = "\n".join(f"line {i}" for i in range(40))
+    assert H.card_html("s", "f", "t", "", long, clamp=True).count('class="ux-line"') == 40                # every line is still there
+
+
+def test_a_cropped_card_is_still_one_safe_line_and_the_crop_is_in_the_stylesheet():
+    markup = H.card_html("s", "f", "t", "", "<script>x</script>\n" * 30, clamp=True)
+    assert "\n" not in markup and "<script" not in markup
+    assert ".ux-body.ux-clamped { position: relative; max-height: 20em; overflow: hidden; }" in H.INBOX_CSS and ".ux-body.ux-clamped::after" in H.INBOX_CSS
+
+
+def test_the_read_more_and_show_earlier_buttons_are_styled_by_their_own_key_prefixes():
+    """Checked by the declarations themselves: the hover rules repeat the selector text, so the text alone proves nothing."""
+    assert '[class*="st-key-ux_more_"] button { background: transparent; border: 0; color: #2563eb;' in H.INBOX_CSS
+    assert '[class*="st-key-ux_expand_"] button { width: 100%; background: #f3f6fb;' in H.INBOX_CSS
