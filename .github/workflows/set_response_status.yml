@@ -1,0 +1,82 @@
+name: Set Response Status
+
+# Saves a lead's status chosen by hand in the Inbox ("Status" menu): written on every reply row of that lead in the
+# Response Sheet's intent columns with IntentConfidence "Manual", so it beats the AI and the keyword reading everywhere
+# (the Inbox, the Performance page, ...). Choosing "Automatic" takes it back off. Streamlit itself never writes to a
+# Sheet (it only has a read-only credential), so this follows the same commit-then-trigger pattern as every other
+# write in the app; the payload file is deleted once it has been applied.
+on:
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: "Campaign name"
+        required: true
+      payload_path:
+        description: "Path to the committed JSON payload file, e.g. status_changes/Foo/2026-10-13-143012.json"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  set-status:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Set the status
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -o pipefail
+          python response_status.py set --campaign "${{ github.event.inputs.campaign }}" \
+            --file "${{ github.event.inputs.payload_path }}" | tee status_output.txt
+      - name: Add to job summary
+        if: always()
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat status_output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove the processed payload file
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          PAYLOAD_PATH="${{ github.event.inputs.payload_path }}"
+          if [ -f "$PAYLOAD_PATH" ]; then
+            git rm -f "$PAYLOAD_PATH"
+            git commit -m "Remove processed status payload: $PAYLOAD_PATH"
+            # Push with retry-on-rebase: another workflow committing to
+            # main between this job's checkout and this push is routine,
+            # not exceptional, given how many workflows write to this
+            # same branch — NOT a hypothetical, this exact rejection was
+            # reported and reproduced against a live race. A bare
+            # `git push` with no retry meant the ENTIRE cleanup step
+            # failed outright on any such overlap, even though the
+            # actual data operation (above) had already succeeded — only
+            # this payload-file cleanup was ever at risk.
+            MAX_ATTEMPTS=5
+            pushed=false
+            for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+              if git push; then
+                echo "Pushed on attempt $attempt."
+                pushed=true
+                break
+              fi
+              echo "Push rejected (attempt $attempt/$MAX_ATTEMPTS) -- another commit landed on main. Rebasing and retrying..."
+              git fetch origin main
+              if ! git rebase origin/main; then
+                git rebase --abort
+                echo "Rebase failed -- will retry from a fresh fetch."
+              fi
+              sleep $(( (RANDOM % 3) + 1 ))
+            done
+            if [ "$pushed" = false ]; then
+              echo "::warning::Could not push payload cleanup after $MAX_ATTEMPTS attempts -- the actual data operation already succeeded; only this cleanup step is affected. The payload file will be removed on a future run."
+            fi
+          else
+            echo "Payload file already gone — nothing to clean up."
+          fi

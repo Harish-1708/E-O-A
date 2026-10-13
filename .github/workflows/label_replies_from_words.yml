@@ -1,0 +1,66 @@
+name: Label Replies From Their Words
+
+# Replies the AI left without a definite reading show as "Unclear" on the Performance page, because that page reads
+# the intent STORED in the Response Sheet. This reads what those replies actually say, with the same keyword rules the
+# Inbox uses ("not interested", "no thank you", "sounds good", ...), and stores a CLEAR yes or no with
+# IntentConfidence "Keywords". It never replaces a definite AI reading or a status set by hand, a plain question is not
+# stored as a status, and running it again changes nothing.
+#
+# It runs by itself right after every Check Replies run (so new replies are labelled within the hour), and can be run
+# by hand as a preview: leave "dry_run" ticked to see how many replies it WOULD label without writing anything.
+# Prints only counts: this repository's logs are public.
+on:
+  workflow_run:
+    workflows: ["Check Replies"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: "One campaign name, or leave blank for every campaign"
+        required: false
+        default: ""
+      dry_run:
+        description: "Preview only - show how many replies would be labelled without writing anything"
+        required: false
+        type: boolean
+        default: true
+
+# One Google Sheets lock shared with every other Sheets-touching workflow. A run waiting behind another may be
+# replaced by a newer one, which is fine: this is idempotent and the next run does the same work.
+concurrency:
+  group: google-sheets-api
+  cancel-in-progress: false
+
+jobs:
+  label:
+    # after a Check Replies run, only if that run succeeded; or when started by hand
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Label replies
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -o pipefail
+          CMD=(python response_status.py fill)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.campaign }}" ]; then
+            CMD+=(--campaign "${{ github.event.inputs.campaign }}")
+          else
+            CMD+=(--all)
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            CMD+=(--dry-run)
+          fi
+          "${CMD[@]}" | tee fill_output.txt
+      - name: Add to job summary
+        if: always()
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat fill_output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
