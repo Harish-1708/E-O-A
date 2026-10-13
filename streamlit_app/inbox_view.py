@@ -11,8 +11,10 @@ How it looks is in inbox_html (pure builders, tested on their own). The whole pa
 email reaches the page except through html.escape. The only things drawn with Streamlit's own widgets are the
 invisible buttons laid over each row (so a click still works) and the Reply bar, the message box and its fields.
 """
+import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Set
 
 import streamlit as st
@@ -40,6 +42,8 @@ DEFAULT_VIEW = VIEW_INBOX
 
 PANE_HEIGHT = 700                                   # the three panes share one height; the lists scroll inside it
 HEADER_HEIGHT, BAR_HEIGHT = 52, 62
+WORKFLOW_SET_RESPONSE_STATUS = "set_response_status.yml"
+COLLAPSE_THRESHOLD, KEEP_NEWEST = 8, 5      # a conversation of more than 8 emails shows only the newest 5 until asked for the rest
 EMPTY_EMAIL_NOTE = "This email has no readable text — it may be only an image or an attachment. Open it in the mailbox to see it."
 
 
@@ -102,6 +106,29 @@ def _remember_draft(body_key: str, draft_key: str) -> None:
 
 def _toggle_composer(composer_key: str) -> None:
     st.session_state[composer_key] = not st.session_state.get(composer_key, False)
+
+
+def _status_changed(ctx: InboxContext, group: Dict, gk: str, widget_key: str) -> None:
+    """The Status menu was used: commit a small payload and start the workflow that writes it into the Response Sheet
+    (Streamlit itself only has a read-only Sheets credential), then show the new status at once, marked as saving,
+    until the Sheet itself says the same. The payload holds no personal data — this repository is public."""
+    k = _keys(ctx.namespace, gk)
+    status = st.session_state.get(widget_key)
+    campaign, lead_id = str(group["campaign"]), str(group["lead_id"])
+    if status not in {key for key, _ in K.STATUS_CHOICES} or lead_id.startswith("_no_lead_"):
+        return
+    now = datetime.now(timezone.utc)
+    path = f"status_changes/{re.sub(r'[^A-Za-z0-9_.-]', '_', campaign)}/{now:%Y-%m-%d-%H%M%S}-{now.microsecond:06d}-{re.sub(r'[^A-Za-z0-9_.-]', '_', lead_id)}.json"
+    payload = {"campaign": campaign, "lead_id": lead_id, "status": status, "set_at": now.strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        client = ctx.github_client()
+        client.create_file(path, payload_to_bytes(payload), message=f"Set lead status for {campaign} (via Streamlit)")
+        client.dispatch_workflow(WORKFLOW_SET_RESPONSE_STATUS, {"campaign": campaign, "payload_path": path})
+    except Exception as exc:  # noqa: BLE001 - a failed save must show as a message, never crash the page
+        st.session_state[k["result"]] = {"ok": False, "messages": [f"Couldn't save the status: {exc}"]}
+        return
+    st.session_state.setdefault(f"{ctx.namespace}_pending_status", {})[gk] = status
+    st.session_state[k["result"]] = {"ok": True, "messages": ["Status saved — it will show everywhere, including the Performance page, within a minute or two."]}
 
 
 def _mark_read(ctx: InboxContext, group: Dict) -> None:
@@ -181,7 +208,7 @@ def _render_list(ctx: InboxContext, shown: List[Dict], total: int, filtered: int
                 with st.container(key=f"ux_row_{ctx.namespace}_{index}"):
                     st.markdown(
                         H.row_html(row["name"], row["subject"], row["preview"], H.list_date(received),
-                                   H.status_of(row["intent"], row["classification"]), row["key"] == selected, row["unread"],
+                                   H.status_of(row["intent"], "" if row["manual"] else row["classification"]), row["key"] == selected, row["unread"],
                                    H.waiting_nudge(row["unread"], received), row["message_count"], row["unread_count"],
                                    row["campaign"] if ctx.show_campaign else ""),
                         unsafe_allow_html=True)
@@ -213,33 +240,61 @@ def _thread_for(ctx: InboxContext, group: Dict, lead: Optional[Dict], campaign_n
     return build_conversation_thread(ctx.get_campaign_cfg(campaign_name), lead, every_reply, sent_by_hand), sent_note
 
 
-def _conversation_intent(group: Dict, row: Dict):
-    """(intent, note) for the whole conversation, newest message first:
-      1. the AI's reading, if it gave a definite one (anything but Unclear) — it always wins;
-      2. otherwise what the words say, by keywords (inbox_keywords): 'not interested', 'no thank you', 'sounds good'…
-    A later follow-up that says nothing clear must not turn an 'interested' conversation into 'unclear', and a later
-    'not interested' still overrides an earlier 'interested'. A keyword reading of Lead (a question, a mention of money)
-    is only a hint: it is used when nothing clearer exists anywhere in the conversation. The note says where the
-    reading came from, so a label worked out from keywords is never passed off as the AI's."""
+def _conversation_intent(group: Dict, row: Dict, pending: Optional[str] = None):
+    """(intent, note, set_by_hand) for the whole conversation. In order of authority:
+      0. a status set by hand (IntentConfidence "Manual") — beats everything, including a later AI reading;
+         `pending` is one just chosen on this page and not yet in the Sheet, shown at once as "saving";
+      1. the AI's reading, newest message first, if definite (anything but Unclear);
+      2. what the words say, by keywords (inbox_keywords) — either stored by the Label Replies job (IntentConfidence
+         "Keywords") or worked out now for a reply not yet labelled.
+    A later follow-up that says nothing clear must not turn an 'interested' conversation into 'unclear', a later 'not
+    interested' still overrides an earlier 'interested', and a keyword reading of Lead (a question, a mention of money)
+    is only a hint, used when nothing clearer exists anywhere in the conversation. The note says where the reading came
+    from, so a label worked out from keywords or set by hand is never passed off as the AI's."""
+    if pending and pending != "auto":
+        return K.STATUS_TO_INTENT[pending], "set manually · saving…", True
+    messages = sorted(group["messages"], key=lambda m: str(m.get("MessageDate") or m.get("ReceivedAt") or ""), reverse=True)
+    confidence_of = lambda m: str(m.get("IntentConfidence") or "").strip()      # noqa: E731
+    if pending != "auto":                                                         # "auto" is a manual status being taken off
+        for message in messages:
+            if confidence_of(message) == K.MANUAL_CONFIDENCE and (message.get("Intent") or "").strip():
+                return message["Intent"].strip(), "set manually", True
     weak = None
-    for message in sorted(group["messages"], key=lambda m: str(m.get("MessageDate") or m.get("ReceivedAt") or ""), reverse=True):
-        intent = (message.get("Intent") or "").strip()
+    for message in messages:
+        intent, confidence = (message.get("Intent") or "").strip(), confidence_of(message)
+        if confidence == K.MANUAL_CONFIDENCE:
+            intent = ""                                                           # being taken off: treated as blank, so the words are read
         if intent and intent.lower() != "unclear":
-            confidence = (message.get("IntentConfidence") or "").strip()
-            return intent, (f"{confidence} confidence" if confidence else "")
+            if confidence == K.KEYWORD_CONFIDENCE:
+                if K.is_weak(intent):
+                    weak = weak or (intent, "by keywords")
+                    continue
+                return intent, "by keywords", False
+            return intent, (f"{confidence} confidence" if confidence else ""), False
         if not str(message.get("Classification") or "").lower().startswith("genuine"):
             continue                                              # an auto-reply's words are not the person's answer
         words = next((v for v in (message.get("FullBody"), message.get("Snippet")) if (v or "").strip()), "")
         reading = K.keyword_reading(words)
         if reading and not K.is_weak(reading[0]):
-            return reading[0], "by keywords"
-        weak = weak or reading
+            return reading[0], "by keywords", False
+        if reading and weak is None:
+            weak = (reading[0], "by keywords")
     if weak:
-        return weak[0], "by keywords"
-    return row["intent"], (f"{row['intent_confidence']} confidence" if row["intent_confidence"] else "")
+        return weak[0], weak[1], False
+    if row["intent_confidence"] == K.MANUAL_CONFIDENCE:                       # the latest row's own value is a manual one being ignored
+        return "", "", False
+    return row["intent"], (f"{row['intent_confidence']} confidence" if row["intent_confidence"] else ""), False
 
 
-def _card_for(message: Dict, row: Dict) -> str:
+def _sheet_shows(group: Dict, pending: str) -> bool:
+    """Has the Response Sheet itself caught up with a status just chosen on this page?"""
+    manual = [m for m in group["messages"] if str(m.get("IntentConfidence") or "").strip() == K.MANUAL_CONFIDENCE and (m.get("Intent") or "").strip()]
+    if pending == "auto":
+        return not manual
+    return any((m.get("Intent") or "").strip() == K.STATUS_TO_INTENT[pending] for m in manual)
+
+
+def _card_for(message: Dict, row: Dict, clamp: bool = False) -> str:
     """One email as a card. Ours go From 'You' To the person; theirs the other way round."""
     if message.get("direction") == "outgoing":
         from_text = "You"
@@ -249,7 +304,63 @@ def _card_for(message: Dict, row: Dict) -> str:
         from_text = f"{who['name']} <{who['email']}>" if who["email"] else who["name"]
         to_text = "You"
     return H.card_html(message.get("subject", ""), from_text, to_text, message.get("timestamp", ""), message.get("body", ""),
-                       EMPTY_EMAIL_NOTE)
+                       EMPTY_EMAIL_NOTE, clamp=clamp)
+
+
+def _render_cards(ctx: InboxContext, messages: List[Dict], row: Dict, gk: str, newest_first: bool) -> None:
+    """The emails of one conversation. A long conversation (more than COLLAPSE_THRESHOLD emails) shows only the newest
+    KEEP_NEWEST, with a button right where the hidden ones would be to show the rest — and, once shown, a button at the
+    top to fold them away again. A long single email is cropped with a "Read more" (never the newest one: that is
+    what you are reading). Which are open is remembered per conversation."""
+    ns = ctx.namespace
+    expanded_key = f"{ns}_expanded_{gk}"
+    expanded = st.session_state.get(expanded_key, False)
+    collapsible = len(messages) > COLLAPSE_THRESHOLD
+    earlier = len(messages) - KEEP_NEWEST
+    indexed = list(enumerate(messages))                                  # (position in time order, message)
+    ordered = list(reversed(indexed)) if newest_first else indexed
+
+    def toggle(label: str) -> None:
+        st.button(label, key=f"ux_expand_{ns}_{gk}", on_click=_toggle_composer, args=(expanded_key,), use_container_width=True)
+
+    def card(index: int, message: Dict) -> None:
+        full_key = f"{ns}_full_{gk}_{index}"
+        long_email = H.needs_clamp(message.get("body", "")) and index != len(messages) - 1
+        opened = st.session_state.get(full_key, False)
+        st.markdown(_card_for(message, row, clamp=long_email and not opened), unsafe_allow_html=True)
+        if long_email:
+            st.button("Read less ▴" if opened else "Read more ▾", key=f"ux_more_{ns}_{gk}_{index}", on_click=_toggle_composer, args=(full_key,))
+
+    if collapsible and expanded:
+        toggle(f"▴ Show fewer — hide the {earlier} earlier emails")
+        for index, message in ordered:
+            card(index, message)
+    elif collapsible:
+        shown = ordered[:KEEP_NEWEST] if newest_first else ordered[-KEEP_NEWEST:]
+        if not newest_first:
+            toggle(f"▾ Show {earlier} earlier emails")
+        for index, message in shown:
+            card(index, message)
+        if newest_first:
+            toggle(f"▾ Show {earlier} earlier emails")
+    else:
+        for index, message in ordered:
+            card(index, message)
+
+
+def _render_status_picker(ctx: InboxContext, group: Dict, row: Dict, gk: str) -> None:
+    """The Status menu: set this lead's status by hand, or go back to Automatic."""
+    if str(group["lead_id"]).startswith("_no_lead_"):
+        st.caption("This reply isn't linked to a lead in the Master Sheet, so a status can't be saved for it.")
+        return
+    labels = dict(K.STATUS_CHOICES)
+    current = K.INTENT_TO_STATUS.get(row["intent"], "auto") if row["manual"] else "auto"
+    widget_key = f"{ctx.namespace}_statuspick_{gk}"
+    st.session_state[widget_key] = current              # always shows what is in force (set before the widget exists)
+    st.radio("Lead status", list(labels), format_func=labels.get, key=widget_key, on_change=_status_changed,
+             args=(ctx, group, gk, widget_key))
+    st.caption("Set by hand, a status beats the AI and the keyword reading everywhere, including the Performance page. "
+               "Choose Automatic to go back to the automatic reading.")
 
 
 def _show_result(ns: str, gk: str) -> None:
@@ -305,7 +416,7 @@ def _render_conversation(group: Dict, row: Dict, ctx: InboxContext) -> None:
     if row["stopped_status"] and not stopped_it:           # the lead is stopped for some other reason; worth saying
         chips.append(row["stopped_status"])
     address = row["email"] + (f" · {campaign_name}" if ctx.show_campaign else "")
-    st.markdown(H.thread_header_html(row["name"], address, H.status_of(row["intent"], row["classification"]), chips,
+    st.markdown(H.thread_header_html(row["name"], address, H.status_of(row["intent"], "" if row["manual"] else row["classification"]), chips,
                                      row["intent_note"]),
                 unsafe_allow_html=True)
 
@@ -316,14 +427,16 @@ def _render_conversation(group: Dict, row: Dict, ctx: InboxContext) -> None:
     with st.container(key=f"ux_threadbody_{ns}", height=PANE_HEIGHT - HEADER_HEIGHT - BAR_HEIGHT, border=False):
         if not messages:
             st.markdown(H.empty_thread_html("No messages found for this lead yet."), unsafe_allow_html=True)
-        for message in (reversed(messages) if newest_first else messages):
-            st.markdown(_card_for(message, row), unsafe_allow_html=True)
+        else:
+            _render_cards(ctx, messages, row, gk, newest_first)
 
     _show_result(ns, gk)
     with st.container(key=f"ux_bar_{ns}"):
         st.button("↩ Reply", key=k["reply"], on_click=_toggle_composer, args=(k["composer"],))
         if ctx.read_keys is not None and row["unread"]:
             st.button(f"✓ Mark as read ({row['unread_count']})", key=k["mark_read"], on_click=_mark_read, args=(ctx, group))
+        with st.popover("Status"):
+            _render_status_picker(ctx, group, row, gk)
         with st.popover("⋯"):
             st.checkbox("Newest message first", value=True, key=f"{ns}_newest_first")
             st.radio("Text size", list(H.SIZES), index=list(H.SIZES).index(H.DEFAULT_SIZE), key=f"{ns}_size", horizontal=True)
@@ -343,9 +456,15 @@ def render_inbox(groups: List[Dict], ctx: InboxContext) -> None:
     st.markdown(f"<style>{H.inbox_css(scale)}</style>", unsafe_allow_html=True)
     all_rows = build_conversation_rows(groups, ctx.read_keys, ctx.leads_for)
     by_key = {conversation_key(g): g for g in groups}
+    pending_map = st.session_state.setdefault(f"{ns}_pending_status", {})
     for row in all_rows:
-        row["intent"], row["intent_note"] = _conversation_intent(by_key[row["key"]], row)
-    category = {r["key"]: H.status_of(r["intent"], r["classification"]) for r in all_rows}
+        group = by_key[row["key"]]
+        pending = pending_map.get(row["key"])
+        if pending and _sheet_shows(group, pending):
+            pending_map.pop(row["key"], None)                      # the Sheet has caught up: stop saying "saving"
+            pending = None
+        row["intent"], row["intent_note"], row["manual"] = _conversation_intent(group, row, pending)
+    category = {r["key"]: H.status_of(r["intent"], "" if r["manual"] else r["classification"]) for r in all_rows}
 
     items = [("all", "All", "📥", len(all_rows))]
     if ctx.read_keys is not None:
