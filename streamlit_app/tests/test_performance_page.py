@@ -1,5 +1,7 @@
 """Page-level tests for the Performance page (pages/performance.py)."""
+import html
 import os
+import re
 from unittest.mock import patch
 
 import pytest
@@ -73,16 +75,44 @@ def _realistic_sheet():
     return _sheet(leads, responses, send_log, error_log)
 
 
+def _markup(at):
+    return " ".join(m.value for m in at.markdown)
+
+
+def _kpis(at):
+    """The headline figures, in order, as (label, value) — read from the cards the shared view draws."""
+    return [(html.unescape(label), html.unescape(value))
+            for label, value in re.findall(r'pf-kpi-label">(.*?)</div><div class="pf-kpi-value">(.*?)</div>', _markup(at))]
+
+
+def _card_titles(at):
+    return [html.unescape(t) for t in re.findall(r'pf-card-title">(.*?)</h3>', _markup(at))] + \
+           [html.unescape(t).replace("🏆 ", "") for t in re.findall(r'pf-callout-title">(.*?)</div>', _markup(at))]
+
+
+def _tables(at):
+    """Every table the shared view drew, as a list of rows of cell text (the header row first)."""
+    out = []
+    for table in re.findall(r'<table class="pf-table">(.*?)</table>', _markup(at)):
+        out.append([[html.unescape(c) for c in re.findall(r"<t[hd]>(.*?)</t[hd]>", row)] for row in re.findall(r"<tr>(.*?)</tr>", table)])
+    return out
+
+
+def _bars(at):
+    return {html.unescape(label): (int(width), int(count))
+            for label, width, count in re.findall(r'pf-bar-label">(.*?)</div>.*?width:(\d+)%.*?pf-bar-count">(\d+)<', _markup(at))}
+
+
 def _headline_and_card_metrics(at):
     """Several labels (Contacted, Reply rate) appear TWICE: once in the
-    headline row and once in the campaign card. A dict keeps only the last,
-    which would let a wrong headline hide behind a right card — so keep the
-    first occurrence (headline) and the last (campaign card) separately."""
-    pairs = [(m.label, m.value) for m in at.metric]
+    headline row and once in the campaign card. The headline row is drawn by
+    the shared view as HTML cards, the campaign cards by the page as
+    st.metric — read separately, so a wrong headline can never hide behind a
+    right card (and the other way round)."""
     headline = {}
-    for label, value in pairs:
+    for label, value in _kpis(at):
         headline.setdefault(label, value)
-    card = {label: value for label, value in pairs}
+    card = {m.label: m.value for m in at.metric}
     return headline, card
 
 
@@ -100,10 +130,10 @@ def test_performance_page_renders_with_the_right_headline_numbers(fixture_repo):
     assert headline["Negotiating"] == "—"               # the Asana sync has not recorded stages: a dash, not a false zero
     # the campaign card repeats the numbers, and must agree with the headline
     assert (card["Contacted"], card["Sent"], card["Replies"], card["Reply rate"], card["Positive"]) == ("3", "4", "2", "66.7%", "1")
-    subheaders = [s.value for s in at.subheader]
+    titles = _card_titles(at) + [s.value for s in at.subheader]
     for expected in ("Activity", "What the replies say", "What worked best?", "Follow-up stage effectiveness",
                      "Template variants", "Deliverability", "Campaigns"):
-        assert expected in subheaders
+        assert expected in titles, (expected, titles)
 
 
 def test_the_page_shows_a_campaign_card_with_its_status(fixture_repo):
@@ -122,12 +152,28 @@ def test_choosing_one_campaign_in_the_filter_shows_that_campaigns_numbers(fixtur
     assert headline["Contacted"] == "3" and headline["Reply rate"] == "66.7%" and card["Reply rate"] == "66.7%"
 
 
-def test_changing_the_chart_range_does_not_break_the_page(fixture_repo):
-    def pick(at):
-        at.selectbox(key="performance_range").set_value("All time")
+def _chart_summary(at):
+    return " ".join(re.findall(r'aria-label="([^"]+)"', _markup(at)))
 
-    at = _run_page(_realistic_sheet(), interact=pick)
+
+@pytest.mark.parametrize("choice, days", [("Last 7 days", 7), ("Last 30 days", 30), ("Last 90 days", 90)])
+def test_the_chart_range_changes_how_many_days_the_chart_covers(fixture_repo, choice, days):
+    at = _run_page(_realistic_sheet(), interact=lambda a: a.radio(key="performance_range").set_value(choice))
     assert list(at.exception) == [] and list(at.error) == []
+    assert f"per day over {days} days" in _chart_summary(at)
+
+
+def test_all_time_starts_at_the_first_recorded_day_and_shows_the_busiest_day(fixture_repo):
+    at = _run_page(_realistic_sheet(), interact=lambda a: a.radio(key="performance_range").set_value("All time"))
+    assert list(at.exception) == [] and list(at.error) == []
+    assert "most in one day: 3" in _chart_summary(at)                        # 3 intros went out on 1 Sep (the failed send is not counted)
+    assert int(re.search(r"over (\d+) days", _chart_summary(at)).group(1)) > 30
+
+
+def test_the_chart_range_is_a_horizontal_choice_that_starts_on_30_days(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    assert at.radio(key="performance_range").value == "Last 30 days"
+    assert at.radio(key="performance_range").options == ["Last 7 days", "Last 30 days", "Last 90 days", "All time"]
 
 
 def test_the_page_says_so_plainly_for_a_campaign_with_no_activity(fixture_repo):
@@ -155,7 +201,8 @@ def test_the_page_survives_a_campaign_whose_tabs_do_not_exist_yet(fixture_repo):
 
 def test_open_and_click_rates_are_deliberately_not_shown(fixture_repo):
     at = _run_page(_realistic_sheet())
-    labels = " ".join(m.label.lower() for m in at.metric)
+    labels = " ".join(m.label.lower() for m in at.metric) + " " + " ".join(label.lower() for label, _ in _kpis(at))
+    assert len(_kpis(at)) >= 13                                              # the headline cards really were read, not an empty list
     assert "open" not in labels and "click" not in labels
     assert "open and click rates are deliberately not shown" in " ".join(c.value.lower() for c in at.caption)
 
@@ -252,7 +299,115 @@ def _markdown_text(at):
 
 def test_ranking_campaigns_against_each_other_appears_only_when_looking_at_all_campaigns(fixture_repo):
     together = _run_page(_realistic_sheet())
-    assert "**Campaign:**" in _markdown_text(together)                          # all campaigns: a campaign ranking makes sense
+    assert "<b>Campaign:</b>" in _markdown_text(together)                       # all campaigns: a campaign ranking makes sense
     one = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_campaign").set_value(FIXTURE_CAMPAIGN))
-    assert "**Campaign:**" not in _markdown_text(one)                           # one campaign: nothing to rank it against
-    assert "**Template variant:**" in _markdown_text(one)
+    assert "<b>Campaign:</b>" not in _markdown_text(one)                        # one campaign: nothing to rank it against
+    assert "<b>Template variant:</b>" in _markdown_text(one)
+
+
+# ================================================================ the cards, tables and bars show exactly the figures the logic computed
+
+def _one_campaign(sheet):
+    return _run_page(sheet, interact=lambda a: a.selectbox(key="performance_campaign").set_value(FIXTURE_CAMPAIGN))
+
+
+def test_every_headline_figure_is_right_for_the_realistic_campaign(fixture_repo):
+    """Worked out by hand from _realistic_sheet: 3 leads got an intro and 1 got a follow-up (4 sent, 1 more failed); 2 of the
+    3 contacted replied; one reply was positive; nobody has bounced; the Asana sync has recorded nothing."""
+    kpis = dict(_kpis(_one_campaign(_realistic_sheet())))
+    assert kpis == {"Contacted": "3", "Emails sent": "4", "Reply rate": "66.7%", "Positive replies": "1", "Negotiating": "—", "Rights secured": "—",
+                    "Median time to first reply": "36.0 hours", "Needs follow-up": "0", "Hard bounce rate": "0.0%", "Sequence completion": "0.0%",
+                    "Hard bounces": "0", "Soft bounces": "0", "Failed sends": "1"}
+
+
+def test_the_stage_and_variant_tables_show_the_right_counts(fixture_repo):
+    stages, variants = _tables(_one_campaign(_realistic_sheet()))[:2]
+    header = ["Stage", "Emails sent", "Replies", "Reply rate", "Positive", "Positive rate"]
+    assert stages == [header, ["intro", "3", "2", "66.7%", "1", "33.3%"], ["followup1", "1", "0", "0.0%", "0", "0.0%"]]
+    assert variants == [["Variant"] + header[1:], ["A", "2", "1", "50.0%", "1", "50.0%"], ["B", "1", "1", "100.0%", "0", "0.0%"], ["C", "1", "0", "0.0%", "0", "0.0%"]]
+
+
+def test_the_reply_breakdown_bars_are_scaled_to_the_largest_and_zero_stays_empty(fixture_repo):
+    assert _bars(_one_campaign(_realistic_sheet())) == {
+        "Interested": (100, 1), "Lead / Needs Follow-up": (0, 0), "Not Interested": (100, 1), "Unclear": (0, 0), "Not classified": (0, 0)}
+
+
+def _sheet_with_senders():
+    sheet = _realistic_sheet()
+    leads = sheet._worksheets[f"{FIXTURE_CAMPAIGN} Master Sheet"]._records
+    for lead, account in zip(leads[:3], ["sales1@x.com", "sales1@x.com", 'sales2@x.com <b onmouseover=alert(1)>x</b>']):
+        lead["SenderAccount"] = account
+    log = sheet._worksheets[f"{FIXTURE_CAMPAIGN} Custom Log Sheet"]._records
+    for row, account in zip(log, ["sales1@x.com", "sales1@x.com", 'sales2@x.com <b onmouseover=alert(1)>x</b>', "", 'sales2@x.com <b onmouseover=alert(1)>x</b>']):
+        row["SenderAccount"] = account
+    return sheet
+
+
+def test_the_sender_table_has_one_row_per_account_with_its_own_counts(fixture_repo):
+    at = _one_campaign(_sheet_with_senders())
+    table = next(t for t in _tables(at) if t[0][0] == "Account")
+    assert table[0] == ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"]
+    by_account = {row[0].split(" ")[0]: row[1:] for row in table[1:]}
+    assert by_account["sales1@x.com"] == ["2", "2", "2", "100.0%"]           # 2 leads, both replied, 2 emails
+    assert by_account["sales2@x.com"] == ["2", "1", "0", "0.0%"]             # 1 lead (an intro and a follow-up), no reply
+    assert "By sender account" in _card_titles(at)
+
+
+def test_a_hostile_sender_account_is_shown_as_text_and_never_becomes_markup(fixture_repo):
+    at = _one_campaign(_sheet_with_senders())
+    markup = _markup(at)
+    assert "onmouseover" in markup and "<b onmouseover" not in markup and "&lt;b onmouseover=alert(1)&gt;" in markup
+
+
+def test_a_missing_sender_table_says_so_instead_of_showing_an_empty_card(fixture_repo):
+    at = _one_campaign(_realistic_sheet())                                       # this fixture has no sender accounts
+    assert "By sender account" in [s.value for s in at.subheader] and any("No sends yet." in c.value for c in at.caption)
+    assert "By sender account" not in _card_titles(at)
+
+
+def test_the_no_activity_page_shows_its_plain_messages_instead_of_cards(fixture_repo):
+    at = _run_page(_sheet([], [], []))
+    titles = _card_titles(at)
+    assert "Activity" not in titles and "What the replies say" not in titles
+    assert {"Activity", "What the replies say", "Follow-up stage effectiveness", "Template variants"} <= {s.value for s in at.subheader}
+    infos = " ".join(i.value for i in at.info)
+    for message in ("Nothing has been sent or replied to yet.", "No genuine replies yet.", "No emails sent yet.", "No variants sent yet."):
+        assert message in infos
+
+
+def _sheet_with_bounces():
+    sheet = _realistic_sheet()
+    sheet._worksheets[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records.extend([
+        {"ResponseID": "B1", "LeadID": "3", "ReceivedAt": "2026-09-02 12:00:00", "Classification": "Bounce (Hard)"},
+        {"ResponseID": "B2", "LeadID": "1", "ReceivedAt": "2026-09-02 13:00:00", "Classification": "Bounce (Soft)"},
+        {"ResponseID": "B3", "LeadID": "2", "ReceivedAt": "2026-09-02 14:00:00", "Classification": "Bounce (Soft)"}])
+    return sheet
+
+
+def test_hard_and_soft_bounces_are_counted_and_rated_separately_against_emails_sent(fixture_repo):
+    """1 hard and 2 soft bounces against 4 emails sent: 25.0% and 50.0% — different on purpose, so the two can never be swapped
+    unnoticed. (Bounces are not replies, so the reply figures stay as they were.)"""
+    at = _one_campaign(_sheet_with_bounces())
+    assert list(at.exception) == [] and list(at.error) == []
+    kpis = dict(_kpis(at))
+    assert kpis["Hard bounce rate"] == "25.0%" and kpis["Hard bounces"] == "1" and kpis["Soft bounces"] == "2"
+    assert kpis["Reply rate"] == "66.7%" and kpis["Positive replies"] == "1"
+    markup = _markup(at)
+    assert "1 bounced" in markup                                                  # the caption under the hard-bounce rate
+    mini = re.findall(r'pf-kpi-label">(Hard bounces|Soft bounces)</div><div class="pf-kpi-value">(\d+)</div><div class="pf-kpi-caption">([^<]*)<', markup)
+    assert mini == [("Hard bounces", "1", "25.0%"), ("Soft bounces", "2", "50.0%")]
+
+
+def test_replies_the_ai_has_not_read_are_counted_and_the_page_says_how_many(fixture_repo):
+    sheet = _realistic_sheet()
+    sheet._worksheets[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records.append(
+        {"ResponseID": "R3", "LeadID": "3", "ReceivedAt": "2026-09-04 10:00:00", "Classification": "Genuine Reply", "Intent": "", "InReplyTo": "<m3@x>"})
+    at = _one_campaign(sheet)
+    assert _bars(at)["Not classified"] == (100, 1) and _bars(at)["Interested"] == (100, 1)
+    assert "1 of 3 replying creators have no AI reading yet" in _markup(at)
+    assert "3 replying creators" in _markup(at)                                   # the card's own hint counts everyone who replied
+
+
+def test_the_no_ai_reading_note_is_absent_when_every_reply_has_one(fixture_repo):
+    at = _one_campaign(_realistic_sheet())
+    assert "have no AI reading yet" not in _markup(at) and "2 replying creators" in _markup(at)
