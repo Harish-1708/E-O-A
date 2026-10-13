@@ -354,3 +354,64 @@ def test_esc_removes_only_what_could_change_how_the_page_is_read(raw, expected):
 def test_a_subject_made_to_read_backwards_is_shown_the_right_way_round():
     spoof = "invoice\u202e fdp.exe"
     assert "\u202e" not in H.card_html(spoof, "f", "t", "", "b") and "\u202e" not in H.row_html(spoof, spoof, spoof, "d", "lead", False, False)
+
+
+# ================================================================ text size and fitting the screen
+
+def _font_sizes(css):
+    return [float(x) for x in re.findall(r"font-size: ([\d.]+)px", css)]
+
+
+def test_the_default_stylesheet_is_the_normal_size():
+    assert H.INBOX_CSS == H.inbox_css(1.0)
+
+
+@pytest.mark.parametrize("name, scale", [("Normal", 1.0), ("Large", 1.15), ("Extra large", 1.3)])
+def test_every_font_size_is_scaled_and_nothing_else_changes(name, scale):
+    assert H.SIZES[name] == scale
+    base, scaled = H.inbox_css(1.0), H.inbox_css(scale)
+    assert len(_font_sizes(base)) == len(_font_sizes(scaled)) > 20
+    for before, after in zip(_font_sizes(base), _font_sizes(scaled)):
+        assert after == pytest.approx(before * scale, abs=0.06)
+    neutral = lambda css: re.sub(r"(?:flex: 0 0 |width: |min-width: )\d+px !important", "", re.sub(r"font-size: [\d.]+px", "", css))   # (the rail's own width grows too)
+    assert neutral(base) == neutral(scaled)                                                              # spacing, colours and panes untouched
+    assert scaled.count("{") == scaled.count("}")
+
+
+def test_the_sizes_are_ordered_and_the_default_is_one_of_them_and_larger_than_before():
+    assert list(H.SIZES.values()) == sorted(H.SIZES.values()) and H.DEFAULT_SIZE in H.SIZES and H.SIZES[H.DEFAULT_SIZE] > 1.0
+
+
+def test_the_panes_follow_the_height_of_the_window_but_never_get_shorter_than_700px():
+    css = H.INBOX_CSS
+    assert "--ux-h: max(700px, calc(100vh - 230px))" in css
+    assert 'height: calc(var(--ux-h) - 44px) !important' in css and 'height: calc(var(--ux-h) - 114px) !important' in css
+    assert "min-height: var(--ux-h)" in css and "--ux-h: 700px" in css                  # a phone keeps the fixed height
+
+
+def test_the_inbox_uses_the_whole_width_of_the_page_instead_of_a_narrow_column():
+    css = H.INBOX_CSS
+    assert '[data-testid="stMainBlockContainer"]:has([class*="st-key-ux_shell_"]) { max-width: 100% !important;' in css
+
+
+def test_a_nonsense_scale_still_gives_a_valid_stylesheet():
+    for scale in (0, 0.5, 3, -1):
+        css = H.inbox_css(scale)
+        assert css.count("{") == css.count("}") and "font-size:" in css
+
+
+def test_the_rail_keeps_a_width_that_grows_with_the_text_size_and_only_on_wide_screens():
+    widths = {name: re.search(r"flex: 0 0 (\d+)px !important", H.inbox_css(scale)).group(1) for name, scale in H.SIZES.items()}
+    assert [int(w) for w in widths.values()] == sorted(int(w) for w in widths.values()) and int(widths["Normal"]) >= 190
+    assert int(widths["Extra large"]) > int(widths["Normal"])
+    css = H.INBOX_CSS
+    assert "__RAIL_W__" not in H.inbox_css(1.0) and "__RAIL_W__" not in H.inbox_css(1.3)               # the placeholder is always filled in
+    assert css.index("@media (min-width: 900px)") < css.index('[data-testid="stColumn"]:first-child') < css.index("@media (max-width: 899px)")
+
+
+def test_the_three_panes_stay_in_one_row_on_wide_screens_and_stack_only_on_small_ones():
+    """Pinning the rail's width once pushed the conversation pane onto a second row; the row must never wrap on a wide screen."""
+    css = H.INBOX_CSS
+    wide = css[css.index("@media (min-width: 900px)"):css.index("@media (max-width: 899px)")]
+    assert "flex-wrap: nowrap !important" in wide and ":nth-child(2) { flex: 1 1 0" in wide and ":nth-child(3) { flex: 2 1 0" in wide
+    assert "nowrap !important" not in css[css.index("@media (max-width: 899px)"):]                     # on a phone they stack as before
