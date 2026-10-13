@@ -146,7 +146,8 @@ def _cards(at):
             for x in body[0].children:
                 lines.append((("quoted" if "ux-qline" in x.classes else "plain"), x.text().replace("\xa0", "")))
         meta = [x.text().strip() for x in _find(n, "ux-meta-line")]
-        cards.append({"title": _first(n, "ux-title"), "from": meta[0].removeprefix("From:").strip() if meta else "",
+        clamped = any("ux-clamped" in x.classes for x in body)
+        cards.append({"clamped": clamped, "title": _first(n, "ux-title"), "from": meta[0].removeprefix("From:").strip() if meta else "",
                       "to": meta[1].removeprefix("To:").strip() if len(meta) > 1 else "", "date": _first(n, "ux-card-date"),
                       "lines": lines, "empty": _first(n, "ux-empty"), "body": "\n".join(t for _, t in lines).strip("\n")})
     return cards
@@ -1081,6 +1082,8 @@ def test_the_reported_conversation_shows_every_message_in_true_order():
     with hub(ws) as (at, _):
         _chronological(at)
         assert list(at.exception) == []
+        assert len(_cards(at)) == 5                                            # a long conversation is folded to its newest emails...
+        _click(at, f"ux_expand_hub_{A1}")                                      # ...until the rest are asked for
         assert _order_of(_bodies(at), "Her message ONE", "My message ONE", "Her message TWO", "My message TWO", "My message THREE",
                          "Her message THREE", "Her message FOUR", "My message FOUR", "My message FIVE", "Her message FIVE", "My message SIX")
         assert len(_cards(at)) == 1 + 5 + 6 and not any(c["empty"] for c in _cards(at))
@@ -1175,3 +1178,286 @@ def test_a_campaign_with_no_replies_still_just_says_so():
     with _campaign_tab(ws) as (at, _):
         assert list(at.exception) == [] and any("No responses yet." in i.value for i in at.info)
         assert not _has(at.radio, f"responses_view_{FIXTURE_CAMPAIGN}")              # nothing to lay out
+
+
+# ================================================================ long conversations: Show earlier / Show fewer, Read more / Read less
+
+def _long_conversation(n_sent, lead="1"):
+    """Kari's 3 messages plus `n_sent` emails typed by hand: 3 + n_sent emails in all."""
+    return _with_sent_mail(*[_sent(f"<m{i}@gmail>", f"2026-10-13 {i:02d}:00:00", f"Hand-typed email number {i}") for i in range(n_sent)])      # all later than her replies
+
+
+def _expand_key(namespace="hub", gk=A1):
+    return f"ux_expand_{namespace}_{gk}"
+
+
+@pytest.mark.parametrize("n_sent, collapses", [(0, False), (4, False), (5, False), (6, True), (10, True)])
+def test_a_conversation_of_more_than_eight_emails_is_folded_and_a_short_one_never_is(n_sent, collapses):
+    with hub(_long_conversation(n_sent)) as (at, _):
+        total = 1 + 2 + n_sent                                                  # the template intro, her two replies, and the ones typed by hand
+        assert _has(at.button, _expand_key()) is collapses
+        assert len(_cards(at)) == (5 if collapses else total)
+
+
+def test_a_folded_conversation_shows_the_newest_emails_and_says_how_many_are_hidden():
+    with hub(_long_conversation(10)) as (at, _):                                # 13 emails: 5 shown, 8 hidden
+        bodies = _bodies(at)
+        assert [b for b in bodies if b.startswith("Hand-typed")] == [f"Hand-typed email number {i}" for i in (9, 8, 7, 6, 5)]   # the newest five, newest first
+        assert next(b.label for b in at.button if b.key == _expand_key()) == "▾ Show 8 earlier emails"
+
+
+def test_show_earlier_opens_the_whole_conversation_and_show_fewer_folds_it_again():
+    with hub(_long_conversation(10)) as (at, _):
+        _click(at, _expand_key())
+        assert len(_cards(at)) == 13
+        assert next(b.label for b in at.button if b.key == _expand_key()) == "▴ Show fewer — hide the 8 earlier emails"
+        _click(at, _expand_key())
+        assert len(_cards(at)) == 5
+
+
+def test_when_oldest_first_the_hidden_emails_are_the_old_ones_at_the_top_and_the_newest_five_are_shown():
+    with hub(_long_conversation(10)) as (at, _):
+        _chronological(at)
+        bodies = _bodies(at)
+        assert len(bodies) == 5 and "Hand-typed email number 9" in bodies[-1] and not any("number 0" in b for b in bodies)
+
+
+def test_each_conversation_is_folded_or_opened_on_its_own_and_remembers_it():
+    ws = _long_conversation(10)
+    ws[SENT_TAB]._records.extend(_sent(f"<z{i}@gmail>", f"2026-10-12 12:{i:02d}:00", f"Zed email {i}", lead="5") for i in range(12))
+    with hub(ws) as (at, _):
+        _click(at, _expand_key())                                              # open Kari's
+        _open_conversation(at, A5)
+        assert _has(at.button, _expand_key("hub", A5)) and len(_cards(at)) == 5       # Zed's is still folded
+        _open_conversation(at, A1)
+        assert len(_cards(at)) == 13                                           # and Kari's is still open
+
+
+def test_the_fold_is_a_button_that_does_not_break_the_one_line_safe_markup():
+    with hub(_long_conversation(10)) as (at, _):
+        assert list(at.exception) == [] and list(at.error) == []
+
+
+def _with_long_body(lines):
+    ws = _two_campaign_ws()
+    for record in ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records:
+        if record["ResponseID"] == "rA1":
+            record["FullBody"] = "\n".join(f"Line {i} of her long email" for i in range(lines))
+    return ws
+
+
+def _more_key(index, namespace="hub", gk=A1):
+    return f"ux_more_{namespace}_{gk}_{index}"
+
+
+def test_a_long_email_is_cropped_with_read_more_but_the_newest_email_never_is():
+    with hub(_with_long_body(40)) as (at, _):
+        cards = _cards(at)                                                      # newest first: rA2 (short), rA1 (long), the intro
+        assert [c["clamped"] for c in cards] == [False, True, False]
+        assert next(b.label for b in at.button if (b.key or "").startswith("ux_more_hub_")) == "Read more ▾"
+
+
+def test_the_newest_email_is_never_cropped_however_long_it_is():
+    ws = _two_campaign_ws()
+    for record in ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records:
+        if record["ResponseID"] == "rA2":
+            record["FullBody"] = "\n".join(f"Line {i}" for i in range(60))
+    with hub(ws) as (at, _):
+        assert _cards(at)[0]["clamped"] is False and not any((b.key or "").startswith("ux_more_") for b in at.button)
+
+
+def test_read_more_shows_the_whole_email_and_read_less_crops_it_again():
+    with hub(_with_long_body(40)) as (at, _):
+        key = next(b.key for b in at.button if (b.key or "").startswith("ux_more_hub_"))
+        _click(at, key)
+        assert [c["clamped"] for c in _cards(at)] == [False, False, False]
+        assert next(b.label for b in at.button if b.key == key) == "Read less ▴"
+        _click(at, key)
+        assert [c["clamped"] for c in _cards(at)] == [False, True, False]
+
+
+def test_a_cropped_email_still_contains_every_line_so_nothing_is_hidden_from_the_page():
+    with hub(_with_long_body(40)) as (at, _):
+        assert len(_cards(at)[1]["lines"]) == 40
+
+
+def test_a_short_email_has_no_read_more():
+    with hub() as (at, _):
+        assert not any((b.key or "").startswith("ux_more_") for b in at.button)
+
+
+# ================================================================ the Status menu: a lead's status set by hand
+
+def _status_key(gk=A1, namespace="hub"):
+    return f"{namespace}_statuspick_{gk}"
+
+
+def _set_status(at, status, gk=A1, namespace="hub"):
+    at.radio(key=_status_key(gk, namespace)).set_value(status)
+    at.run(timeout=25)
+
+
+def _manual_rows(ws, intent, lead="1"):
+    for record in ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records:
+        if str(record["LeadID"]) == lead:
+            record.update({"Intent": intent, "IntentConfidence": "Manual"})
+    return ws
+
+
+def _status_payload(captured):
+    return json.loads(captured["commits"][0]["content"].decode("utf-8"))
+
+
+def test_the_status_menu_offers_automatic_and_the_four_statuses_and_starts_on_automatic():
+    with hub() as (at, _):
+        radio = at.radio(key=_status_key())
+        assert radio.options == ["Automatic", "Lead", "Interested", "Not interested", "Unclear"] and radio.value == "auto"
+        assert [r.label for r in at.radio if r.key == _status_key()] == ["Lead status"]
+
+
+def test_choosing_a_status_commits_a_payload_and_starts_the_workflow():
+    with hub() as (at, captured):
+        _set_status(at, "not_interested")
+        assert list(at.exception) == [] and list(at.error) == []
+        payload = _status_payload(captured)
+        assert payload["campaign"] == FIXTURE_CAMPAIGN and payload["lead_id"] == "1" and payload["status"] == "not_interested"
+        assert captured["commits"][0]["path"].startswith(f"status_changes/{FIXTURE_CAMPAIGN}/") and captured["commits"][0]["path"].endswith("-1.json")
+        assert captured["dispatches"] == [("set_response_status.yml", {"campaign": FIXTURE_CAMPAIGN, "payload_path": captured["commits"][0]["path"]})]
+        assert any("Status saved" in s.value for s in at.success)
+
+
+def test_the_payload_holds_no_personal_data_because_the_repository_is_public():
+    with hub() as (at, captured):
+        _set_status(at, "interested")
+        text = captured["commits"][0]["content"].decode("utf-8")
+        assert set(json.loads(text)) == {"campaign", "lead_id", "status", "set_at"}
+        for private in ("@", "kari", "Kari", "rates", "Partnership"):
+            assert private not in text
+
+
+def test_the_new_status_shows_at_once_marked_as_saving_and_moves_the_rail_counts():
+    with hub() as (at, _):
+        _set_status(at, "not_interested")
+        assert _header(at)["chips"][-1] == "👎 Not interested · set manually · saving…"
+        assert _rail_counts(at)["Not interested"] == "2" and _rail_counts(at)["Interested"] == "0"
+        _click(at, "ux_railbtn_hub_not_interested")
+        assert A1 in _row_keys(at)
+
+
+def test_the_menu_keeps_showing_the_status_in_force():
+    with hub() as (at, _):
+        _set_status(at, "lead")
+        assert at.radio(key=_status_key()).value == "lead"
+
+
+def test_a_status_set_by_hand_in_the_sheet_beats_the_ai_and_the_keywords():
+    ws = _manual_rows(_two_campaign_ws(), "Not Interested")                    # Kari's rows also say 'Interested' by AI and 'rates' in the words
+    with hub(ws) as (at, _):
+        assert _header(at)["chips"][-1] == "👎 Not interested · set manually"
+        assert at.radio(key=_status_key()).value == "not_interested"
+
+
+def test_a_status_set_by_hand_beats_even_a_later_ai_reading():
+    ws = _manual_rows(_two_campaign_ws(), "Not Interested")
+    ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records.append(
+        _resp("rLate", "1", '"Kari B" <kari@abc.com>', "Re: Partnership", "x", "2026-10-13 10:00:00", FullBody="Yes!", Intent="Interested", IntentConfidence="High"))
+    with hub(ws) as (at, _):
+        assert _header(at)["chips"][-1].startswith("👎 Not interested · set manually")
+
+
+def test_a_status_set_by_hand_beats_a_latest_auto_reply_in_the_rail_too():
+    ws = _manual_rows(_two_campaign_ws(), "Interested")
+    ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records.append(
+        _resp("rOoo", "1", '"Kari B" <kari@abc.com>', "Automatic reply", "away", "2026-10-13 10:00:00", Classification="Auto-Reply"))
+    with hub(ws) as (at, _):
+        _click(at, "ux_railbtn_hub_interested")
+        assert A1 in _row_keys(at)
+        _click(at, "ux_railbtn_hub_auto")
+        assert A1 not in _row_keys(at)
+
+
+def test_automatic_ignores_a_manual_status_at_once_and_goes_back_to_the_automatic_reading():
+    ws = _manual_rows(_two_campaign_ws(), "Not Interested")
+    with hub(ws) as (at, captured):
+        _set_status(at, "auto")
+        assert _status_payload(captured)["status"] == "auto"
+        assert _header(at)["chips"][-1] == "👍 Interested · by keywords"            # her words, now that the manual value is ignored
+        assert _status_payload(captured)["lead_id"] == "1"
+
+
+def test_automatic_on_a_reply_with_no_clear_words_falls_back_to_unclear_not_to_the_old_manual_value():
+    ws = _manual_rows(_zed_says("Thanks!"), "Interested", lead="5")                 # Zed said nothing clear; a manual status was set on him
+    with hub(ws) as (at, _):
+        _open_conversation(at, A5)
+        assert _header(at)["chips"][-1] == "👍 Interested · set manually"
+        _set_status(at, "auto", gk=A5)
+        assert _header(at)["chips"][-1] == "❔ Unclear"
+
+
+def test_once_the_sheet_catches_up_the_word_saving_goes_away():
+    ws = _two_campaign_ws()
+    with hub(ws) as (at, _):
+        _set_status(at, "not_interested")
+        assert at.session_state["hub_pending_status"] == {A1: "not_interested"}
+        _manual_rows(ws, "Not Interested")                                       # the workflow has written it
+        next(b for b in at.button if b.label == "🔄 Refresh").click()
+        at.run(timeout=25)
+        assert _header(at)["chips"][-1] == "👎 Not interested · set manually" and at.session_state["hub_pending_status"] == {}
+
+
+def test_a_failed_save_says_so_and_changes_nothing():
+    with hub(dispatch_error=GitHubActionsError("boom")) as (at, _):
+        _set_status(at, "not_interested")
+        assert any("Couldn't save the status: boom" in e.value for e in at.error)
+        assert at.session_state["hub_pending_status"] == {} and _header(at)["chips"][-1] == "👍 Interested · High confidence"
+
+
+def test_a_status_for_one_conversation_does_not_touch_another():
+    with hub() as (at, _):
+        _set_status(at, "not_interested")
+        _open_conversation(at, A5)
+        assert at.radio(key=_status_key(A5)).value == "auto" and _header(at)["chips"][-1] == "👎 Not interested · High confidence"
+
+
+def test_a_reply_that_is_not_linked_to_a_lead_cannot_be_given_a_status():
+    orphan = _resp("rZ", "", '"Nobody" <nobody@abc.com>', "Re: Who?", "hi", "2026-10-13 16:00:00", FullBody="hi")
+    with hub(_two_campaign_ws(extra_a_responses=[orphan])) as (at, _):
+        key = next(k for k in _row_keys(at) if "_no_lead_" in k)
+        _open_conversation(at, key)
+        assert not _has(at.radio, _status_key(key)) and any("isn't linked to a lead" in c.value for c in at.caption)
+
+
+def test_the_campaign_tab_has_its_own_status_menu_and_saves_for_that_campaign():
+    with _campaign_tab() as (at, captured):
+        _set_status(at, "interested", gk=A1, namespace=TAB)
+        assert _status_payload(captured)["campaign"] == FIXTURE_CAMPAIGN and captured["dispatches"][0][0] == "set_response_status.yml"
+
+
+# ---- statuses stored by the Label Replies job
+
+def _stored_keywords(ws, response_id, intent):
+    for record in ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records:
+        if record["ResponseID"] == response_id:
+            record.update({"Intent": intent, "IntentConfidence": "Keywords"})
+    return ws
+
+
+def test_a_status_the_label_job_stored_from_the_words_is_shown_as_by_keywords():
+    ws = _stored_keywords(_zed_says("No thank you"), "rA3", "Not Interested")
+    with hub(ws) as (at, _):
+        _open_conversation(at, A5)
+        assert _header(at)["chips"][-1] == "👎 Not interested · by keywords"
+
+
+def test_a_stored_keyword_lead_is_only_a_hint_and_does_not_override_a_clear_yes():
+    ws = _two_campaign_ws()
+    _stored_keywords(ws, "rA2", "Lead / Needs Follow-up")                       # the follow-up question, labelled Lead by the job
+    with hub(ws) as (at, _):
+        assert _header(at)["chips"][-1] == "👍 Interested · High confidence"
+
+
+def test_a_stored_keyword_yes_or_no_counts_as_a_clear_reading():
+    ws = _two_campaign_ws()
+    _stored_keywords(ws, "rA2", "Not Interested")
+    with hub(ws) as (at, _):
+        assert _header(at)["chips"][-1] == "👎 Not interested · by keywords"       # newer than her earlier AI-read yes
