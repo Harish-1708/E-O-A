@@ -1,6 +1,5 @@
 """Page-level tests for the Unibox-style Inbox: on the all-campaigns Responses page and inside each campaign's own
-Responses tab. The real default layout applies here (Inbox); the Classic layout is covered by the older tests in
-test_pages_smoke.py. The page is drawn as HTML, so these tests read it back through a small HTML parser."""
+Responses tab. The Inbox is the only layout. The page is drawn as HTML, so these tests read it back through a small HTML parser."""
 import base64
 import contextlib
 import json
@@ -319,12 +318,12 @@ def test_the_inbox_is_the_default_layout_with_a_rail_a_list_and_an_open_conversa
     with hub() as (at, _):
         assert list(at.exception) == [], list(at.exception)
         assert list(at.error) == []
-        assert at.radio(key="responses_view").value == "Inbox"
+        assert not _has(at.radio, "responses_view")                                 # there is no layout switch any more
         assert _row_keys(at) == [A1, B5, A5]                                    # newest first, one row per conversation
         assert at.session_state["hub_selected"] == A1                           # the newest is open
         assert _header(at)["name"] == "Kari B" and _header(at)["email"] == f"kari@abc.com · {FIXTURE_CAMPAIGN}"
         assert [r["selected"] for r in _rows(at)] == [True, False, False]
-        assert not any("View full conversation" in e.label for e in at.expander)        # not the classic cards
+        assert not any("View full conversation" in e.label for e in at.expander)        # no card-per-reply expanders
 
 
 def test_the_list_rows_show_the_sender_subject_preview_and_date():
@@ -700,14 +699,6 @@ def test_each_conversation_shows_only_its_own_campaigns_messages_even_when_lead_
         assert "I am a different person entirely" in _bodies(at) and "Not for me, thanks." not in _bodies(at)
 
 
-def test_the_classic_layout_no_longer_mixes_campaigns_either():
-    with hub() as (at, _):
-        at.radio(key="responses_view").set_value("Classic")
-        at.run(timeout=25)
-        texts = [t.value for t in at.text]
-        assert texts.count("I am a different person entirely") == 1 and texts.count("Not for me, thanks.") == 1
-
-
 # ================================================================ the Reply box and sending
 
 def test_the_message_box_is_closed_until_reply_is_pressed_and_pressing_it_again_closes_it():
@@ -718,6 +709,20 @@ def test_the_message_box_is_closed_until_reply_is_pressed_and_pressing_it_again_
         assert any("Sending as: sales1" in c.value for c in at.caption)
         _compose(at, A1)
         assert not _has(at.text_area, f"hub_body_{A1}")
+
+
+def test_the_message_box_is_prefilled_with_the_leads_address_and_a_re_subject():
+    with hub() as (at, _):
+        _compose(at, A1)
+        assert at.text_input(key=f"hub_to_{A1}").value == "kari@abc.com"
+        assert at.text_input(key=f"hub_subject_{A1}").value == "Re: Partnership"
+
+
+def test_the_campaign_tabs_message_box_is_prefilled_too():
+    with _campaign_tab() as (at, _):
+        _compose(at, A1, TAB)
+        assert at.text_input(key=f"{TAB}_to_{A1}").value == "kari@abc.com"
+        assert at.text_input(key=f"{TAB}_subject_{A1}").value == "Re: Partnership"
 
 
 def test_each_conversation_has_its_own_message_box_and_keeps_what_was_typed_in_it():
@@ -856,7 +861,7 @@ def test_the_all_campaigns_page_does_not_pause_before_dispatch():
         assert "dispatches" in captured and not any(call.args == (1.0,) for call in slept.call_args_list)
 
 
-# ================================================================ search keeps the whole thread, odd data, the Classic switch
+# ================================================================ search keeps the whole thread, odd data
 
 def test_a_search_narrows_the_list_but_the_open_conversation_still_shows_every_message():
     with hub() as (at, _):
@@ -866,14 +871,13 @@ def test_a_search_narrows_the_list_but_the_open_conversation_still_shows_every_m
         assert "Hi! Interested — what are your rates?" in _bodies(at) and "Also, do you cover shipping?" in _bodies(at)
 
 
-def test_switching_to_classic_shows_the_previous_card_layout():
+def test_there_is_no_layout_switch_and_none_of_the_old_card_widgets_remain():
     with hub() as (at, _):
-        at.radio(key="responses_view").set_value("Classic")
-        at.run(timeout=25)
         assert list(at.exception) == []
-        assert any("View full conversation" in e.label for e in at.expander)
-        assert _open_buttons(at) == [] and _nodes(at, "ux-row") == []
-        assert _has(at.selectbox, "responses_inbox_filter")                        # the classic "More" filter is back
+        assert not _has(at.radio, "responses_view") and not _has(at.selectbox, "responses_inbox_filter")
+        assert not any("Classic" in str(getattr(w, "options", "")) for w in at.radio)
+        assert not any("View full conversation" in e.label for e in at.expander)
+        assert not any((b.key or "").startswith(("mark_read_", "send_reply_")) for b in at.button)       # the old per-card buttons
 
 
 def test_an_email_with_no_readable_text_says_so_in_its_card_and_in_the_list():
@@ -1095,7 +1099,7 @@ def test_the_campaign_tab_opens_in_the_inbox_layout_with_only_that_campaigns_con
     with _campaign_tab() as (at, _):
         assert list(at.exception) == [], list(at.exception)
         assert list(at.error) == []
-        assert at.radio(key=f"responses_view_{FIXTURE_CAMPAIGN}").value == "Inbox"
+        assert not _has(at.radio, f"responses_view_{FIXTURE_CAMPAIGN}")              # no layout switch any more
         assert _row_keys(at, TAB) == [A1, A5]                                       # Campaign B's conversation is not here
         assert at.session_state[f"{TAB}_selected"] == A1
         assert len(at.tabs) == 6                                                    # the tab count is unchanged
@@ -1164,20 +1168,12 @@ def test_a_blank_reply_from_the_campaign_tab_is_refused():
         assert at.error and "commits" not in captured
 
 
-def test_the_campaign_tab_can_switch_back_to_the_classic_layout():
-    with _campaign_tab() as (at, _):
-        at.radio(key=f"responses_view_{FIXTURE_CAMPAIGN}").set_value("Classic")
-        at.run(timeout=25)
-        assert list(at.exception) == [] and any("View full conversation" in e.label for e in at.expander)
-        assert _open_buttons(at, TAB) == [] and _nodes(at, "ux-row") == []
-
-
 def test_a_campaign_with_no_replies_still_just_says_so():
     ws = _two_campaign_ws()
     ws[f"{FIXTURE_CAMPAIGN} Response Sheet"] = FakeWorksheet([])
     with _campaign_tab(ws) as (at, _):
         assert list(at.exception) == [] and any("No responses yet." in i.value for i in at.info)
-        assert not _has(at.radio, f"responses_view_{FIXTURE_CAMPAIGN}")              # nothing to lay out
+        assert not _has(at.radio, f"responses_view_{FIXTURE_CAMPAIGN}")
 
 
 # ================================================================ long conversations: Show earlier / Show fewer, Read more / Read less
