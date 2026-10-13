@@ -1,7 +1,7 @@
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import streamlit as st
 import yaml
@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from auth import login_gate, current_user  # noqa: E402
 from page_state import mark_active_page  # noqa: E402
 from config import (  # noqa: E402
+    REPO_ROOT,
     WORKFLOW_IMPORT_LEADS, WORKFLOW_REMOVE_LEADS, WORKFLOW_DASHBOARD,
     WORKFLOW_SEND, WORKFLOW_CHECK_REPLIES, WORKFLOW_BACKFILL_THREAD_SUBJECT, WORKFLOW_SYNC_ASANA,
     TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, SETTINGS_PATH,
@@ -57,6 +58,8 @@ from inbox_view import InboxContext, render_inbox  # noqa: E402
 from leads_view import render_lead_browser, render_extra_filters, render_clear_filters  # noqa: E402
 from leads_logic import filter_counts, apply_extra_filters, any_extra_filter, stage_count, stage_labels  # noqa: E402
 from leads_actions import render_lead_actions  # noqa: E402
+from campaign_html import CAMPAIGN_SKIN_CSS, UI_BUILD, build_html, chips_html, crumb_html, subline_html  # noqa: E402
+from campaign_header_logic import read_cron_minute, next_send_line, schedule_summary, sender_summary, subline  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
 from conversation_logic import filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
@@ -492,178 +495,202 @@ def _render_performance_tab(campaign_cfg, leads, responses, send_log, error_log)
     keeps everything that tab showed (stage, variant and sender tables, and
     all-time errors) alongside the reply-quality figures."""
     perf = build_campaign_performance(campaign_cfg, leads, responses, send_log, error_log)
+
+    def _refresh_button():
+        st.button("⟳ Refresh", key="campaigns_perf_refresh", on_click=_refresh_all_data)
+
     render_performance(perf, key_prefix=f"campaign_perf_{campaign_cfg['_campaign_name']}",
-                       best=build_best_performers([perf], perf), show_campaign_ranking=False)
+                       best=build_best_performers([perf], perf), show_campaign_ranking=False,
+                       actions=_refresh_button, export_name=campaign_cfg["_campaign_name"])
+
+
+def _open_import_panel():
+    st.session_state["ld_import_open"] = True
+
+
+def _close_import_panel():
+    st.session_state["ld_import_open"] = False
 
 
 def _render_data_tab(campaign_cfg, leads):
     campaign_name = campaign_cfg["_campaign_name"]
 
-    with st.expander("🔍 Diagnose: what is this page actually reading?"):
-        st.caption(
-            "If leads you've confirmed are in the Sheet aren't showing up here, this tells you exactly "
-            "which tab this page is reading and whether the problem is a stale cache or something else "
-            "entirely — compare the tab name below against the ACTUAL tab name in Google Sheets."
-        )
-        st.write(f"**Tab this page reads:** `{campaign_cfg['master_tab']}`")
-        st.write(f"**Leads currently shown (cached, up to 30s old):** {len(leads)}")
-        if st.button("Force a live check (bypasses every cache)", key="data_tab_live_diagnostic"):
-            try:
-                live_leads = _get_connector().get_all_leads(campaign_cfg["master_tab"])
-                st.write(f"**Leads actually on the Sheet right now, read live:** {len(live_leads)}")
-                if len(live_leads) != len(leads):
-                    st.warning(
-                        "These numbers differ — the cache genuinely is stale. Click '🔄 Refresh data' "
-                        "above (or reload the page) to clear it."
-                    )
-                else:
-                    st.info(
-                        "These numbers match — the cache isn't the problem. If leads you've confirmed "
-                        "are in the Sheet still aren't in this count, the issue is which TAB is being "
-                        "read (check the tab name above against Google Sheets' actual tab name), not caching."
-                    )
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"Live check failed: {exc}")
-
-    with st.expander("➕ Add Leads (upload CSV)", expanded=not leads):
-        st.caption(
-            "Your CSV's column headers can be named anything — you'll map them to the right fields "
-            "after upload. A minimal example:"
-        )
-        st.code(
-            "FirstName,LastName,Email,Company\n"
-            "Rocky,D,rocky@example.com,Example Corp\n"
-            "Jane,Smith,jane@example.com,Acme Inc",
-            language="csv",
-        )
-        st.caption(f"{', '.join(KNOWN_FIELDS)} are recognized automatically. Only Email is required — any "
-                   "other column becomes a custom field on the lead using its own column name (visible in "
-                   "the Master Sheet as extra columns, and picked up automatically by Asana Sync if the "
-                   "name matches one of its fields — Client, Product, Content Score, etc.).")
-        uploaded = st.file_uploader("Upload CSV", type=["csv"], key="data_csv_upload")
-        if uploaded is not None:
-            decode_error = None
-            try:
-                columns, rows = parse_csv_bytes(uploaded.getvalue())
-            except Exception as exc:  # noqa: BLE001 - a bad upload must never crash the whole page
-                # parse_csv_bytes already falls through several encodings
-                # before ever raising, so reaching here means something
-                # genuinely unexpected (e.g. not text data at all) — this
-                # is the backstop, not the primary defense.
-                decode_error = exc
-                columns, rows = [], []
-            if decode_error is not None:
-                st.error(f"Couldn't read that file as a CSV: {decode_error}")
-            elif not columns:
-                st.error("Couldn't read any columns from that file — is it a valid CSV?")
-            else:
+    def _diagnose_panel():
+        with st.expander("🔍 Diagnose: what is this page actually reading?"):
+            st.caption(
+                "If leads you've confirmed are in the Sheet aren't showing up here, this tells you exactly "
+                "which tab this page is reading and whether the problem is a stale cache or something else "
+                "entirely — compare the tab name below against the ACTUAL tab name in Google Sheets."
+            )
+            st.write(f"**Tab this page reads:** `{campaign_cfg['master_tab']}`")
+            st.write(f"**Leads currently shown (cached, up to 30s old):** {len(leads)}")
+            if st.button("Force a live check (bypasses every cache)", key="data_tab_live_diagnostic"):
                 try:
-                    header = _get_master_header_cached(campaign_cfg["_campaign_name"])
-                    custom_columns = [c for c in header if c not in outreach.MASTER_COLUMNS]
-                except Exception:  # noqa: BLE001 - tab may not exist yet for a brand new campaign
-                    custom_columns = []
-
-                st.caption(f"{len(rows)} row(s) detected. Every column is mapped automatically below — "
-                           "change any of them, or pick Skip to leave one out.")
-
-                duplicate_columns = find_duplicate_columns(columns)
-                if duplicate_columns:
-                    st.warning(
-                        f"This CSV has the same column name more than once: {', '.join(duplicate_columns)}. "
-                        "Only the LAST one's data survived when the file was read — the earlier column(s) "
-                        "with that name are already gone, not just hidden here. Rename one of them in the "
-                        "source file and re-upload if you need both."
-                    )
-
-                mapping = {}
-                custom_field_name_errors = []
-                default_mapping = build_default_mapping(columns, custom_columns, outreach.MASTER_COLUMNS)
-                for col_idx, col in enumerate(columns):
-                    default = default_mapping.get(col) or "-- Skip --"
-                    # The column's own name is always a valid option in ITS
-                    # OWN dropdown, even when it isn't yet a known or
-                    # existing field — this is what lets a brand-new custom
-                    # field default automatically, with no extra clicks or
-                    # retyping the same name a second time.
-                    col_options = ["-- Skip --"] + KNOWN_FIELDS + custom_columns
-                    if default not in col_options and default != "-- Skip --":
-                        col_options = col_options + [default]
-                    col_options = col_options + [NEW_CUSTOM_FIELD_OPTION]
-                    default_idx = col_options.index(default) if default in col_options else 0
-                    # Keyed by POSITION as well as name — two columns can
-                    # share the same name (see the duplicate-column warning
-                    # above), and a key built from the name alone would
-                    # crash Streamlit outright rather than just producing
-                    # confusing data.
-                    choice = st.selectbox(f"'{col}' maps to", col_options, index=default_idx,
-                                           key=f"map_{col_idx}_{col}")
-                    if choice == NEW_CUSTOM_FIELD_OPTION:
-                        new_field_name = st.text_input(f"New field name for '{col}'",
-                                                        key=f"map_new_field_{col_idx}_{col}")
-                        field_name_error = validate_custom_field_name(new_field_name, outreach.MASTER_COLUMNS)
-                        if field_name_error:
-                            custom_field_name_errors.append(f"'{col}': {field_name_error}")
-                            mapping[col] = ""
-                        else:
-                            mapping[col] = new_field_name.strip()
+                    live_leads = _get_connector().get_all_leads(campaign_cfg["master_tab"])
+                    st.write(f"**Leads actually on the Sheet right now, read live:** {len(live_leads)}")
+                    if len(live_leads) != len(leads):
+                        st.warning(
+                            "These numbers differ — the cache genuinely is stale. Click '🔄 Refresh data' "
+                            "above (or reload the page) to clear it."
+                        )
                     else:
-                        mapping[col] = "" if choice == "-- Skip --" else choice
+                        st.info(
+                            "These numbers match — the cache isn't the problem. If leads you've confirmed "
+                            "are in the Sheet still aren't in this count, the issue is which TAB is being "
+                            "read (check the tab name above against Google Sheets' actual tab name), not caching."
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Live check failed: {exc}")
 
-                mapped_rows = apply_mapping(rows, mapping)
-                valid_count = count_valid_rows(mapped_rows)
-                mapping_error = validate_mapping(mapping)
-
-                st.write(f"**{valid_count} of {len(rows)} row(s) have an email and will be imported** "
-                         "(others are skipped — Email is required). Duplicates against existing leads "
-                         "are also skipped automatically, checked at import time.")
-                st.caption("Imported leads start as **Pending** — approve them below before they're eligible to send.")
-                allow_duplicate_emails = st.checkbox(
-                    "Allow re-importing an email that already exists (e.g. contacting the same creator "
-                    "again for a different video — each import becomes its own row and, once synced, "
-                    "its own separate Asana task; the automated sender still only ever emails the first "
-                    "row for a given address, so this never risks a duplicate send)",
-                    key="import_allow_duplicate_emails")
-
-                for field_name_error in custom_field_name_errors:
-                    st.error(field_name_error)
-                if mapping_error:
-                    st.error(mapping_error)
-
-                if not custom_field_name_errors and not mapping_error and st.button(
-                        "Import Leads", type="primary", key="confirm_import"):
+    def _add_leads_panel():
+        with st.expander("➕ Add Leads (upload CSV)", expanded=(not leads) or bool(st.session_state.get("ld_import_open"))):
+            st.caption(
+                "Your CSV's column headers can be named anything — you'll map them to the right fields "
+                "after upload. A minimal example:"
+            )
+            st.code(
+                "FirstName,LastName,Email,Company\n"
+                "Rocky,D,rocky@example.com,Example Corp\n"
+                "Jane,Smith,jane@example.com,Acme Inc",
+                language="csv",
+            )
+            st.caption(f"{', '.join(KNOWN_FIELDS)} are recognized automatically. Only Email is required — any "
+                       "other column becomes a custom field on the lead using its own column name (visible in "
+                       "the Master Sheet as extra columns, and picked up automatically by Asana Sync if the "
+                       "name matches one of its fields — Client, Product, Content Score, etc.).")
+            uploaded = st.file_uploader("Upload CSV", type=["csv"], key="data_csv_upload")
+            if uploaded is not None:
+                decode_error = None
+                try:
+                    columns, rows = parse_csv_bytes(uploaded.getvalue())
+                except Exception as exc:  # noqa: BLE001 - a bad upload must never crash the whole page
+                    # parse_csv_bytes already falls through several encodings
+                    # before ever raising, so reaching here means something
+                    # genuinely unexpected (e.g. not text data at all) — this
+                    # is the backstop, not the primary defense.
+                    decode_error = exc
+                    columns, rows = [], []
+                if decode_error is not None:
+                    st.error(f"Couldn't read that file as a CSV: {decode_error}")
+                elif not columns:
+                    st.error("Couldn't read any columns from that file — is it a valid CSV?")
+                else:
                     try:
-                        client = _get_github_client()
-                        payload = build_import_payload(mapped_rows, allow_duplicate_emails=allow_duplicate_emails)
-                        path = import_payload_path(campaign_name)
-                        client.create_file(path, payload_to_bytes(payload),
-                                            message=f"Import {valid_count} lead(s) for {campaign_name} "
-                                                     f"(via Streamlit, by {current_user()})")
-                        time.sleep(1)
-                        client.dispatch_workflow(WORKFLOW_IMPORT_LEADS,
-                                                  {"campaign": campaign_name, "payload_path": path})
-                        st.success(f"Import triggered — {valid_count} lead(s) will appear within a minute or two.")
-                    except GitHubActionsError as exc:
-                        st.error(f"Import failed: {exc}")
+                        header = _get_master_header_cached(campaign_cfg["_campaign_name"])
+                        custom_columns = [c for c in header if c not in outreach.MASTER_COLUMNS]
+                    except Exception:  # noqa: BLE001 - tab may not exist yet for a brand new campaign
+                        custom_columns = []
 
-    st.divider()
-    st.subheader("Leads")
-    st.caption("Approval is informational only — every lead with a valid email is eligible to send.")
+                    st.caption(f"{len(rows)} row(s) detected. Every column is mapped automatically below — "
+                               "change any of them, or pick Skip to leave one out.")
+
+                    duplicate_columns = find_duplicate_columns(columns)
+                    if duplicate_columns:
+                        st.warning(
+                            f"This CSV has the same column name more than once: {', '.join(duplicate_columns)}. "
+                            "Only the LAST one's data survived when the file was read — the earlier column(s) "
+                            "with that name are already gone, not just hidden here. Rename one of them in the "
+                            "source file and re-upload if you need both."
+                        )
+
+                    mapping = {}
+                    custom_field_name_errors = []
+                    default_mapping = build_default_mapping(columns, custom_columns, outreach.MASTER_COLUMNS)
+                    for col_idx, col in enumerate(columns):
+                        default = default_mapping.get(col) or "-- Skip --"
+                        # The column's own name is always a valid option in ITS
+                        # OWN dropdown, even when it isn't yet a known or
+                        # existing field — this is what lets a brand-new custom
+                        # field default automatically, with no extra clicks or
+                        # retyping the same name a second time.
+                        col_options = ["-- Skip --"] + KNOWN_FIELDS + custom_columns
+                        if default not in col_options and default != "-- Skip --":
+                            col_options = col_options + [default]
+                        col_options = col_options + [NEW_CUSTOM_FIELD_OPTION]
+                        default_idx = col_options.index(default) if default in col_options else 0
+                        # Keyed by POSITION as well as name — two columns can
+                        # share the same name (see the duplicate-column warning
+                        # above), and a key built from the name alone would
+                        # crash Streamlit outright rather than just producing
+                        # confusing data.
+                        choice = st.selectbox(f"'{col}' maps to", col_options, index=default_idx,
+                                               key=f"map_{col_idx}_{col}")
+                        if choice == NEW_CUSTOM_FIELD_OPTION:
+                            new_field_name = st.text_input(f"New field name for '{col}'",
+                                                            key=f"map_new_field_{col_idx}_{col}")
+                            field_name_error = validate_custom_field_name(new_field_name, outreach.MASTER_COLUMNS)
+                            if field_name_error:
+                                custom_field_name_errors.append(f"'{col}': {field_name_error}")
+                                mapping[col] = ""
+                            else:
+                                mapping[col] = new_field_name.strip()
+                        else:
+                            mapping[col] = "" if choice == "-- Skip --" else choice
+
+                    mapped_rows = apply_mapping(rows, mapping)
+                    valid_count = count_valid_rows(mapped_rows)
+                    mapping_error = validate_mapping(mapping)
+
+                    st.write(f"**{valid_count} of {len(rows)} row(s) have an email and will be imported** "
+                             "(others are skipped — Email is required). Duplicates against existing leads "
+                             "are also skipped automatically, checked at import time.")
+                    st.caption("Imported leads start as **Pending** — approve them below before they're eligible to send.")
+                    allow_duplicate_emails = st.checkbox(
+                        "Allow re-importing an email that already exists (e.g. contacting the same creator "
+                        "again for a different video — each import becomes its own row and, once synced, "
+                        "its own separate Asana task; the automated sender still only ever emails the first "
+                        "row for a given address, so this never risks a duplicate send)",
+                        key="import_allow_duplicate_emails")
+
+                    for field_name_error in custom_field_name_errors:
+                        st.error(field_name_error)
+                    if mapping_error:
+                        st.error(mapping_error)
+
+                    if not custom_field_name_errors and not mapping_error and st.button(
+                            "Import Leads", type="primary", key="confirm_import"):
+                        try:
+                            client = _get_github_client()
+                            payload = build_import_payload(mapped_rows, allow_duplicate_emails=allow_duplicate_emails)
+                            path = import_payload_path(campaign_name)
+                            client.create_file(path, payload_to_bytes(payload),
+                                                message=f"Import {valid_count} lead(s) for {campaign_name} "
+                                                         f"(via Streamlit, by {current_user()})")
+                            time.sleep(1)
+                            client.dispatch_workflow(WORKFLOW_IMPORT_LEADS,
+                                                      {"campaign": campaign_name, "payload_path": path})
+                            st.success(f"Import triggered — {valid_count} lead(s) will appear within a minute or two.")
+                        except GitHubActionsError as exc:
+                            st.error(f"Import failed: {exc}")
+
     if not leads:
-        st.info("No leads yet — add some above.")
+        st.info("No leads yet — add some below.")
+        _add_leads_panel()
+        _diagnose_panel()
         return
 
-    search_query = st.text_input("Search", key="data_search", placeholder="Name, email, or company...")
-    option_counts = filter_counts(leads, FILTER_OPTIONS, filter_leads)
-    status_filter = st.radio("Filter", FILTER_OPTIONS, key="data_filter", horizontal=True, label_visibility="collapsed",
-                             format_func=lambda option: f"{option} · {option_counts[option]}")
+    # the search, the status chips and the three extra filters live together in one card
+    with st.container(key="ld_toolbar"):
+        search_column, add_column = st.columns([7, 1])
+        with search_column:
+            search_query = st.text_input("Search", key="data_search", placeholder="🔍 Search name, email or company…", label_visibility="collapsed")
+        with add_column:
+            st.button("＋ Add leads", key="ld_add_leads", on_click=_open_import_panel, use_container_width=True)
+        option_counts = filter_counts(leads, FILTER_OPTIONS, filter_leads)
+        status_filter = st.radio("Filter", FILTER_OPTIONS, key="data_filter", horizontal=True, label_visibility="collapsed",
+                                 format_func=lambda option: f"{option} · {option_counts[option]}")
 
-    stage_names = [s.get("name") for s in (campaign_cfg.get("stages") or [])]
-    sender_filter, stage_filter, recency_filter = render_extra_filters(leads, stage_names)
+        stage_names = [s.get("name") for s in (campaign_cfg.get("stages") or [])]
+        sender_filter, stage_filter, recency_filter = render_extra_filters(leads, stage_names)
 
-    shown_stage_count = stage_count(stage_names, leads)
-    filtered = apply_extra_filters(search_leads(filter_leads(leads, status_filter), search_query), shown_stage_count,
-                                   stage_labels(stage_names, shown_stage_count), sender_filter, stage_filter, recency_filter)
-    render_clear_filters(any_extra_filter(sender_filter, stage_filter, recency_filter) or bool(search_query.strip()) or status_filter != FILTER_OPTIONS[0])
+        shown_stage_count = stage_count(stage_names, leads)
+        filtered = apply_extra_filters(search_leads(filter_leads(leads, status_filter), search_query), shown_stage_count,
+                                       stage_labels(stage_names, shown_stage_count), sender_filter, stage_filter, recency_filter)
+        render_clear_filters(any_extra_filter(sender_filter, stage_filter, recency_filter) or bool(search_query.strip()) or status_filter != FILTER_OPTIONS[0])
+    if st.session_state.get("ld_import_open"):
+        # opened from the toolbar's "＋ Add leads": the same import panel, right under it (it is drawn only once: down at the foot when closed)
+        st.button("✕ Close the import panel", key="ld_import_close", on_click=_close_import_panel)
+        _add_leads_panel()
     st.caption(f"Showing {len(filtered)} of {len(leads)} lead(s)")
 
     # The lead table and the side panel for the lead you click (see leads_view). The controls that change one lead (stop
@@ -708,6 +735,11 @@ def _render_data_tab(campaign_cfg, leads):
                     st.success(f"Removal triggered for {len(lead_ids)} lead(s).")
                 except GitHubActionsError as exc:
                     st.error(f"Removal failed: {exc}")
+
+    st.caption("Approval is informational only — every lead with a valid email is eligible to send.")
+    if not st.session_state.get("ld_import_open"):
+        _add_leads_panel()
+    _diagnose_panel()
 
 
 def _fetch_live_stages_and_variants(client, campaign_name, stage_wait_days=None):
@@ -1115,7 +1147,6 @@ def _render_settings_tab(campaign_cfg, leads):
     _render_maintenance_section_in_settings(campaign_cfg)
     _render_asana_sync_section_in_settings(campaign_cfg)
     _render_tracker_sync_section_in_settings(campaign_cfg)
-    _render_send_section_in_settings(campaign_cfg, leads)
     _render_delete_campaign_section(campaign_cfg)
 
 
@@ -1324,15 +1355,12 @@ def _restore_campaign(campaign_name: str) -> bool:
         return False
 
 
-def _render_status_controls(campaign_cfg, leads, just_arrived: bool):
+def _render_status_controls(campaign_cfg, leads, just_arrived: bool, send_log=()):
+    """The campaign's title bar — its name, its status, chips for its schedule and senders, and the Launch / Pause / Resume button —
+    followed by what is wrong with it (if anything) and how many emails went out today. (These are the same elements as ever, the
+    title, the status heading and the same buttons, grouped in named containers so the page's stylesheet can lay them out in a row.)"""
     campaign_name = campaign_cfg["_campaign_name"]
     status, problems = compute_campaign_status(campaign_cfg, leads)
-
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.subheader(status_label(status))
-        if problems:
-            st.caption("⚠️ " + " · ".join(problems))
 
     launch_confirm_key = "show_launch_confirm"
     if launch_confirm_key not in st.session_state:
@@ -1343,18 +1371,40 @@ def _render_status_controls(campaign_cfg, leads, just_arrived: bool):
         # navigation, or it silently reappears on a later, unrelated visit.
         st.session_state[launch_confirm_key] = False
 
-    with col2:
-        if status == STATUS_DRAFT:
-            if st.button("🚀 Launch", type="primary"):
-                st.session_state[launch_confirm_key] = True
-        elif status in (STATUS_RUNNING, STATUS_ATTENTION):
-            if st.button("⏸ Pause"):
-                if _update_campaign_status(campaign_name, "paused"):
-                    st.success("Paused. May take a minute to reflect here while the app redeploys.")
-        elif status == STATUS_PAUSED:
-            if st.button("▶ Resume"):
-                if _update_campaign_status(campaign_name, "active"):
-                    st.success("Resumed. May take a minute to reflect here while the app redeploys.")
+    with st.container(key="cp_titlebar"):
+        st.title(campaign_name)
+        st.subheader(status_label(status))
+        st.markdown(chips_html(status, [schedule_summary(campaign_cfg), sender_summary(leads)]), unsafe_allow_html=True)
+        with st.container(key="cp_actions"):
+            if status == STATUS_DRAFT:
+                if st.button("🚀 Launch", type="primary"):
+                    st.session_state[launch_confirm_key] = True
+            elif status in (STATUS_RUNNING, STATUS_ATTENTION):
+                if st.button("⏸ Pause"):
+                    if _update_campaign_status(campaign_name, "paused"):
+                        st.success("Paused. May take a minute to reflect here while the app redeploys.")
+            elif status == STATUS_PAUSED:
+                if st.button("▶ Resume"):
+                    if _update_campaign_status(campaign_name, "active"):
+                        st.success("Resumed. May take a minute to reflect here while the app redeploys.")
+            with st.container(key="cp_send"):
+                # The very same Send controls as ever (stage, variant, typed SEND confirmation, the same safety checks and the
+                # same widget keys), opened from the header instead of sitting at the foot of Settings. Not running: it says why.
+                with st.popover("➤ Send now"):
+                    _render_send_section_in_settings(campaign_cfg, leads)
+            with st.container(key="cp_more"):
+                with st.popover("⋯"):
+                    if st.button("🔄 Refresh data", key="campaigns_refresh_data"):
+                        _refresh_all_data()
+    if problems:
+        st.caption("⚠️ " + " · ".join(problems))
+    next_line = None
+    if status == STATUS_RUNNING:
+        try:
+            next_line = next_send_line(campaign_cfg, datetime.now(timezone.utc), _auto_send_cron_minute(), outreach.is_within_sending_window)
+        except Exception:  # noqa: BLE001 - a line that cannot be worked out is left out; it must never break the page
+            next_line = None
+    st.markdown(subline_html(subline(campaign_cfg, list(send_log), None, next_line)), unsafe_allow_html=True)
 
     if status == STATUS_DRAFT and st.session_state[launch_confirm_key]:
         ready, launch_problems = compute_campaign_readiness(campaign_cfg, leads)
@@ -1498,7 +1548,6 @@ def _render_send_section_in_settings(campaign_cfg, leads):
     STAGES = ["intro", "followup1", "followup2", "followup3", "followup4"]
     VARIANTS = ["Auto", "A", "B", "C", "D"]
 
-    st.divider()
     st.subheader("Send")
 
     status, _ = compute_campaign_status(campaign_cfg, leads)
@@ -1515,7 +1564,7 @@ def _render_send_section_in_settings(campaign_cfg, leads):
 
     st.caption(
         "Triggers the real `send_batch.yml` workflow — same safety checks, same typed confirmation. Uses "
-        "the daily limit, per-account limit, and sender rotation set above, not a separate override."
+        "the daily limit, per-account limit, and sender rotation set in the Settings tab, not a separate override."
     )
     stage_s = st.selectbox("Stage", STAGES, key="campaigns_send_stage")
     variant_s = st.selectbox("Variant", VARIANTS, key="campaigns_send_variant")
@@ -1654,17 +1703,30 @@ def _render_maintenance_section_in_settings(campaign_cfg):
                     st.error(f"Failed to fetch run status: {exc}")
 
 
+def _refresh_all_data():
+    """Forget every cached read of this campaign's Sheets so the next draw reads them again."""
+    _fetch_full_campaign_data_cached.clear()
+    _get_master_header_cached.clear()
+    _load_sent_mail_cached.clear()
+
+
+def _auto_send_cron_minute():
+    """The minute past each hour the auto-send workflow runs at, read from its own file (None if it can't be read or isn't plain hourly)."""
+    try:
+        with open(os.path.join(REPO_ROOT, ".github", "workflows", "auto_send.yml"), encoding="utf-8") as handle:
+            return read_cron_minute(handle.read())
+    except OSError:
+        return None
+
+
 def _render_campaign_detail(campaign_name: str, just_arrived: bool):
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        if st.button("← Back to Campaigns"):
-            del st.session_state["selected_campaign"]
-            st.rerun()
-    with col2:
-        if st.button("🔄 Refresh data"):
-            _fetch_full_campaign_data_cached.clear()
-            _get_master_header_cached.clear()
-            _load_sent_mail_cached.clear()
+    st.markdown(f"<style>{CAMPAIGN_SKIN_CSS}</style>", unsafe_allow_html=True)
+    with st.container(key="cp_crumb"):
+        with st.container(key="cp_back"):
+            if st.button("← Campaigns"):
+                del st.session_state["selected_campaign"]
+                st.rerun()
+        st.markdown(crumb_html(campaign_name), unsafe_allow_html=True)
 
     try:
         campaign_cfg = get_campaign_cfg(campaign_name)
@@ -1703,24 +1765,24 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
         except Exception:  # noqa: BLE001 - network/auth/parsing failure, keep the local fallback
             pass
 
-    st.title(campaign_name)
-
     is_draft = (campaign_cfg.get("status") or "active") == "draft"
-    if is_draft:
-        st.info("📝 Draft — this campaign hasn't been launched yet.")
+    load_warning = None
     try:
         leads, responses, send_log, error_log, fetched_at = _fetch_full_campaign_data_cached(campaign_name)
         st.session_state["_data_fetched_at"] = fetched_at
     except Exception as exc:  # noqa: BLE001 - genuinely no Sheet tab yet for a never-touched campaign
         if not is_draft:
-            st.warning(f"Couldn't load Sheet data yet: {exc}")
+            load_warning = f"Couldn't load Sheet data yet: {exc}"
         leads, responses, send_log, error_log = [], [], [], []
         st.session_state["_data_fetched_at"] = None
 
-    _render_status_controls(campaign_cfg, leads, just_arrived)
-    st.divider()
+    _render_status_controls(campaign_cfg, leads, just_arrived, send_log)
+    if is_draft:
+        st.info("📝 Draft — this campaign hasn't been launched yet.")
+    if load_warning:
+        st.warning(load_warning)
 
-    tabs = st.tabs(["🎯 Performance", "📋 Data", "✉️ Sequences", "📅 Schedule", "⚙️ Settings", "💬 Responses"])
+    tabs = st.tabs(["Performance", "Data", "Sequences", "Schedule", "Settings", "Responses"])
     with tabs[0]:
         _render_performance_tab(campaign_cfg, leads, responses, send_log, error_log)
     with tabs[1]:
@@ -1733,6 +1795,7 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
         _render_settings_tab(campaign_cfg, leads)
     with tabs[5]:
         _render_responses_tab(campaign_cfg, leads, responses)
+    st.markdown(build_html(UI_BUILD), unsafe_allow_html=True)
 
 
 # =============================================================================
