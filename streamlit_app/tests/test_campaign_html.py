@@ -104,13 +104,15 @@ def test_expanders_are_slim_white_cards():
 
 
 def test_button_styling_is_limited_to_this_pages_own_buttons_so_the_inboxs_blue_reply_button_is_not_overridden():
-    """The Responses tab (the Inbox) lives on this same page and styles its own buttons; a rule on every button would turn its Reply white."""
+    """The Responses tab (the Inbox) lives on this same page and styles its own buttons; a colour or border rule on every button would turn its
+    Reply white. (A rule that only sets the FONT of every button is harmless, and is allowed.)"""
     styled = 0
-    for selector, _ in re.findall(r"([^{}]+)\{([^{}]*)\}", CSS):
+    for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", CSS):
+        changes_look = re.search(r"\b(background|border|color|box-shadow|padding)\b", body)
         for part in selector.split(","):
-            if "button" in part.lower():
+            if "button" in part.lower() and changes_look:
                 styled += 1
-                assert "st-key-" in part, f"an unscoped button rule: {part.strip()}"
+                assert "st-key-" in part, f"an unscoped button rule that changes colours or borders: {part.strip()}"
     assert styled >= 8                                                       # the rules were really found, not skipped
 
 
@@ -139,3 +141,44 @@ def test_the_chart_range_is_one_connected_segmented_control():
 
 def test_the_stylesheet_targets_streamlits_stable_attributes_not_its_generated_class_names():
     assert not re.search(r"st-emotion|\.e[0-9a-z]{6,}\b|css-[0-9a-z]+", CSS)
+
+
+# ================================================================ the second round: breadcrumb, actions, font, toolbar, add leads
+
+def test_the_breadcrumb_name_and_the_build_stamp_are_quiet_grey_text():
+    assert "color: #6b7280" in _rule(".cp-crumb-name {") and "color: #9ca3af" in _rule(".cp-build {")
+
+
+def test_crumb_and_build_markup_are_escaped_one_liners():
+    for markup in (C.crumb_html(HOSTILE), C.build_html(HOSTILE)):
+        found = _scan(markup)
+        assert found.tags <= {"div", "span"} and found.attrs <= {"class"} and "<script" not in markup and "\n" not in markup
+    assert C.crumb_html("Kelson") == '<span class="cp-crumb-name">/ Kelson</span>' and C.build_html("x-1") == '<div class="cp-build">UI build x-1</div>'
+
+
+def test_the_action_buttons_sit_in_one_row_and_send_now_is_the_blue_primary():
+    assert "flex-direction: row !important" in _rule('[class*="st-key-cp_actions"] {')
+    assert "background: #2563eb !important" in _rule('[class*="st-key-cp_actions"] [class*="st-key-cp_send"] button {')           # more specific than the general outline-button rule, which would otherwise win
+    assert "justify-content: flex-start" in _rule('[class*="st-key-cp_crumb"] {')                                        # the campaign name sits right after the "Campaigns" link
+
+
+def test_the_page_font_is_the_designs_system_stack_applied_to_text_only_never_to_icon_fonts():
+    assert "--cp-font: Inter, -apple-system, \"Segoe UI\", Roboto" in CSS
+    rule = CSS[CSS.index(".stApp [data-testid=\"stMarkdownContainer\"]"):]
+    rule = rule[:rule.index("}")]
+    assert "font-family: var(--cp-font) !important" in rule and "stIconMaterial" not in rule and not re.search(r"\.stApp\s*\*|\bspan\b", rule.split("{")[0])
+
+
+def test_the_performance_toolbar_puts_the_range_left_and_the_buttons_right():
+    assert "justify-content: space-between" in _rule('[class*="st-key-pf_toolbar_"] {')
+    assert "flex-direction: row !important" in _rule('[class*="st-key-pf_tools_"] {')
+    assert "border-radius: 9px !important" in _rule('[class*="st-key-pf_tools_"] button, [class*="st-key-pf_tools_"] a {')
+
+
+def test_add_leads_is_the_toolbars_one_blue_button_and_closing_the_panel_is_an_outline_button():
+    assert "background: #2563eb !important" in _rule('[class*="st-key-ld_add_leads"] button {')
+    assert "background: #fff !important" in _rule('[class*="st-key-ld_import_close"] button {')
+
+
+def test_the_build_name_is_a_real_label():
+    assert re.fullmatch(r"[a-z]+-[a-z]+-\d+", C.UI_BUILD)
