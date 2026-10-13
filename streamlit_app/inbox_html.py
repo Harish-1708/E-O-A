@@ -208,7 +208,7 @@ def empty_thread_html(text: str) -> str:
 
 # ----------------------------------------------------------------------------- the stylesheet
 
-INBOX_CSS = """
+_BASE_CSS = """
 .ux-row, .ux-card, .ux-thread-head, .ux-list-head, .ux-rail-item, .ux-rail-title, .ux-placeholder {
   font-family: Inter, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; box-sizing: border-box; }
 
@@ -220,10 +220,23 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
 /* ---- the three panes. Every container key carries the page's name after a trailing underscore
    (ux_railpane_hub, ux_railpane_tab_Camp...), and each pattern ends in that underscore so that, for example,
    "ux_list_" can never also match "ux_listpane_" or an invisible button. */
-[class*="st-key-ux_shell_"] { border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; overflow: hidden; }
+[class*="st-key-ux_shell_"] { --ux-h: max(700px, calc(100vh - 230px)); border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; overflow: hidden; }
+/* use the whole width of the page: Streamlit's default content column is narrow, which squeezes three panes */
+[data-testid="stMainBlockContainer"]:has([class*="st-key-ux_shell_"]) { max-width: 100% !important; padding-left: 1.5rem !important; padding-right: 1.5rem !important; }
+/* the panes are as tall as the window allows (never shorter than 700px), instead of a fixed size */
+[class*="st-key-ux_list_"] { height: calc(var(--ux-h) - 44px) !important; }
+[class*="st-key-ux_threadbody_"] { height: calc(var(--ux-h) - 114px) !important; }
 [class*="st-key-ux_shell_"] [data-testid="stHorizontalBlock"] { gap: 0 !important; }
 [class*="st-key-ux_railpane_"] { gap: 0 !important; padding: 6px 8px; border-right: 1px solid #eef0f3; }
-@media (min-width: 900px) { [class*="st-key-ux_railpane_"] { min-height: 700px; } }
+@media (min-width: 900px) {
+  [class*="st-key-ux_railpane_"] { min-height: var(--ux-h); }
+  /* the rail keeps a width that fits its longest label ("Not interested") and the counts, whatever the text size;
+     the list and the conversation share the rest */
+  [class*="st-key-ux_shell_"] [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }
+  [class*="st-key-ux_shell_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child { flex: 0 0 __RAIL_W__ !important; width: __RAIL_W__ !important; min-width: __RAIL_W__ !important; }
+  [class*="st-key-ux_shell_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2) { flex: 1 1 0 !important; width: auto !important; min-width: 0 !important; }
+  [class*="st-key-ux_shell_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) { flex: 2 1 0 !important; width: auto !important; min-width: 0 !important; }
+}
 [class*="st-key-ux_listpane_"], [class*="st-key-ux_list_"], [class*="st-key-ux_threadpane_"] { gap: 0 !important; }
 [class*="st-key-ux_listpane_"] { border-right: 1px solid #eef0f3; }
 [class*="st-key-ux_threadbody_"] { gap: 0 !important; background: #fff; padding: 18px 20px; }
@@ -233,6 +246,7 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
 .ux-rail-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; font-size: 13px; color: #374151; margin: 1px 0; white-space: nowrap; }
 .ux-rail-item.ux-selected { background: #dde9fb; color: #111827; font-weight: 600; }
 .ux-rail-icon { width: 18px; text-align: center; font-size: 13px; }
+.ux-rail-label { overflow: hidden; text-overflow: ellipsis; }
 .ux-count { margin-left: auto; font-size: 11.5px; color: #6b7280; font-weight: 600; }
 
 /* ---- list */
@@ -296,6 +310,7 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
 
 /* ---- small screens: the rail becomes one row of pills so it does not push everything down */
 @media (max-width: 899px) {
+  [class*="st-key-ux_shell_"] { --ux-h: 700px; }
   [class*="st-key-ux_railpane_"] { flex-direction: row !important; overflow-x: auto; gap: 6px !important; padding: 8px 10px; border-right: 0; border-bottom: 1px solid #eef0f3; min-height: 0; }
   [class*="st-key-ux_railpane_"] > div { width: auto !important; flex: 0 0 auto; }
   [class*="st-key-ux_railpane_"] [data-testid="stElementContainer"]:has(.ux-rail-title), .ux-rail-title { display: none; }
@@ -303,3 +318,19 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
   .ux-rail-item.ux-selected { border-color: #bcd2f6; }
 }
 """
+
+
+# ----------------------------------------------------------------------------- text size
+
+SIZES = {"Normal": 1.0, "Large": 1.15, "Extra large": 1.3}
+DEFAULT_SIZE = "Large"
+
+
+def inbox_css(scale: float = 1.0) -> str:
+    """The stylesheet with every font size multiplied by `scale` (spacing and panes are left alone, so a larger text
+    size reads larger without the layout shifting around)."""
+    css = re.sub(r"font-size: (\d+(?:\.\d+)?)px", lambda m: f"font-size: {round(float(m.group(1)) * scale, 1):g}px", _BASE_CSS)
+    return css.replace("__RAIL_W__", f"{round(190 * max(scale, 1.0))}px")
+
+
+INBOX_CSS = inbox_css(1.0)
