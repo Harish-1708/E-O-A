@@ -9,6 +9,8 @@ from typing import Iterable
 
 from performance_html import esc, _one_line
 
+UI_BUILD = "campaign-frame-3"        # shown at the foot of the campaign page, so it is always clear which version of this layout is live
+
 STATUS_KIND = {"running": "good", "paused": "waiting", "attention": "bad", "deleted": "bad", "draft": "neutral", "completed": "neutral"}
 
 
@@ -17,6 +19,15 @@ def chips_html(status: str, items: Iterable[str]) -> str:
     Streamlit's own heading, can be coloured to match (see the stylesheet)."""
     kind = STATUS_KIND.get(status, "neutral")
     return _one_line(f'<div class="cp-chips cp-s-{kind}">' + "".join(f'<span class="cp-chip">{esc(text)}</span>' for text in items if str(text or "").strip()) + "</div>")
+
+
+def crumb_html(campaign_name: str) -> str:
+    """The campaign's name after the 'Campaigns' link in the breadcrumb: '/ Kelson_Creators_Licensing'."""
+    return f'<span class="cp-crumb-name">/ {esc(campaign_name)}</span>'
+
+
+def build_html(build: str) -> str:
+    return f'<div class="cp-build">UI build {esc(build)}</div>'
 
 
 def subline_html(text: str) -> str:
@@ -28,11 +39,22 @@ CAMPAIGN_SKIN_CSS = """
 [data-testid="stMainBlockContainer"]:has([class*="st-key-cp_titlebar"]) { max-width: 100% !important; padding: 3.4rem 2.2rem 4rem !important; }
 [data-testid="stMainBlockContainer"]:has([class*="st-key-cp_titlebar"]) [data-testid="stVerticalBlock"] { gap: 0.9rem; }
 
+/* ---- the page font: the design's system sans-serif stack, on text only (icon fonts are left alone) */
+.stApp { --cp-font: Inter, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; font-family: var(--cp-font); }
+.stApp [data-testid="stMarkdownContainer"], .stApp [data-testid="stWidgetLabel"], .stApp [data-testid="stCaptionContainer"], .stApp button, .stApp input, .stApp textarea,
+.stApp [role="tab"], .stApp [role="tab"] p, .stApp h1, .stApp h2, .stApp h3, .stApp summary, .stApp [data-testid="stTable"], .stApp [data-testid="stAlertContainer"] { font-family: var(--cp-font) !important; }
+
 /* ---- breadcrumb row: Back as a link, Refresh as a small outline button */
-[class*="st-key-cp_crumb"] { flex-direction: row !important; align-items: center; justify-content: space-between; gap: 12px !important; }
+[class*="st-key-cp_crumb"] { flex-direction: row !important; align-items: center; justify-content: flex-start; gap: 8px !important; }
 [class*="st-key-cp_crumb"] > div { width: auto !important; flex: 0 0 auto; }
 [class*="st-key-cp_back"] button { border: 0 !important; background: transparent !important; color: #2563eb !important; font-weight: 600; padding: 0 !important; min-height: 0 !important; box-shadow: none !important; }
 [class*="st-key-cp_back"] button:hover { text-decoration: underline; }
+.cp-crumb-name { color: #6b7280; font-size: 13px; }
+.cp-build { color: #9ca3af; font-size: 11px; margin: 28px 0 0; text-align: right; }
+[class*="st-key-cp_actions"] { flex-direction: row !important; align-items: center; gap: 10px !important; }
+[class*="st-key-cp_actions"] > div { width: auto !important; flex: 0 0 auto; }
+[class*="st-key-cp_actions"] [class*="st-key-cp_send"] button { background: #2563eb !important; border-color: #2563eb !important; color: #fff !important; }
+[class*="st-key-cp_actions"] [class*="st-key-cp_send"] button:hover { background: #1d4ed8 !important; border-color: #1d4ed8 !important; }
 [class*="st-key-cp_refresh"] button { border-radius: 9px !important; font-weight: 600; border: 1px solid #d1d5db !important; background: #fff !important; color: #374151 !important; }
 
 /* ---- the title bar: name, status pill, chips and the action button in one row */
@@ -72,6 +94,11 @@ CAMPAIGN_SKIN_CSS = """
 [class*="st-key-cp_actions"] button[kind="primary"], [class*="st-key-cp_actions"] [data-testid="stBaseButton-primary"] { background: #2563eb !important; border-color: #2563eb !important; color: #fff !important; }
 [class*="st-key-data_prev"] button:disabled, [class*="st-key-data_next"] button:disabled { opacity: .45; }
 
+/* ---- "+ Add leads" is the toolbar's one primary action; closing the import panel is a plain outline button */
+[class*="st-key-ld_add_leads"] button { background: #2563eb !important; border: 1px solid #2563eb !important; color: #fff !important; border-radius: 9px !important; font-weight: 600 !important; }
+[class*="st-key-ld_add_leads"] button:hover { background: #1d4ed8 !important; border-color: #1d4ed8 !important; }
+[class*="st-key-ld_import_close"] button { border-radius: 9px !important; font-weight: 600 !important; border: 1px solid #d1d5db !important; background: #fff !important; color: #374151 !important; }
+
 /* ---- the Data toolbar: search, status chips and the three filters in one card */
 [class*="st-key-ld_toolbar"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px 18px; }
 
@@ -82,6 +109,13 @@ CAMPAIGN_SKIN_CSS = """
 [class*="st-key-data_filter"] label[data-testid="stRadioOption"]:has(input:checked) { background: #dde9fb; border-color: #bcd0f5; }
 [class*="st-key-data_filter"] label[data-testid="stRadioOption"]:has(input:checked) p { color: #1d4ed8; font-weight: 700; }
 [class*="st-key-data_filter"] label[data-testid="stRadioOption"] p { font-size: 12.5px; font-weight: 600; }
+
+/* ---- the Performance toolbar: the range control at the left, Refresh and Export at the right */
+[class*="st-key-pf_toolbar_"] { flex-direction: row !important; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px !important; }
+[class*="st-key-pf_toolbar_"] > div { width: auto !important; flex: 0 0 auto; }
+[class*="st-key-pf_tools_"] { flex-direction: row !important; align-items: center; gap: 10px !important; }
+[class*="st-key-pf_tools_"] > div { width: auto !important; flex: 0 0 auto; }
+[class*="st-key-pf_tools_"] button, [class*="st-key-pf_tools_"] a { border-radius: 9px !important; font-weight: 600 !important; border: 1px solid #d1d5db !important; background: #fff !important; color: #374151 !important; }
 
 /* ---- the chart range as one connected segmented control */
 [class*="st-key-"][class*="_range"] [role="radiogroup"] { display: inline-flex; gap: 0; border: 1px solid #d1d5db; border-radius: 9px; overflow: hidden; background: #fff; }
