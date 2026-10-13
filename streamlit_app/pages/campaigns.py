@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from auth import login_gate, current_user  # noqa: E402
 from page_state import mark_active_page  # noqa: E402
 from config import (  # noqa: E402
-    WORKFLOW_IMPORT_LEADS, WORKFLOW_REMOVE_LEADS, WORKFLOW_DASHBOARD, WORKFLOW_SEND_REPLY,
+    WORKFLOW_IMPORT_LEADS, WORKFLOW_REMOVE_LEADS, WORKFLOW_DASHBOARD,
     WORKFLOW_SEND, WORKFLOW_CHECK_REPLIES, WORKFLOW_BACKFILL_THREAD_SUBJECT, WORKFLOW_SYNC_ASANA,
     WORKFLOW_SET_LEAD_OVERRIDE,
     TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, SETTINGS_PATH,
@@ -51,16 +51,12 @@ from schedule_logic import (  # noqa: E402
     timezone_display_name, COMMON_TIMEZONES, DAY_OPTIONS,
 )
 from launch_logic import build_status_override, build_delete_override, build_restore_override  # noqa: E402
-from responses_reply_logic import (  # noqa: E402
-    find_lead_for_response, build_reply_defaults, parse_email_list, validate_reply,
-    build_reply_payload, reply_payload_path, build_attachment_entries, total_attachment_size_bytes,
-)
 from responses_hub_logic import (  # noqa: E402
     group_responses_by_lead, sort_conversation_groups_newest_first, tag_responses_with_campaign, search_responses,
 )
-from inbox_view import InboxContext, render_inbox, choose_view, VIEW_INBOX  # noqa: E402
+from inbox_view import InboxContext, render_inbox  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
-from conversation_logic import build_conversation_thread, filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
+from conversation_logic import filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
     compute_campaign_status, compute_campaign_readiness, status_label,
     STATUS_DRAFT, STATUS_RUNNING, STATUS_PAUSED, STATUS_ATTENTION, STATUS_COMPLETED,
@@ -1291,140 +1287,13 @@ def _render_inbox_for_campaign(campaign_cfg, leads, responses):
 
 
 def _render_responses_tab(campaign_cfg, leads, responses):
-    campaign_name = campaign_cfg["_campaign_name"]
-
     _render_check_replies_section_in_responses(campaign_cfg)
 
     if not responses:
         st.info("No responses yet.")
         return
 
-    # Inbox (the two-pane layout, same as the Responses page) or the previous
-    # card layout below, which is unchanged.
-    if choose_view(f"responses_view_{campaign_name}") == VIEW_INBOX:
-        _render_inbox_for_campaign(campaign_cfg, leads, responses)
-        return
-
-    st.caption(
-        "Replying here sends a real email, through the same threaded headers your automated sequence "
-        "uses — the lead's client will show it in the same conversation. You can attach images or files; "
-        "a fuller quoted-thread view and scheduling a reply for later aren't built yet."
-    )
-
-    sorted_responses = sorted(responses, key=lambda r: r.get("ReceivedAt", ""), reverse=True)
-    # One card per CREATOR/THREAD, not one per individual reply — the
-    # actual reported production bug: the same creator sending several
-    # messages over time showed as a separate card for every single
-    # message. See group_responses_by_lead's own docstring in
-    # responses_hub_logic for the full reasoning; this tab doesn't need
-    # the standalone Responses hub's read/unread tracking, only the
-    # same grouping.
-    groups = group_responses_by_lead(sorted_responses)
-    groups = sort_conversation_groups_newest_first(groups)
-    for group in groups:
-        latest = group["latest"]
-        lead = find_lead_for_response(latest, leads)
-        label = f"{latest.get('From', '(unknown sender)')} — {latest.get('Subject', '(no subject)')}"
-        message_count = len(group["messages"])
-        # ActionTaken is what actually happened — a "Logged Only (...)"
-        # outcome means the sequence was NOT stopped, even if
-        # Classification says "Genuine Reply" (that field only describes
-        # the message content, not what the system did about it).
-        # Surfacing both, clearly labeled, resolves an ambiguity the raw
-        # Sheet columns read confusingly side by side otherwise. Reflects
-        # the MOST RECENT message's own outcome — if an earlier message
-        # didn't stop the sequence but this lead's latest reply did,
-        # that's the state that actually matters right now.
-        action = latest.get("ActionTaken", "")
-        stopped = action == "Stopped Sequence"
-        icon = "🛑" if stopped else "📝"
-        with st.container(border=True):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.markdown(f"{icon} **{label}**")
-                count_badge = f" · {message_count} message{'s' if message_count != 1 else ''}" \
-                    if message_count > 1 else ""
-                st.caption(f"{latest.get('ReceivedAt', '')} · {latest.get('Classification', '')}{count_badge}")
-                # "Stopped Sequence" stays visible at the conversation
-                # level based on the LEAD's own automated-sequence
-                # state, not any single message — manual replies remain
-                # available either way.
-                if lead is not None and (lead.get("Status") or "").startswith("Stopped"):
-                    st.caption(f"🛑 {lead.get('Status')} — automated follow-ups stopped; "
-                               f"you can still reply manually below.")
-            with col2:
-                st.caption(action + ("" if stopped else " — sequence NOT stopped"))
-            st.write(latest.get("Snippet", ""))
-
-            reply_key_suffix = f"{group['lead_id']}" or latest.get("ResponseID") or latest.get("MessageID") or label
-
-            with st.expander(f"💬 View full conversation ({message_count} message"
-                              f"{'s' if message_count != 1 else ''})"):
-                if lead is None:
-                    st.caption("Can't reconstruct this conversation — no matching lead found in the "
-                               "Master Sheet (the response may predate the lead being added).")
-                else:
-                    responses_for_this_lead = filter_responses_for_lead(responses, lead.get("LeadID", ""))
-                    thread = build_conversation_thread(campaign_cfg, lead, responses_for_this_lead)
-                    if not thread:
-                        st.caption("No messages found for this lead yet.")
-                    for msg in thread:
-                        if msg["direction"] == "outgoing":
-                            st.markdown(f"**You** · {msg['timestamp']}")
-                        else:
-                            st.markdown(f"**{msg.get('from', 'Them')}** · {msg['timestamp']}")
-                        st.text(msg["body"])
-                        st.divider()
-
-            with st.expander("↩️ Reply"):
-                # Threaded off the conversation's MOST RECENT inbound
-                # message — replying always continues the same Gmail
-                # thread the creator is actually looking at right now.
-                defaults = build_reply_defaults(latest, lead)
-                to_email = st.text_input("To", value=defaults["to"], key=f"reply_to_{reply_key_suffix}")
-                subject = st.text_input("Subject", value=defaults["subject"], key=f"reply_subject_{reply_key_suffix}")
-                cc_raw = st.text_input("Cc (comma-separated)", key=f"reply_cc_{reply_key_suffix}")
-                bcc_raw = st.text_input("Bcc (comma-separated)", key=f"reply_bcc_{reply_key_suffix}")
-                body = st.text_area("Message", key=f"reply_body_{reply_key_suffix}", height=150)
-                uploaded_files = st.file_uploader(
-                    "Attach images or files (optional)", accept_multiple_files=True,
-                    key=f"reply_attachments_{reply_key_suffix}",
-                )
-                if uploaded_files:
-                    total_bytes = total_attachment_size_bytes(uploaded_files)
-                    st.caption(f"{len(uploaded_files)} file(s), {total_bytes / (1024*1024):.1f} MB total "
-                               f"(limit: {outreach.MAX_TOTAL_ATTACHMENT_BYTES / (1024*1024):.0f} MB)")
-                if defaults["sender_account"]:
-                    st.caption(f"Sending as: {defaults['sender_account']}")
-                else:
-                    st.caption("⚠️ Couldn't find this lead's sender account — check the Master Sheet.")
-
-                if st.button("Send Reply", type="primary", key=f"send_reply_{reply_key_suffix}"):
-                    cc = parse_email_list(cc_raw)
-                    bcc = parse_email_list(bcc_raw)
-                    attachment_bytes = total_attachment_size_bytes(uploaded_files) if uploaded_files else 0
-                    errors = validate_reply(to_email, body, defaults["sender_account"], cc, bcc,
-                                             attachment_total_bytes=attachment_bytes)
-                    if errors:
-                        for e in errors:
-                            st.error(e)
-                    else:
-                        try:
-                            attachments = build_attachment_entries(uploaded_files) if uploaded_files else None
-                            payload = build_reply_payload(latest, lead, defaults["sender_account"], to_email,
-                                                           subject, body, cc, bcc, attachments=attachments)
-                            path = reply_payload_path(campaign_name, latest.get("ResponseID", "unknown"))
-                            client = _get_github_client()
-                            client.create_file(
-                                path, payload_to_bytes(payload),
-                                message=f"Send reply for {campaign_name} (via Streamlit, by {current_user()})",
-                            )
-                            time.sleep(1)
-                            client.dispatch_workflow(WORKFLOW_SEND_REPLY,
-                                                      {"campaign": campaign_name, "payload_path": path})
-                            st.success("Reply queued — it'll be sent within a minute or two.")
-                        except GitHubActionsError as exc:
-                            st.error(f"Failed to send: {exc}")
+    _render_inbox_for_campaign(campaign_cfg, leads, responses)
 
 
 def _update_campaign_status(campaign_name: str, new_status: str) -> bool:
