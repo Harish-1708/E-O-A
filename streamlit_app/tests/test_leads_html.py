@@ -152,6 +152,47 @@ def test_small_screens_hide_the_two_least_important_columns():
     assert "grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr)" in narrow          # four visible columns, four grid columns
 
 
-def test_every_row_has_the_same_minimum_height_whether_or_not_it_has_a_company_line():
+def test_every_row_has_the_same_generous_height_whether_or_not_it_has_a_company_line():
+    """Rows once looked like they crowded the one above: a tight minimum height and no explicit line height, which Streamlit's own
+    styles then varied from one browser to the next."""
     css = LH.LEADS_CSS
-    assert ".ld-row { min-height: 58px; box-sizing: border-box;" in css
+    row = css[css.index(".ld-row {"):css.index("}", css.index(".ld-row {"))]
+    assert "min-height: 68px" in row and "box-sizing: border-box" in row and "padding-top: 14px" in row and "padding-bottom: 14px" in row and "line-height: 1.4" in row
+
+
+def test_each_rows_container_is_as_tall_as_its_row_so_rows_cannot_overlap_and_the_click_target_covers_the_whole_row():
+    """REGRESSION: Streamlit's Markdown wrapper has a -16px bottom margin that made every container 16px shorter than its 68px row, so
+    rows overlapped and a click on the lower part of a row opened the NEXT one. Both the height and the margin are pinned."""
+    css = LH.LEADS_CSS
+    container = css[css.index('[class*="st-key-ld_row_"] {'):css.index("}", css.index('[class*="st-key-ld_row_"] {'))]
+    assert "min-height: 68px" in container and "position: relative" in container
+    assert '[class*="st-key-ld_row_"] [data-testid="stMarkdownContainer"],' in css and "margin-bottom: 0 !important; }" in css          # the row selector is in the rule
+    row = css[css.index(".ld-row {"):css.index("}", css.index(".ld-row {"))]
+    assert re.search(r"min-height: (\d+)px", row).group(1) == re.search(r"min-height: (\d+)px", container).group(1)         # the same number
+
+
+def test_a_status_pill_that_does_not_fit_ends_in_an_ellipsis_instead_of_being_chopped_off():
+    css = LH.LEADS_CSS
+    pill = css[css.index(".ld-pill {"):css.index("}", css.index(".ld-pill {"))]
+    assert "max-width: 100%" in pill and "overflow: hidden" in pill and "text-overflow: ellipsis" in pill and "line-height: 1.4" in pill
+
+
+def test_the_status_column_is_wide_enough_for_stopped_manual_and_the_dots_wrap_rather_than_clip():
+    css = LH.LEADS_CSS
+    assert "minmax(0, 1.9fr) minmax(0, 1.9fr) minmax(0, 1.5fr) minmax(0, 1.5fr) minmax(0, .85fr) minmax(0, 1.5fr)" in css
+    assert ".ld-dots { display: flex; flex-wrap: wrap;" in css
+
+
+def test_the_table_header_and_the_panel_are_not_squeezed_by_streamlits_negative_markdown_margin_either():
+    """The same 16px problem as the rows: it clipped the header text under the first row and pushed the controls against the panel."""
+    css = LH.LEADS_CSS
+    rule = css[css.index('[class*="st-key-ld_row_"] [data-testid="stMarkdownContainer"],'):css.index("margin-bottom: 0 !important; }")]
+    assert 'st-key-ld_table_"] [data-testid="stMarkdownContainer"]' in rule and 'st-key-ld_panel_"] [data-testid="stMarkdownContainer"]' in rule
+
+
+def test_the_open_leads_controls_are_a_card_with_a_blue_save_and_red_removal_buttons():
+    css = LH.LEADS_CSS
+    assert '[class*="st-key-ld_actions_"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px;' in css
+    assert 'st-key-manage_save_"] button { background: #2563eb !important' in css
+    assert 'st-key-remove_ask_"] button { background: #fff !important; border: 1px solid #f3c4c4 !important; color: #b91c1c !important' in css
+    assert 'st-key-remove_yes_"] button { background: #dc2626 !important' in css
