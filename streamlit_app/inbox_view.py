@@ -2,7 +2,7 @@
 middle, and the open conversation on the right with each email as its own card and a Reply bar underneath — shared
 by the all-campaigns Responses page and by every campaign's own Responses tab, so the two cannot drift apart.
 
-It adds NO new way to send, mark read or look anything up. Replying uses the very same functions the classic layout
+It adds NO new way to send, mark read or look anything up. Replying uses the same functions the rest of the app
 uses (validate_reply, build_reply_payload, reply_payload_path, build_attachment_entries) and the same two steps —
 commit the payload file, then start the send-reply workflow — so what gets committed and dispatched is identical.
 Marking read uses the same read keys.
@@ -34,24 +34,11 @@ from responses_reply_logic import (  # noqa: E402
     reply_payload_path, build_attachment_entries, total_attachment_size_bytes,
 )
 
-VIEW_INBOX = "Inbox"
-VIEW_CLASSIC = "Classic"
-# Read when the page runs (not at import), so the test suite can pin the
-# layout its older tests were written against.
-DEFAULT_VIEW = VIEW_INBOX
-
 PANE_HEIGHT = 700                                   # the three panes share one height; the lists scroll inside it
 HEADER_HEIGHT, BAR_HEIGHT = 52, 62
 WORKFLOW_SET_RESPONSE_STATUS = "set_response_status.yml"
 COLLAPSE_THRESHOLD, KEEP_NEWEST = 8, 5      # a conversation of more than 8 emails shows only the newest 5 until asked for the rest
 EMPTY_EMAIL_NOTE = "This email has no readable text — it may be only an image or an attachment. Open it in the mailbox to see it."
-
-
-def choose_view(key: str) -> str:
-    """The Inbox / Classic switch. The Inbox is the default; Classic is the
-    previous card layout, kept so nothing is lost while the new one beds in."""
-    options = [VIEW_INBOX, VIEW_CLASSIC]
-    return st.radio("Layout", options, index=options.index(DEFAULT_VIEW), horizontal=True, key=key)
 
 
 @dataclass
@@ -140,7 +127,7 @@ def _mark_read(ctx: InboxContext, group: Dict) -> None:
 def _send_reply(ctx: InboxContext, group: Dict, latest: Dict, lead: Optional[Dict], defaults: Dict, campaign_name: str,
                 gk: str) -> None:
     """Validates, commits the payload and starts the send-reply workflow —
-    the same steps as the classic Send Reply — then clears the composer so a
+    the same steps as every other reply — then clears the composer so a
     second click cannot send the same text twice. Always leaves a result for
     the page to show; never raises into the page."""
     k = _keys(ctx.namespace, gk)
