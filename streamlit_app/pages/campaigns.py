@@ -55,6 +55,8 @@ from responses_hub_logic import (  # noqa: E402
     group_responses_by_lead, sort_conversation_groups_newest_first, tag_responses_with_campaign, search_responses,
 )
 from inbox_view import InboxContext, render_inbox  # noqa: E402
+from leads_view import render_lead_browser  # noqa: E402
+from leads_logic import filter_counts, manage_label  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
 from conversation_logic import filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
@@ -650,24 +652,29 @@ def _render_data_tab(campaign_cfg, leads):
         st.info("No leads yet — add some above.")
         return
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        search_query = st.text_input("Search", key="data_search", placeholder="Name, email, or company...")
-    with col2:
-        status_filter = st.selectbox("Filter", FILTER_OPTIONS, key="data_filter")
+    search_query = st.text_input("Search", key="data_search", placeholder="Name, email, or company...")
+    option_counts = filter_counts(leads, FILTER_OPTIONS, filter_leads)
+    status_filter = st.radio("Filter", FILTER_OPTIONS, key="data_filter", horizontal=True, label_visibility="collapsed",
+                             format_func=lambda option: f"{option} · {option_counts[option]}")
 
     filtered = search_leads(filter_leads(leads, status_filter), search_query)
     st.caption(f"Showing {len(filtered)} of {len(leads)} lead(s)")
+
+    # The lead table and the side panel for the lead you click (see leads_view). It only looks and selects: importing,
+    # removing and managing leads stay exactly as they were, below.
+    open_lead = render_lead_browser(leads=leads, filtered=filtered, search_query=search_query, status_filter=status_filter,
+                                    stage_names=[s.get("name") for s in (campaign_cfg.get("stages") or [])])
 
     if filtered:
         try:
             header_order = _get_master_header_cached(campaign_name)
         except Exception:  # noqa: BLE001 - fall back to alphabetical if the header can't be read
             header_order = None
-        st.dataframe(
-            build_full_lead_table(filtered, header_order=header_order),
-            width="stretch", hide_index=True,
-        )
+        with st.expander("📋 All columns (every field in the Sheet)"):
+            st.dataframe(
+                build_full_lead_table(filtered, header_order=header_order),
+                width="stretch", hide_index=True,
+            )
 
         with st.expander("🗑️ Remove leads"):
             st.caption(
@@ -693,15 +700,16 @@ def _render_data_tab(campaign_cfg, leads):
                 except GitHubActionsError as exc:
                     st.error(f"Removal failed: {exc}")
 
-        with st.expander("🔧 Manage a lead"):
+        with st.expander("🔧 Manage a lead", expanded=open_lead is not None):
             st.caption(
                 "Stop sending to just this one lead without removing it (it stays visible, only "
                 "excluded from future sends), or push its Asana pipeline stage straight to Rights "
                 "Secured / Declined for a lead handled outside the automated pipeline entirely — "
                 "e.g. one you finalized manually. Both apply on the next sync, manual or scheduled."
             )
-            lead_options = {f"{l.get('LeadID', '')} — {l.get('FirstName', '')} {l.get('LastName', '')} "
-                             f"<{l.get('Email', '')}>": l.get("Email", "") for l in filtered}
+            lead_options = {manage_label(l): l.get("Email", "") for l in filtered}
+            if st.session_state.get("manage_lead_select", "-- Select --") not in ["-- Select --"] + list(lead_options.keys()):
+                st.session_state["manage_lead_select"] = "-- Select --"      # that lead was filtered out since it was picked
             selected_lead_label = st.selectbox("Lead", ["-- Select --"] + list(lead_options.keys()),
                                                 key="manage_lead_select")
 
