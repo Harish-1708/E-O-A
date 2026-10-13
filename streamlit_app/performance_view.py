@@ -7,14 +7,15 @@ figure is passed straight to performance_html, which only formats it. It
 deliberately uses no nested tabs, so the campaign page keeps exactly its six
 tabs.
 """
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import streamlit as st
 
 import performance_html as H
 from leads_logic import humanize_stage
+from performance_figures import build_performance_csv, export_filename, headline_figures
 from performance_logic import (
-    daily_series, format_rate, format_duration_hours, INTENT_ORDER, INTENT_NOT_CLASSIFIED,
+    daily_series, format_rate, INTENT_ORDER, INTENT_NOT_CLASSIFIED,
 )
 
 RANGES = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90, "All time": None}
@@ -32,38 +33,30 @@ def _effectiveness_card(title: str, hint: str, first_header: str, key: str, rows
 
 
 def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = None,
-                       show_campaign_ranking: bool = True) -> None:
+                       show_campaign_ranking: bool = True, actions: Optional[Callable[[], None]] = None,
+                       export_name: str = "performance") -> None:
     """Draws every Performance section for `perf` (one campaign, or the
     combined totals of all of them). `best` is build_best_performers' result,
     or None to leave the "what worked best" report out;
     `show_campaign_ranking` is False inside a single campaign, where ranking
-    campaigns against each other would be meaningless."""
+    campaigns against each other would be meaningless. `actions`, when given,
+    draws extra buttons (such as Refresh) beside the Export button;
+    `export_name` names the downloaded file."""
     _show(f"<style>{H.PERFORMANCE_CSS}</style>")
 
-    # ---- headline cards
-    n_replies = len(perf["reply_hours"])
-    _show(H.grid_html("g6", [
-        H.kpi_html("Contacted", perf["contacted"], f"of {perf['total_leads']} leads · {perf['pending']} not yet contacted"),
-        H.kpi_html("Emails sent", perf["sent"], f"{perf['send_failures']} failed" if perf["send_failures"] else ""),
-        H.kpi_html("Reply rate", format_rate(perf["reply_rate"]), f"{perf['replies']} replied"),
-        H.kpi_html("Positive replies", perf["positive"], f"{format_rate(perf['positive_rate'])} of contacted",
-                   "Replies the AI read as Interested. Replies without an AI reading are counted under 'Not classified' below."),
-        H.kpi_html("Negotiating", "—" if perf["negotiating"] is None else perf["negotiating"], "from the Asana sync",
-                   "Leads whose Asana task the sync last left in Negotiating. Shows — until the Asana sync has recorded stages."),
-        H.kpi_html("Rights secured", "—" if perf["rights_secured"] is None else perf["rights_secured"], "from the Asana sync",
-                   "Leads whose Asana task the sync last left in Rights Secured. Shows — until the Asana sync has recorded stages."),
-    ]))
-    _show(H.grid_html("g4", [
-        H.kpi_html("Median time to first reply", format_duration_hours(perf["median_reply_hours"]),
-                   f"from {n_replies} repl{'y' if n_replies == 1 else 'ies'}",
-                   "Measured from the intro email to when the reply was LOGGED, which can be hours after the creator sent it."),
-        H.kpi_html("Needs follow-up", perf["intents"]["Lead / Needs Follow-up"], "replies worth a personal answer"),
-        H.kpi_html("Hard bounce rate", format_rate(perf["bounce_rate_hard"]), f"{perf['bounced_hard']} bounced"),
-        H.kpi_html("Sequence completion", format_rate(perf["sequence_completion"]), f"{perf['completed']} reached the final stage"),
-    ]))
+    # ---- headline cards (the very same figures the Export file contains)
+    cards = [H.kpi_html(f["label"], f["value"], f["caption"], f["help"]) for f in headline_figures(perf)]
+    _show(H.grid_html("g6", cards[:6]))
+    _show(H.grid_html("g4", cards[6:]))
 
     # ---- activity over time, and what the replies say
-    range_label = st.radio("Chart range", list(RANGES), index=1, horizontal=True, key=f"{key_prefix}_range", label_visibility="collapsed")
+    with st.container(key=f"pf_toolbar_{key_prefix}"):
+        range_label = st.radio("Chart range", list(RANGES), index=1, horizontal=True, key=f"{key_prefix}_range", label_visibility="collapsed")
+        with st.container(key=f"pf_tools_{key_prefix}"):
+            if actions is not None:
+                actions()
+            st.download_button("⤓ Export", data=build_performance_csv(perf, export_name).encode("utf-8"), file_name=export_filename(export_name),
+                               mime="text/csv", key=f"{key_prefix}_export")
     series = daily_series(perf, RANGES[range_label])
     left, right = st.columns([1.6, 1])
     with left:
@@ -109,7 +102,9 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
     # ---- follow-up stage and variant effectiveness (two cards side by side, the same height)
     stage_card = (_effectiveness_card("Follow-up stage effectiveness", "Positive = replies the AI read as interested.", "Stage", "stage", perf["stages"], humanize_stage)
                   if perf["stages"] else None)
-    variant_card = (_effectiveness_card("Template variants", "Each reply is credited to the exact email it answered.", "Variant", "variant", perf["variants"])
+    best_variant = ((best or {}).get("variant") or {}).get("label")                                   # the variant the "what worked best" box names
+    variant_card = (_effectiveness_card("Template variants", "Each reply is credited to the exact email it answered.", "Variant", "variant", perf["variants"],
+                                        lambda value: f"{value}  ★ best" if best_variant is not None and str(value) == str(best_variant) else value)
                     if perf["variants"] else None)
     if stage_card and variant_card:
         _show(H.grid_html("g2e", [stage_card, variant_card]))
@@ -143,9 +138,11 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
             )
 
     # ---- by sender account, and deliverability (again the same height)
+    top_rate = max([r["reply_rate"] or 0 for r in perf["sender_rows"]] + [0])
     sender_card = (H.card_html("By sender account", "", H.table_html(
         ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"],
-        [[r["account"], r["sent"], r["leads"], r["replies"], format_rate(r["reply_rate"])] for r in perf["sender_rows"]])) if perf["sender_rows"] else None)
+        [[r["account"], r["sent"], r["leads"], r["replies"], H.bar_cell((r["reply_rate"] or 0) / top_rate if top_rate else 0, format_rate(r["reply_rate"]))]
+         for r in perf["sender_rows"]])) if perf["sender_rows"] else None)
     deliverability_card = H.card_html("Deliverability", "Hard bounces stop a lead; soft bounces are retried.", H.grid_html("g3", [
         H.kpi_html("Hard bounces", perf["bounced_hard"], format_rate(perf["bounce_rate_hard"])),
         H.kpi_html("Soft bounces", perf["bounced_soft"], format_rate(perf["bounce_rate_soft"])),
