@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import streamlit as st
 
 import performance_html as H
+from leads_logic import humanize_stage
 from performance_logic import (
     daily_series, format_rate, format_duration_hours, INTENT_ORDER, INTENT_NOT_CLASSIFIED,
 )
@@ -24,9 +25,9 @@ def _show(markup: str) -> None:
     st.markdown(markup, unsafe_allow_html=True)
 
 
-def _effectiveness_card(title: str, hint: str, first_header: str, key: str, rows: List[Dict]) -> str:
+def _effectiveness_card(title: str, hint: str, first_header: str, key: str, rows: List[Dict], label=lambda value: value) -> str:
     table = H.table_html([first_header] + _RATE_HEADERS, [
-        [r[key], r["sent"], r["replies"], format_rate(r["reply_rate"]), r["positive"], format_rate(r["positive_rate"])] for r in rows])
+        [label(r[key]), r["sent"], r["replies"], format_rate(r["reply_rate"]), r["positive"], format_rate(r["positive_rate"])] for r in rows])
     return H.card_html(title, hint, table)
 
 
@@ -62,7 +63,7 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
     ]))
 
     # ---- activity over time, and what the replies say
-    range_label = st.radio("Chart range", list(RANGES), index=1, horizontal=True, key=f"{key_prefix}_range")
+    range_label = st.radio("Chart range", list(RANGES), index=1, horizontal=True, key=f"{key_prefix}_range", label_visibility="collapsed")
     series = daily_series(perf, RANGES[range_label])
     left, right = st.columns([1.6, 1])
     with left:
@@ -105,62 +106,66 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
                              "A reply is credited to the exact email it answered when that can be matched, otherwise to the "
                              "latest email sent before it was logged."))
 
-    # ---- follow-up stage and variant effectiveness
-    left, right = st.columns(2)
-    with left:
-        if perf["stages"]:
-            _show(_effectiveness_card("Follow-up stage effectiveness", "Positive = replies the AI read as interested.", "Stage", "stage", perf["stages"]))
-        else:
-            st.subheader("Follow-up stage effectiveness")
-            st.info("No emails sent yet.")
-    with right:
-        if perf["variants"]:
-            _show(_effectiveness_card("Template variants", "Each reply is credited to the exact email it answered.", "Variant", "variant", perf["variants"]))
-            if perf["variant_stage_rows"]:
-                with st.expander("Each variant, stage by stage"):
-                    st.dataframe(
-                        {
-                            "Stage": [r["stage"] for r in perf["variant_stage_rows"]],
-                            "Variant": [r["variant"] for r in perf["variant_stage_rows"]],
-                            "Emails sent": [r["sent"] for r in perf["variant_stage_rows"]],
-                            "Replies": [r["replies"] for r in perf["variant_stage_rows"]],
-                            "Reply rate": [format_rate(r["reply_rate"]) for r in perf["variant_stage_rows"]],
-                            "Positive": [r["positive"] for r in perf["variant_stage_rows"]],
-                        },
-                        width="stretch",
-                        hide_index=True,
-                    )
-        else:
-            st.subheader("Template variants")
-            st.info("No variants sent yet.")
+    # ---- follow-up stage and variant effectiveness (two cards side by side, the same height)
+    stage_card = (_effectiveness_card("Follow-up stage effectiveness", "Positive = replies the AI read as interested.", "Stage", "stage", perf["stages"], humanize_stage)
+                  if perf["stages"] else None)
+    variant_card = (_effectiveness_card("Template variants", "Each reply is credited to the exact email it answered.", "Variant", "variant", perf["variants"])
+                    if perf["variants"] else None)
+    if stage_card and variant_card:
+        _show(H.grid_html("g2e", [stage_card, variant_card]))
+    else:
+        left, right = st.columns(2)
+        with left:
+            if stage_card:
+                _show(stage_card)
+            else:
+                st.subheader("Follow-up stage effectiveness")
+                st.info("No emails sent yet.")
+        with right:
+            if variant_card:
+                _show(variant_card)
+            else:
+                st.subheader("Template variants")
+                st.info("No variants sent yet.")
+    if variant_card and perf["variant_stage_rows"]:
+        with st.expander("Each variant, stage by stage"):
+            st.dataframe(
+                {
+                    "Stage": [humanize_stage(r["stage"]) for r in perf["variant_stage_rows"]],
+                    "Variant": [r["variant"] for r in perf["variant_stage_rows"]],
+                    "Emails sent": [r["sent"] for r in perf["variant_stage_rows"]],
+                    "Replies": [r["replies"] for r in perf["variant_stage_rows"]],
+                    "Reply rate": [format_rate(r["reply_rate"]) for r in perf["variant_stage_rows"]],
+                    "Positive": [r["positive"] for r in perf["variant_stage_rows"]],
+                },
+                width="stretch",
+                hide_index=True,
+            )
 
-    # ---- by sender account, and deliverability
-    left, right = st.columns(2)
-    with left:
-        if perf["sender_rows"]:
-            _show(H.card_html("By sender account", "", H.table_html(
-                ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"],
-                [[r["account"], r["sent"], r["leads"], r["replies"], format_rate(r["reply_rate"])] for r in perf["sender_rows"]])))
-        else:
+    # ---- by sender account, and deliverability (again the same height)
+    sender_card = (H.card_html("By sender account", "", H.table_html(
+        ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"],
+        [[r["account"], r["sent"], r["leads"], r["replies"], format_rate(r["reply_rate"])] for r in perf["sender_rows"]])) if perf["sender_rows"] else None)
+    deliverability_card = H.card_html("Deliverability", "Hard bounces stop a lead; soft bounces are retried.", H.grid_html("g3", [
+        H.kpi_html("Hard bounces", perf["bounced_hard"], format_rate(perf["bounce_rate_hard"])),
+        H.kpi_html("Soft bounces", perf["bounced_soft"], format_rate(perf["bounce_rate_soft"])),
+        H.kpi_html("Failed sends", perf["send_failures"]),
+    ]))
+    if sender_card:
+        _show(H.grid_html("g2e", [sender_card, deliverability_card]))
+    else:
+        left, right = st.columns(2)
+        with left:
             st.subheader("By sender account")
             st.caption("No sends yet.")
-    with right:
-        _show(H.card_html("Deliverability", "Hard bounces stop a lead; soft bounces are retried.", H.grid_html("g3", [
-            H.kpi_html("Hard bounces", perf["bounced_hard"], format_rate(perf["bounce_rate_hard"])),
-            H.kpi_html("Soft bounces", perf["bounced_soft"], format_rate(perf["bounce_rate_soft"])),
-            H.kpi_html("Failed sends", perf["send_failures"]),
-        ])))
-        if perf["top_send_errors"]:
-            with st.expander("Most common sending errors"):
-                for text, count in perf["top_send_errors"]:
-                    st.write(f"{count} × {text}")
+        with right:
+            _show(deliverability_card)
+    if perf["top_send_errors"]:
+        with st.expander("Most common sending errors"):
+            for text, count in perf["top_send_errors"]:
+                st.write(f"{count} × {text}")
     if perf["error_rows"]:
-        st.subheader("Errors (all time)")
-        st.dataframe(
-            {"Error type": [r["error_type"] for r in perf["error_rows"]], "Count": [r["count"] for r in perf["error_rows"]]},
-            width="stretch",
-            hide_index=True,
-        )
+        _show(H.card_html("Errors (all time)", "", H.table_html(["Error type", "Count"], [[r["error_type"], r["count"]] for r in perf["error_rows"]])))
     elif not perf["error_log_read"]:
         st.caption("The Error Log tab could not be read, so all-time errors are not shown.")
 
