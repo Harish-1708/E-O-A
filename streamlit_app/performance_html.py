@@ -59,8 +59,11 @@ PERFORMANCE_CSS = """
 .pf-table td { padding: 11px 10px; border-bottom: 1px solid #f0f2f5 !important; color: #111827 !important; overflow-wrap: anywhere; }       /* (the theme colour otherwise leaks into some cells) */
 .pf-table tr:last-child td { border-bottom: 0 !important; } .pf-table td:first-child { font-weight: 600; }
 .pf-scroll { overflow-x: auto; }
+.pf-cellbar { display: flex; align-items: center; gap: 10px; }
+.pf-minibar { display: inline-block; width: 90px; height: 8px; border-radius: 99px; background: #eef0f4; overflow: hidden; flex: none; }
+.pf-minibar i { display: block; height: 100%; border-radius: 99px; background: #2563eb; }
 .pf-bar-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; font-size: 13px; }
-.pf-bar-label { width: 130px; flex: none; color: #111827; } .pf-bar-track { flex: 1; height: 8px; border-radius: 99px; background: #eef0f4; overflow: hidden; }
+.pf-bar-label { width: 150px; flex: none; color: #111827; } .pf-bar-track { flex: 1; height: 8px; border-radius: 99px; background: #eef0f4; overflow: hidden; }
 .pf-bar-fill { display: block; height: 100%; border-radius: 99px; } .pf-bar-count { width: 34px; text-align: right; font-weight: 700; flex: none; }
 .pf-callout { background: linear-gradient(180deg, #f3f7ff, #fff); border: 1px solid #c7d7fb; border-radius: 14px; padding: 16px 20px; margin: 0 0 14px; }
 .pf-callout-title { font-weight: 700; font-size: 15.5px; color: #111827; margin-bottom: 8px; }
@@ -98,10 +101,26 @@ def card_html(title: str, hint: str = "", inner: str = "", chips: Sequence[Tuple
 
 # ---------------------------------------------------------------- tables and bars
 
+def bar_cell(fraction, text) -> tuple:
+    """A table cell that shows `text` with a small bar in front of it. `fraction` (0 to 1, relative to the biggest in the column) sets the
+    bar's length; anything that is not a number between 0 and 1 draws an empty bar."""
+    return ("bar", fraction, text)
+
+
+def _cell_html(cell) -> str:
+    if isinstance(cell, tuple) and len(cell) == 3 and cell[0] == "bar":
+        try:
+            width = max(0, min(100, round(float(cell[1]) * 100)))
+        except (TypeError, ValueError):
+            width = 0
+        return f'<div class="pf-cellbar"><span class="pf-minibar"><i style="width:{width}%"></i></span><span>{esc(cell[2])}</span></div>'
+    return esc(cell)
+
+
 def table_html(headers: Sequence[str], rows: Sequence[Sequence]) -> str:
-    """A table. Every cell is text and is escaped; a row shorter than the header is padded rather than dropped."""
+    """A table. Every cell is text and is escaped (or a bar_cell); a row shorter than the header is padded rather than dropped."""
     head = "".join(f"<th>{esc(h)}</th>" for h in headers)
-    body = "".join("<tr>" + "".join(f"<td>{esc(row[i]) if i < len(row) else ''}</td>" for i in range(len(headers))) + "</tr>" for row in rows)
+    body = "".join("<tr>" + "".join(f"<td>{_cell_html(row[i]) if i < len(row) else ''}</td>" for i in range(len(headers))) + "</tr>" for row in rows)
     return _one_line(f'<div class="pf-scroll"><table class="pf-table"><tr>{head}</tr>{body}</table></div>')
 
 
