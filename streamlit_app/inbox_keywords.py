@@ -141,3 +141,15 @@ def is_weak(intent: str) -> bool:
     """A Lead reading from keywords is only a hint (a question, a mention of money): it must never override a clear
     yes or no found elsewhere in the conversation."""
     return intent == LEAD
+
+
+# ---- how a lead's status is stored in the Response Sheet's intent columns
+# (written by response_status.py, read back by the Inbox, the Performance page and everything else that reads Intent)
+
+MANUAL_CONFIDENCE = "Manual"       # IntentConfidence of a status somebody set by hand: it beats the AI and the keywords
+KEYWORD_CONFIDENCE = "Keywords"    # IntentConfidence of an intent worked out from the words (never the AI's)
+
+STATUS_TO_INTENT = {"lead": LEAD, "interested": INTERESTED, "not_interested": NOT_INTERESTED, "unclear": "Unclear"}
+INTENT_TO_STATUS = {intent: status for status, intent in STATUS_TO_INTENT.items()}
+# what the Status control offers, in order ("auto" = go back to the automatic reading)
+STATUS_CHOICES = [("auto", "Automatic"), ("lead", "Lead"), ("interested", "Interested"), ("not_interested", "Not interested"), ("unclear", "Unclear")]
