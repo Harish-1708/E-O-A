@@ -13,17 +13,17 @@ KIND_CLASS = {"good": "ld-pill-good", "active": "ld-pill-active", "bad": "ld-pil
 DOT_CLASS = {"sent": "ld-dot-sent", "replied": "ld-dot-replied", "pending": ""}
 
 LEADS_CSS = """
-.ld-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 2.1fr) minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(0, .9fr) minmax(0, 1.75fr); gap: 12px; align-items: center; padding: 0 16px; }
+.ld-grid { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(0, 1.9fr) minmax(0, 1.5fr) minmax(0, 1.5fr) minmax(0, .85fr) minmax(0, 1.5fr); gap: 14px; align-items: center; padding: 0 16px; }
 .ld-head { padding-top: 11px; padding-bottom: 9px; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 12.5px; font-weight: 600; }
-.ld-row { min-height: 58px; box-sizing: border-box; padding-top: 10px; padding-bottom: 10px; border-bottom: 1px solid #f0f2f5; font-size: 13.5px; color: #111827; background: #fff; }
+.ld-row { min-height: 68px; box-sizing: border-box; padding-top: 14px; padding-bottom: 14px; border-bottom: 1px solid #f0f2f5; font-size: 13.5px; line-height: 1.4; color: #111827; background: #fff; }
 .ld-row.ld-selected { background: #dde9fb; }
-.ld-cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ld-cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.4; }
 .ld-name { font-weight: 700; } .ld-sub { color: #6b7280; font-size: 12px; margin-top: 1px; } .ld-muted { color: #6b7280; }
-.ld-pill { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 8px; padding: 3px 9px; border: 1px solid #d1d5db; background: #fff; color: #374151; white-space: nowrap; }
+.ld-pill { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; box-sizing: border-box; line-height: 1.4; font-size: 12px; font-weight: 600; border-radius: 8px; padding: 3px 9px; border: 1px solid #d1d5db; background: #fff; color: #374151; white-space: nowrap; }
 .ld-pill-good { color: #15803d; border-color: #bbe3c9; background: #f0fbf4; } .ld-pill-active { color: #1d4ed8; border-color: #c7d7fb; background: #f3f7ff; }
 .ld-pill-bad { color: #b91c1c; border-color: #f3c4c4; background: #fff5f5; } .ld-pill-waiting { color: #b45309; border-color: #f3d9a8; background: #fffaf0; }
 .ld-pill-neutral { color: #4b5563; background: #f9fafb; }
-.ld-dots { display: flex; gap: 5px; align-items: center; } .ld-dot { width: 9px; height: 9px; border-radius: 50%; background: #e5e7eb; display: inline-block; }
+.ld-dots { display: flex; flex-wrap: wrap; gap: 5px; row-gap: 4px; align-items: center; } .ld-dot { width: 9px; height: 9px; border-radius: 50%; background: #e5e7eb; display: inline-block; }
 .ld-dot-sent { background: #2563eb; } .ld-dot-replied { background: #16a34a; }
 .ld-empty { padding: 28px 16px; text-align: center; color: #6b7280; font-size: 14px; }
 .ld-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px 20px; }
@@ -38,7 +38,21 @@ LEADS_CSS = """
 
 /* ---- the table is one bordered card; each row is one click target (the real Streamlit button sits invisibly on top of it) */
 [class*="st-key-ld_table_"] { border: 1px solid #e5e7eb; border-radius: 14px; background: #fff; overflow: hidden; gap: 0 !important; }
-[class*="st-key-ld_row_"] { position: relative; gap: 0 !important; cursor: pointer; }
+/* Streamlit gives its Markdown wrapper a negative bottom margin (to cancel paragraph spacing), which shrank each row's container,
+   and so its click target, by 16px: rows overlapped the next one and a click on the lower part of a row opened its neighbour.
+   The margin is removed here, and the container also carries the row's own height so it holds even if that wrapper changes. */
+[class*="st-key-ld_row_"] { position: relative; gap: 0 !important; cursor: pointer; min-height: 68px; }
+[class*="st-key-ld_row_"] [data-testid="stMarkdownContainer"], [class*="st-key-ld_table_"] [data-testid="stMarkdownContainer"],
+[class*="st-key-ld_panel_"] [data-testid="stMarkdownContainer"] { margin-bottom: 0 !important; }
+
+/* ---- the controls for the open lead: their own card under its details, with a blue Save and clearly dangerous removal buttons */
+[class*="st-key-ld_actions_"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px 20px; margin-top: 14px; }
+[class*="st-key-manage_save_"] button { background: #2563eb !important; border: 1px solid #2563eb !important; color: #fff !important; border-radius: 8px; font-weight: 600; }
+[class*="st-key-manage_save_"] button:hover { background: #1d4ed8 !important; border-color: #1d4ed8 !important; }
+[class*="st-key-remove_ask_"] button { background: #fff !important; border: 1px solid #f3c4c4 !important; color: #b91c1c !important; border-radius: 8px; font-weight: 600; }
+[class*="st-key-remove_ask_"] button:hover { background: #fff5f5 !important; border-color: #e9a3a3 !important; color: #991b1b !important; }
+[class*="st-key-remove_yes_"] button { background: #dc2626 !important; border: 1px solid #dc2626 !important; color: #fff !important; border-radius: 8px; font-weight: 600; }
+[class*="st-key-remove_yes_"] button:hover { background: #b91c1c !important; border-color: #b91c1c !important; }
 [class*="st-key-ld_row_"] [class*="_open_"] { position: absolute !important; inset: 0; width: 100% !important; height: 100% !important; margin: 0 !important; z-index: 3; }
 /* the button's own wrapper must also fill the row, or only its top 40px would respond to a click */
 [class*="st-key-ld_row_"] [class*="_open_"] > div { width: 100% !important; height: 100% !important; }
