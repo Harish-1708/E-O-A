@@ -58,6 +58,7 @@ def campaign_page(leads=None, send_log=None, status=None, selected=FIXTURE_CAMPA
     if drop_master:
         del ws[f"{FIXTURE_CAMPAIGN} Master Sheet"]                                      # the Sheet cannot be read for this campaign
     captured, fake_create_file = _mock_github_writes()
+    captured["master"] = ws.get(f"{FIXTURE_CAMPAIGN} Master Sheet")
     patches = [patch("gspread.authorize", return_value=type("C", (), {"open_by_key": lambda self, k: FakeSpreadsheet(ws)})()),
                patch("google.oauth2.service_account.Credentials.from_service_account_info", return_value=object()),
                patch("github_client.GitHubClient.create_file", fake_create_file),
@@ -116,13 +117,13 @@ def test_the_sub_line_counts_only_emails_sent_today():
     log = [{"Timestamp": _stamp(0, 0), "Status": "sent"}, {"Timestamp": _stamp(0, 0), "Status": "sent"}, {"Timestamp": _stamp(3), "Status": "sent"}, {"Timestamp": _stamp(0, 0), "Status": "failed"}]
     with campaign_page(send_log=log) as (at, _):
         sub = _subline(at)
-        assert sub is not None and re.fullmatch(r"\d+ sent today( · daily limit \d+)?", sub)
+        assert sub is not None and re.fullmatch(r"(Next automatic send: .+ \(in .+\) · )?\d+ sent today( · daily limit \d+)?", sub)
         from preview_logic import get_campaign_cfg
         from campaign_header_logic import subline
         cfg = get_campaign_cfg(FIXTURE_CAMPAIGN)
-        assert sub == subline(cfg, log)                                                       # the page shows exactly what the logic says
+        assert sub.endswith(subline(cfg, log))                                                # the page shows exactly what the logic says (after any next-send part)
         if not cfg.get("schedule"):                                                           # no time zone: the UTC day, so the count is exact
-            assert sub.startswith("2 sent today")                                             # two sent now; not the one 3 days ago, not the failed one
+            assert subline(cfg, log).startswith("2 sent today")                               # two sent now; not the one 3 days ago, not the failed one
 
 
 def test_the_status_pill_and_the_chips_agree_on_the_colour_family():
@@ -173,8 +174,8 @@ def test_a_campaign_whose_sheet_cannot_be_read_still_shows_its_title_bar_with_a_
 def test_back_and_refresh_are_still_there_with_their_original_labels_and_back_still_goes_back():
     with campaign_page() as (at, _):
         labels = [b.label for b in at.button]
-        assert "← Back to Campaigns" in labels and "🔄 Refresh data" in labels
-        next(b for b in at.button if b.label == "← Back to Campaigns").click()
+        assert "← Campaigns" in labels and "🔄 Refresh data" in labels and "← Back to Campaigns" not in labels
+        next(b for b in at.button if b.label == "← Campaigns").click()
         at.run(timeout=30)
         assert list(at.exception) == [] and len(at.tabs) == 0                                  # back on the campaign list: no tabs, no title bar
 
@@ -191,3 +192,71 @@ def test_the_page_skin_is_added_once_on_a_campaign_and_not_on_the_campaign_list(
 def test_the_title_bar_comes_before_the_tabs_and_the_tabs_are_still_six():
     with campaign_page() as (at, _):
         assert len(at.tabs) == 6 and [t.label for t in at.tabs][0] == "Performance"
+
+
+
+# ================================================================ the next automatic send, in the real header
+
+def test_a_running_campaign_shows_when_it_will_next_send_at_the_real_workflow_minute():
+    with campaign_page(status="running") as (at, _):
+        sub = _subline(at)
+        match = re.match(r"Next automatic send: (.+?) (\d{1,2}):(\d{2}) (AM|PM) \(in (.+?)\) · ", sub)
+        assert match, sub                                                                    # a campaign with no schedule always has a next run
+        from preview_logic import get_campaign_cfg
+        tz = (get_campaign_cfg(FIXTURE_CAMPAIGN).get("schedule") or {}).get("timezone")
+        if not tz:
+            assert match.group(3) == "43"                                                    # :43 UTC, read from .github/workflows/auto_send.yml
+
+
+@pytest.mark.parametrize("status", ["paused", "draft", "attention", "completed"])
+def test_a_campaign_that_is_not_running_does_not_claim_a_next_automatic_send(status):
+    with campaign_page(status=status) as (at, _):
+        assert "Next automatic send" not in (_subline(at) or "")
+
+
+def test_the_page_still_works_when_the_workflow_file_cannot_be_read():
+    with patch("config.REPO_ROOT", "/no/such/folder"):                                       # the real file read now genuinely fails
+        with campaign_page(status="running") as (at, _):
+            assert list(at.exception) == [] and "Next automatic send" not in (_subline(at) or "") and _subline(at) is not None
+
+
+def test_the_header_has_a_send_now_popover_and_a_more_menu_with_refresh_inside():
+    with campaign_page(status="running") as (at, _):
+        assert [p.proto.popover.label for p in at.get("popover")] == ["➤ Send now", "⋯"]
+        assert any(b.key == "campaigns_refresh_data" for b in at.button) and any(b.key == "campaigns_send_batch_button" for b in at.button)
+
+
+def test_send_is_no_longer_at_the_foot_of_the_settings_tab():
+    with campaign_page(status="running") as (at, _):
+        send_buttons = [b for b in at.button if b.key == "campaigns_send_batch_button"]
+        assert len(send_buttons) == 1                                                        # one Send form on the page, not two (that would also crash on duplicate keys)
+
+
+def test_the_foot_of_the_page_says_which_layout_build_is_live():
+    with campaign_page() as (at, _):
+        assert f"UI build {campaign_html.UI_BUILD}" in " ".join(m.value for m in at.markdown)
+
+
+def test_the_breadcrumb_shows_the_campaign_name_after_the_campaigns_link():
+    with campaign_page() as (at, _):
+        assert f'<span class="cp-crumb-name">/ {FIXTURE_CAMPAIGN}</span>' in " ".join(m.value for m in at.markdown)
+
+
+
+def test_the_performance_refresh_button_makes_the_page_read_the_google_sheet_again():
+    with campaign_page() as (at, captured):
+        reads = captured["master"].read_call_count
+        assert reads > 0
+        at.run(timeout=30)
+        assert captured["master"].read_call_count == reads                                 # an ordinary redraw reads nothing (the data is cached)
+        next(b for b in at.button if b.key == "campaigns_perf_refresh").click()
+        at.run(timeout=30)
+        assert list(at.exception) == [] and captured["master"].read_call_count > reads
+
+
+def test_the_more_menus_refresh_does_the_same_as_the_performance_one():
+    with campaign_page() as (at, captured):
+        reads = captured["master"].read_call_count
+        next(b for b in at.button if b.key == "campaigns_refresh_data").click()
+        at.run(timeout=30)
+        assert captured["master"].read_call_count > reads
