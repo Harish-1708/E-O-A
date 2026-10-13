@@ -81,11 +81,6 @@ def display_name(lead: Dict) -> str:
     return email.split("@")[0] if email else "(no name)"
 
 
-def manage_label(lead: Dict) -> str:
-    """The text the 'Manage a lead' menu uses for a lead. Kept here so the table's click and that menu can never disagree."""
-    return f"{lead.get('LeadID', '')} — {lead.get('FirstName', '')} {lead.get('LastName', '')} <{lead.get('Email', '')}>"
-
-
 # ---------------------------------------------------------------- status
 
 def status_summary(lead: Dict) -> Tuple[str, str]:
@@ -197,6 +192,65 @@ def timeline(lead: Dict, labels: List[str], today: Optional[date] = None) -> Lis
     dated = sorted((e for e in events if e[0] is not None), key=lambda e: e[0])
     undated = [e for e in events if e[0] is None]
     return [{"when": short_date(raw, today), "icon": icon, "text": text} for _, raw, icon, text in dated + undated]
+
+
+# ---------------------------------------------------------------- extra filters (sender, stage, how recently)
+
+SENDER_ALL, SENDER_NONE = "All senders", "(no sender yet)"
+STAGE_ANY, STAGE_NONE = "Any stage", "Not contacted yet"
+RECENT_ANY, RECENT_TODAY, RECENT_7, RECENT_30, RECENT_OLDER = "Any time", "Today", "Last 7 days", "Last 30 days", "Older than 30 days"
+RECENCY_OPTIONS = [RECENT_ANY, RECENT_TODAY, RECENT_7, RECENT_30, RECENT_OLDER]
+
+
+def highest_stage(lead: Dict, count: int) -> int:
+    """The index of the last stage sent to this lead (0 = Intro …), or -1 when nothing has been sent."""
+    sent = [i for i in range(count) if str(lead.get(sent_column(i)) or "").strip()]
+    return max(sent) if sent else -1
+
+
+def sender_options(leads: List[Dict]) -> List[str]:
+    """'All senders', then every sender account that appears (sorted), then '(no sender yet)' if any lead has none."""
+    accounts = sorted({str(lead.get("SenderAccount") or "").strip() for lead in leads} - {""})
+    has_blank = any(not str(lead.get("SenderAccount") or "").strip() for lead in leads)
+    return [SENDER_ALL] + accounts + ([SENDER_NONE] if has_blank else [])
+
+
+def stage_options(labels: List[str]) -> List[str]:
+    """'Any stage', 'Not contacted yet', then one 'At <stage>' per stage — the stage whose email went out most recently."""
+    return [STAGE_ANY, STAGE_NONE] + [f"At {label}" for label in labels]
+
+
+def apply_extra_filters(leads: List[Dict], count: int, labels: List[str], sender: str = SENDER_ALL, stage: str = STAGE_ANY,
+                        recency: str = RECENT_ANY, today: Optional[date] = None) -> List[Dict]:
+    """The leads that pass all three extra filters (the same dicts, in the same order). An option that is not recognised
+    filters nothing, so a stale choice can never hide every lead."""
+    today = today or date.today()
+    result = []
+    for lead in leads:
+        account = str(lead.get("SenderAccount") or "").strip()
+        if sender == SENDER_NONE and account:
+            continue
+        if sender not in (SENDER_ALL, SENDER_NONE) and account != sender:
+            continue
+        top = highest_stage(lead, count)
+        if stage == STAGE_NONE and top != -1:
+            continue
+        if stage.startswith("At ") and stage in stage_options(labels) and top != stage_options(labels).index(stage) - 2:
+            continue
+        if recency in (RECENT_TODAY, RECENT_7, RECENT_30, RECENT_OLDER):
+            moment = _parse(last_sent(lead, count))
+            if moment is None:
+                continue                                  # never sent (or unreadable): not "recent" and not "older" either
+            age = (today - moment.date()).days
+            if (recency == RECENT_TODAY and age != 0) or (recency == RECENT_7 and not 0 <= age <= 6) \
+                    or (recency == RECENT_30 and not 0 <= age <= 29) or (recency == RECENT_OLDER and age < 30):
+                continue
+        result.append(lead)
+    return result
+
+
+def any_extra_filter(sender: str, stage: str, recency: str) -> bool:
+    return (sender, stage, recency) != (SENDER_ALL, STAGE_ANY, RECENT_ANY)
 
 
 # ---------------------------------------------------------------- pages
