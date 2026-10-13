@@ -348,7 +348,7 @@ def test_the_list_shows_the_date_an_email_was_really_sent_not_the_day_it_was_log
 def test_the_stylesheet_is_put_on_the_page_exactly_once():
     with hub() as (at, _):
         styles = [m.value for m in at.markdown if m.value.lstrip().startswith("<style>")]
-        assert len(styles) == 1 and styles[0] == f"<style>{inbox_html.INBOX_CSS}</style>"
+        assert len(styles) == 1 and styles[0] == f"<style>{inbox_html.inbox_css(inbox_html.SIZES[inbox_html.DEFAULT_SIZE])}</style>"
 
 
 def test_the_panes_are_given_the_container_names_the_stylesheet_looks_for():
@@ -469,6 +469,135 @@ def test_a_conversation_is_classified_by_its_latest_message():
         assert _row_keys(at) == [A5]
         _click(at, "ux_railbtn_hub_not_interested")
         assert _row_keys(at) == []                                              # Zed's latest message is the bounce, not his refusal
+
+
+# ---- statuses worked out from the words, when the AI gave no definite reading
+
+def _zed_says(body, intent="", confidence="", classification="Genuine Reply"):
+    """Campaign A's lead 5 (Zed), with his one reply replaced."""
+    ws = _two_campaign_ws()
+    for record in ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records:
+        if record["ResponseID"] == "rA3":
+            record.update({"FullBody": body, "Snippet": body, "Intent": intent, "IntentConfidence": confidence, "Classification": classification})
+    return ws
+
+
+def _status_of_zed(ws):
+    """Which rail category Zed's conversation lands in, and the header's status pill."""
+    with hub(ws) as (at, _):
+        landed = [key for key in ("lead", "interested", "not_interested", "unclear", "auto", "bounced")
+                  if (_click(at, f"ux_railbtn_hub_{key}"), A5 in _row_keys(at))[1]]
+        _click(at, "ux_railbtn_hub_all")
+        _open_conversation(at, A5)
+        return landed, _header(at)["chips"][-1]
+
+
+@pytest.mark.parametrize("words, expected", [
+    ("Not interested", "not_interested"), ("No thank you", "not_interested"), ("No thanks!", "not_interested"),
+    ("Thanks for reaching out but I'm not taking on brand work right now", "not_interested"),
+    ("Yes! I'd love to do this", "interested"), ("Sounds great, send me the details", "interested"),
+    ("What are your rates?", "lead"), ("I can't accept that offer. It's extremely low.", "lead"),
+    ("Thanks!", "unclear"),
+])
+def test_a_reply_with_no_ai_reading_is_labelled_from_what_it_says(words, expected):
+    landed, pill = _status_of_zed(_zed_says(words))
+    assert landed == [expected], (words, landed)
+    if expected != "unclear":
+        assert pill.endswith("· by keywords"), pill                               # and it says the label came from keywords, not the AI
+
+
+def test_when_the_full_text_is_blank_the_short_preview_is_read_instead():
+    ws = _zed_says("")
+    for record in ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records:
+        if record["ResponseID"] == "rA3":
+            record["Snippet"] = "No thanks, not for me"
+    assert _status_of_zed(ws)[0] == ["not_interested"]
+
+
+def test_the_ai_reading_is_used_when_it_is_definite_even_if_the_words_say_otherwise():
+    landed, pill = _status_of_zed(_zed_says("No thank you, not interested", intent="Interested", confidence="High"))
+    assert landed == ["interested"] and pill == "👍 Interested · High confidence"
+
+
+def test_an_ai_reading_of_unclear_gives_way_to_the_words():
+    landed, pill = _status_of_zed(_zed_says("No thank you", intent="Unclear", confidence="Low"))
+    assert landed == ["not_interested"] and pill == "👎 Not interested · by keywords"
+
+
+def test_a_question_we_asked_in_quoted_history_is_not_read_as_their_answer():
+    landed, _ = _status_of_zed(_zed_says("Thanks!\n\n> Are you interested in a paid collab? Not interested is fine too."))
+    assert landed == ["unclear"]
+
+
+def test_an_auto_replys_words_are_never_taken_as_the_persons_answer():
+    landed, _ = _status_of_zed(_zed_says("I am not interested in any emails while away", classification="Auto-Reply"))
+    assert landed == ["auto"]
+
+
+def test_an_older_auto_replys_words_are_not_taken_as_the_answer_to_a_later_reply():
+    """An out-of-office that happens to say 'interested' or 'not interested' must not label the conversation once a real reply follows."""
+    ws = _zed_says("I am interested in hearing from you when I am back in the office", classification="Auto-Reply")
+    real = _resp("rR", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "x", "2026-10-12 10:00:00", FullBody="Thanks!")
+    assert _status_of_zed(_with_extra(ws, real))[0] == ["unclear"]
+
+
+def test_a_later_question_does_not_override_an_earlier_yes():
+    later = _resp("rQ", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "x", "2026-10-12 10:00:00", FullBody="Do you cover shipping?")
+    assert _status_of_zed(_with_extra(_zed_says("Sounds great, send details"), later))[0] == ["interested"]
+
+
+def test_a_later_refusal_overrides_an_earlier_yes():
+    later = _resp("rN", "5", '"Zed Z" <zed@abc.com>', "Re: Hello", "x", "2026-10-12 10:00:00", FullBody="Actually, no thank you")
+    assert _status_of_zed(_with_extra(_zed_says("Sounds great, send details"), later))[0] == ["not_interested"]
+
+
+def _with_extra(ws, response):
+    ws[f"{FIXTURE_CAMPAIGN} Response Sheet"]._records.append(response)
+    return ws
+
+
+def test_the_rail_counts_include_the_keyword_readings():
+    with hub(_zed_says("Not interested")) as (at, _):
+        assert _rail_counts(at)["Not interested"] == "1" and _rail_counts(at)["Unclear"] == "1"
+
+
+# ---- text size and fitting the screen
+
+def _font_sizes(at):
+    css = next(m.value for m in at.markdown if m.value.lstrip().startswith("<style>"))
+    return [float(x) for x in __import__("re").findall(r"font-size: ([\d.]+)px", css)]
+
+
+def test_the_text_is_larger_by_default_and_the_size_can_be_changed_from_the_menu():
+    with hub() as (at, _):
+        assert at.radio(key="hub_size").value == "Large"
+        large = _font_sizes(at)
+        at.radio(key="hub_size").set_value("Normal")
+        at.run(timeout=25)
+        normal = _font_sizes(at)
+        at.radio(key="hub_size").set_value("Extra large")
+        at.run(timeout=25)
+        extra = _font_sizes(at)
+        assert normal == _font_sizes_of(inbox_html.INBOX_CSS)
+        assert all(n < l < x for n, l, x in zip(normal, large, extra))
+
+
+def _font_sizes_of(css):
+    return [float(x) for x in __import__("re").findall(r"font-size: ([\d.]+)px", css)]
+
+
+def test_the_size_choice_is_kept_when_another_conversation_is_opened():
+    with hub() as (at, _):
+        at.radio(key="hub_size").set_value("Extra large")
+        at.run(timeout=25)
+        _open_conversation(at, A5)
+        assert at.radio(key="hub_size").value == "Extra large"
+        assert _font_sizes(at) == _font_sizes_of(inbox_html.inbox_css(1.3))
+
+
+def test_the_campaign_tab_has_its_own_size_choice():
+    with _campaign_tab() as (at, _):
+        assert at.radio(key=f"{TAB}_size").value == "Large"
 
 
 def test_the_rail_counts_follow_the_pages_own_search():
