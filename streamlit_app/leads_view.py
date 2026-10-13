@@ -95,7 +95,7 @@ def render_lead_browser(*, leads: List[Dict], filtered: List[Dict], search_query
                     # the real button, invisible, laid over the whole row; its label is only for screen readers
                     st.button(f"Open lead {md_escape(row['name'])}", key=f"data_open_{key}", on_click=_select, args=(key,))
         if filtered:
-            info, previous, following = st.columns([3, 1, 1])
+            info, previous, following = st.columns([8, 1, 1])
             info.caption(f"Showing {start + 1}–{end} of {len(filtered)} · page {page + 1} of {pages}")
             previous.button("‹ Prev", key="data_prev", on_click=_turn_page, args=(-1,), disabled=page == 0, use_container_width=True)
             following.button("Next ›", key="data_next", on_click=_turn_page, args=(1,), disabled=page >= pages - 1, use_container_width=True)
