@@ -13,7 +13,6 @@ from page_state import mark_active_page  # noqa: E402
 from config import (  # noqa: E402
     WORKFLOW_IMPORT_LEADS, WORKFLOW_REMOVE_LEADS, WORKFLOW_DASHBOARD,
     WORKFLOW_SEND, WORKFLOW_CHECK_REPLIES, WORKFLOW_BACKFILL_THREAD_SUBJECT, WORKFLOW_SYNC_ASANA,
-    WORKFLOW_SET_LEAD_OVERRIDE,
     TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, SETTINGS_PATH,
 )
 from email_account_slots_logic import read_slot_mapping_live  # noqa: E402
@@ -55,8 +54,9 @@ from responses_hub_logic import (  # noqa: E402
     group_responses_by_lead, sort_conversation_groups_newest_first, tag_responses_with_campaign, search_responses,
 )
 from inbox_view import InboxContext, render_inbox  # noqa: E402
-from leads_view import render_lead_browser  # noqa: E402
-from leads_logic import filter_counts, manage_label  # noqa: E402
+from leads_view import render_lead_browser, render_extra_filters, render_clear_filters  # noqa: E402
+from leads_logic import filter_counts, apply_extra_filters, any_extra_filter, stage_count, stage_labels  # noqa: E402
+from leads_actions import render_lead_actions  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
 from conversation_logic import filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
@@ -657,13 +657,22 @@ def _render_data_tab(campaign_cfg, leads):
     status_filter = st.radio("Filter", FILTER_OPTIONS, key="data_filter", horizontal=True, label_visibility="collapsed",
                              format_func=lambda option: f"{option} · {option_counts[option]}")
 
-    filtered = search_leads(filter_leads(leads, status_filter), search_query)
+    stage_names = [s.get("name") for s in (campaign_cfg.get("stages") or [])]
+    sender_filter, stage_filter, recency_filter = render_extra_filters(leads, stage_names)
+
+    shown_stage_count = stage_count(stage_names, leads)
+    filtered = apply_extra_filters(search_leads(filter_leads(leads, status_filter), search_query), shown_stage_count,
+                                   stage_labels(stage_names, shown_stage_count), sender_filter, stage_filter, recency_filter)
+    render_clear_filters(any_extra_filter(sender_filter, stage_filter, recency_filter) or bool(search_query.strip()) or status_filter != FILTER_OPTIONS[0])
     st.caption(f"Showing {len(filtered)} of {len(leads)} lead(s)")
 
-    # The lead table and the side panel for the lead you click (see leads_view). It only looks and selects: importing,
-    # removing and managing leads stay exactly as they were, below.
-    open_lead = render_lead_browser(leads=leads, filtered=filtered, search_query=search_query, status_filter=status_filter,
-                                    stage_names=[s.get("name") for s in (campaign_cfg.get("stages") or [])])
+    # The lead table and the side panel for the lead you click (see leads_view). The controls that change one lead (stop
+    # sending, Asana stage, remove) are drawn in that panel by leads_actions; importing leads stays in the section above.
+    def _lead_actions(lead, key):
+        render_lead_actions(lead, key, campaign_name=campaign_name, github_client=_get_github_client, current_user=current_user)
+
+    render_lead_browser(leads=leads, filtered=filtered, search_query=search_query, status_filter=status_filter, stage_names=stage_names,
+                        extra_filters=(sender_filter, stage_filter, recency_filter), render_actions=_lead_actions)
 
     if filtered:
         try:
@@ -676,10 +685,10 @@ def _render_data_tab(campaign_cfg, leads):
                 width="stretch", hide_index=True,
             )
 
-        with st.expander("🗑️ Remove leads"):
+        with st.expander("🗑️ Remove several leads at once"):
             st.caption(
-                "Removed leads are never deleted — their row and history stay intact, they're just "
-                "marked Removed and excluded from all future sends."
+                "To remove just one lead, open it in the table and use the panel on the right. Removed leads are never deleted — "
+                "their row and history stay intact, they're just marked Removed and excluded from all future sends."
             )
             options = {f"{l.get('LeadID', '')} — {l.get('FirstName', '')} {l.get('LastName', '')} "
                        f"<{l.get('Email', '')}>": l.get("LeadID", "") for l in filtered}
@@ -699,52 +708,6 @@ def _render_data_tab(campaign_cfg, leads):
                     st.success(f"Removal triggered for {len(lead_ids)} lead(s).")
                 except GitHubActionsError as exc:
                     st.error(f"Removal failed: {exc}")
-
-        with st.expander("🔧 Manage a lead", expanded=open_lead is not None):
-            st.caption(
-                "Stop sending to just this one lead without removing it (it stays visible, only "
-                "excluded from future sends), or push its Asana pipeline stage straight to Rights "
-                "Secured / Declined for a lead handled outside the automated pipeline entirely — "
-                "e.g. one you finalized manually. Both apply on the next sync, manual or scheduled."
-            )
-            lead_options = {manage_label(l): l.get("Email", "") for l in filtered}
-            if st.session_state.get("manage_lead_select", "-- Select --") not in ["-- Select --"] + list(lead_options.keys()):
-                st.session_state["manage_lead_select"] = "-- Select --"      # that lead was filtered out since it was picked
-            selected_lead_label = st.selectbox("Lead", ["-- Select --"] + list(lead_options.keys()),
-                                                key="manage_lead_select")
-
-            if selected_lead_label != "-- Select --":
-                selected_email = lead_options[selected_lead_label]
-                current_lead = next((l for l in filtered if l.get("Email") == selected_email), {})
-                st.caption(f"Current status: **{current_lead.get('Status') or '(none)'}** · "
-                           f"Current Asana stage override: "
-                           f"**{current_lead.get('ManualAsanaStage') or '(none — automatic)'}**")
-
-                status_choice = st.selectbox(
-                    "Sending status", ["(no change)", "Stop sending to this lead",
-                                        "Clear override (resume normal sending)"],
-                    key="manage_lead_status")
-                asana_stage_choice = st.selectbox(
-                    "Asana stage override", ["(no change)", "Clear override (resume automatic tracking)",
-                                              outreach.ASANA_STAGE_SOURCED, outreach.ASANA_STAGE_OUTREACH_SENT,
-                                              outreach.ASANA_STAGE_FOLLOWUP, outreach.ASANA_STAGE_NEGOTIATING,
-                                              outreach.ASANA_STAGE_RIGHTS_SECURED,
-                                              outreach.ASANA_STAGE_DECLINED_DEAD],
-                    key="manage_lead_asana_stage")
-
-                if st.button("Save", key="manage_lead_save"):
-                    if status_choice == "(no change)" and asana_stage_choice == "(no change)":
-                        st.warning("Nothing selected to change.")
-                    else:
-                        try:
-                            client = _get_github_client()
-                            inputs = {"campaign": campaign_name, "email": selected_email,
-                                      "status": status_choice, "asana_stage": asana_stage_choice}
-                            client.dispatch_workflow(WORKFLOW_SET_LEAD_OVERRIDE, inputs)
-                            st.success(f"Update triggered for {selected_email}. May take a minute to "
-                                       "actually reflect here while the app redeploys.")
-                        except GitHubActionsError as exc:
-                            st.error(f"Failed to trigger update: {exc}")
 
 
 def _fetch_live_stages_and_variants(client, campaign_name, stage_wait_days=None):
