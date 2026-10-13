@@ -634,3 +634,67 @@ def test_manage_and_remove_are_separated_by_a_divider():
         before = len(at.get("divider"))
         _click(at, "data_open_1")
         assert len(at.get("divider")) == before + 1
+
+
+# ================================================================ the toolbar's "+ Add leads" button
+
+IMPORT_LABEL = "➕ Add Leads (upload CSV)"
+COLUMNS_LABEL = "📋 All columns (every field in the Sheet)"
+
+
+def _expander_labels(at):
+    return [e.label for e in at.expander]
+
+
+def test_the_toolbar_has_an_add_leads_button_and_the_import_panel_starts_collapsed_at_the_foot():
+    with data_tab([lead(1)]) as (at, _):
+        assert _has(at.button, "ld_add_leads") and next(b for b in at.button if b.key == "ld_add_leads").label == "＋ Add leads"
+        labels = _expander_labels(at)
+        assert labels.index(IMPORT_LABEL) > labels.index(COLUMNS_LABEL)                    # down at the foot, after the table's own sections
+        assert next(e for e in at.expander if e.label == IMPORT_LABEL).proto.expanded is False
+        assert not _has(at.button, "ld_import_close")
+
+
+def test_clicking_add_leads_opens_the_import_panel_right_under_the_toolbar_and_draws_it_only_once():
+    with data_tab([lead(1)]) as (at, _):
+        _click(at, "ld_add_leads")
+        assert list(at.exception) == [] and list(at.error) == []                           # a second copy would crash on duplicate widget keys
+        labels = _expander_labels(at)
+        assert labels.count(IMPORT_LABEL) == 1 and labels.index(IMPORT_LABEL) < labels.index(COLUMNS_LABEL)
+        assert next(e for e in at.expander if e.label == IMPORT_LABEL).proto.expanded is True and _has(at.button, "ld_import_close")
+
+
+def test_closing_the_import_panel_puts_it_back_at_the_foot_collapsed():
+    with data_tab([lead(1)]) as (at, _):
+        _click(at, "ld_add_leads")
+        _click(at, "ld_import_close")
+        labels = _expander_labels(at)
+        assert labels.count(IMPORT_LABEL) == 1 and labels.index(IMPORT_LABEL) > labels.index(COLUMNS_LABEL)
+        assert next(e for e in at.expander if e.label == IMPORT_LABEL).proto.expanded is False and not _has(at.button, "ld_import_close")
+
+
+def test_a_csv_can_still_be_uploaded_and_mapped_when_the_panel_was_opened_from_the_toolbar():
+    with data_tab([lead(1)]) as (at, _):
+        _click(at, "ld_add_leads")
+        at.file_uploader(key="data_csv_upload").upload("people.csv", b"Email,Company\nnew@example.com,Acme\n", "text/csv")
+        at.run(timeout=30)
+        assert list(at.exception) == [] and _has(at.selectbox, "map_0_Email") and _has(at.selectbox, "map_1_Company")
+        assert any("1 of 1 row(s) have an email" in m.value for m in at.markdown)
+
+
+def test_adding_leads_from_the_toolbar_still_commits_the_same_payload_and_starts_the_same_workflow():
+    import json
+    with data_tab([lead(1)]) as (at, captured), patch("time.sleep"):
+        _click(at, "ld_add_leads")
+        at.file_uploader(key="data_csv_upload").upload("people.csv", b"Email\nnew@example.com\n", "text/csv")
+        at.run(timeout=30)
+        _click(at, "confirm_import")
+        assert list(at.exception) == [] and list(at.error) == []
+        assert json.loads(captured["commits"][0]["content"].decode("utf-8"))["leads"][0]["Email"] == "new@example.com"
+        assert captured["dispatches"][0][0] == "import_leads.yml"
+
+
+def test_a_campaign_with_no_leads_has_no_toolbar_and_its_import_panel_is_already_open():
+    with data_tab([]) as (at, _):
+        assert not _has(at.button, "ld_add_leads") and list(at.exception) == []
+        assert next(e for e in at.expander if e.label == IMPORT_LABEL).proto.expanded is True
