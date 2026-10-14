@@ -115,7 +115,9 @@ def test_google_worksheet_lookups_are_made_once_not_before_every_read(fixture_re
         at.run(timeout=30)
         lookups_after_reload = len(ss.lookups)
     assert list(at.exception) == []
-    assert lookups_after_first_load <= 4        # one per distinct tab, never one per read
+    # One per distinct tab, never one per read: the campaign's four tabs, plus the Email Accounts Health tab that the Settings tab reads account health from.
+    assert lookups_after_first_load <= 5
+    assert len(set(ss.lookups)) == len(ss.lookups)            # and no tab is ever looked up twice
     assert lookups_after_reload == lookups_after_first_load   # a reload adds NONE
 
 
