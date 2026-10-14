@@ -182,3 +182,16 @@ def test_add_leads_is_the_toolbars_one_blue_button_and_closing_the_panel_is_an_o
 
 def test_the_build_name_is_a_real_label():
     assert re.fullmatch(r"[a-z]+-[a-z]+-\d+", C.UI_BUILD)
+
+
+# ================================================================ the header's ... menu
+
+def test_the_menu_group_labels_are_small_grey_capitals_and_the_menu_is_wide_enough_for_its_explanations():
+    label = _rule(".cp-menu-label {")
+    assert "text-transform: uppercase" in label and "color: #6b7280" in label and "font-size: 11.5px" in label
+    assert "min-width: 340px" in _rule('[data-testid="stPopoverBody"]:has([class*="st-key-cp_menu_"]) {')
+
+
+def test_the_menu_items_fill_the_menu_and_the_dividers_are_tight():
+    assert "justify-content: flex-start" in _rule('[class*="st-key-cp_menu_"] button {') and "width: 100%" in _rule('[class*="st-key-cp_menu_"] button > div {')
+    assert "margin: 4px 0 !important" in _rule('[data-testid="stPopoverBody"]:has([class*="st-key-cp_menu_"]) hr {')
