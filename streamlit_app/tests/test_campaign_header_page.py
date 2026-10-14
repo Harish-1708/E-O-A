@@ -143,8 +143,11 @@ def test_the_status_pill_and_the_chips_agree_on_the_colour_family():
 
 @pytest.mark.parametrize("status, button", [("running", "⏸ Pause"), ("attention", "⏸ Pause"), ("paused", "▶ Resume"), ("draft", "🚀 Launch")])
 def test_each_status_offers_its_one_action_button_with_the_same_label_as_ever(status, button):
+    """The header offers exactly one; the Settings tab's Campaign status card offers the same one (its widgets are keyed 'se_...', the header's are not)."""
     with campaign_page(status=status) as (at, _):
-        assert [b.label for b in at.button if b.label in ("⏸ Pause", "▶ Resume", "🚀 Launch")] == [button]
+        actions = [b for b in at.button if b.label in ("⏸ Pause", "▶ Resume", "🚀 Launch")]
+        assert [b.label for b in actions if not (b.key or "").startswith("se_")] == [button]
+        assert [b.label for b in actions if (b.key or "").startswith("se_")] == [button]
 
 
 def test_pausing_still_changes_the_campaign_status_the_same_way():
@@ -229,7 +232,7 @@ def test_the_page_still_works_when_the_workflow_file_cannot_be_read():
 def test_the_header_has_a_send_now_popover_and_a_more_menu_with_refresh_inside():
     with campaign_page(status="running") as (at, _):
         popovers = [p.proto.popover.label for p in at.get("popover")]
-        assert popovers[:2] == ["➤ Send now", "⋯"] and popovers[2:] == ["🗑 Delete variant"]            # the header's two, then the Sequences editor's own
+        assert popovers[:2] == ["➤ Send now", "⋯"] and popovers[2:] == ["🗑 Delete variant", "Delete campaign…"]            # the header's two, then the Sequences editor's own, then the Settings tab's Danger zone
         assert any(b.key == "campaigns_refresh_data" for b in at.button) and any(b.key == "campaigns_send_batch_button" for b in at.button)
 
 
