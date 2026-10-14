@@ -196,3 +196,15 @@ def next_send_line(campaign_cfg: Dict, now_utc: datetime, minute: Optional[int],
     if when is None:
         return None
     return f"Next automatic send: {describe_moment(when, now_utc, schedule.get('timezone'))} (in {humanize_wait((when - now_utc).total_seconds())})"
+
+
+# ---------------------------------------------------------------- the Responses tab badge
+
+def responses_tab_label(unread: int) -> str:
+    """'Responses' with a small blue number after it while there are unread replies ('Responses :blue-badge[4]', which the tab draws as a badge), and
+    plain 'Responses' when there are none. A count that is not a positive whole number shows no badge."""
+    try:
+        count = int(unread)
+    except (TypeError, ValueError):
+        return "Responses"
+    return f"Responses :blue-badge[{count}]" if count > 0 else "Responses"
