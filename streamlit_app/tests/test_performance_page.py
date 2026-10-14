@@ -563,3 +563,52 @@ def test_all_time_errors_are_a_closed_dropdown_next_to_the_most_common_sending_e
 def test_with_no_errors_in_the_log_there_is_no_errors_dropdown_at_all(fixture_repo):
     at = _run_page(_sheet([], [], []))
     assert list(at.exception) == [] and not any(e.label == "Errors (all time)" for e in at.expander)
+
+
+# ================================================================ the reply-rate change on the page
+
+def _trend_script(recent_sent, earlier_sent):
+    """Recent emails (1 day ago): leads 1-2 answered. Earlier emails (9 days ago): lead 101 answered. Replies are matched by message id."""
+    return f"""
+from datetime import datetime, timedelta, timezone
+import preview_logic
+from performance_logic import build_campaign_performance
+from performance_view import render_performance
+cfg = preview_logic.get_campaign_cfg("{FIXTURE_CAMPAIGN}")
+def stamp(days_ago):
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%d 10:00:00")
+leads, log, resp = [], [], []
+def email(lead_id, days_ago, answered):
+    leads.append({{"LeadID": str(lead_id), "Email": f"p{{lead_id}}@x.com", "SenderAccount": "s1", "Status": "Stopped - Replied" if answered else "Intro Sent", "IntroVariant": "A", "IntroSentAt": stamp(days_ago)}})
+    log.append({{"Timestamp": stamp(days_ago), "LeadID": str(lead_id), "Stage": "intro", "Variant": "A", "Status": "sent", "MessageID": f"<m{{lead_id}}@x>", "Error": "", "SenderAccount": "s1"}})
+    if answered:
+        resp.append({{"ResponseID": f"R{{lead_id}}", "LeadID": str(lead_id), "ReceivedAt": stamp(max(days_ago - 1, 0)), "Classification": "Genuine Reply", "Intent": "Interested", "InReplyTo": f"<m{{lead_id}}@x>"}})
+for i in range({recent_sent}):
+    email(1 + i, 1, i < 2)
+for i in range({earlier_sent}):
+    email(101 + i, 9, i < 1)
+perf = build_campaign_performance(cfg, leads, resp, log, [])
+render_performance(perf, key_prefix="demo", best=None, show_campaign_ranking=False)
+"""
+
+
+def test_the_reply_rate_card_shows_how_the_last_7_days_compare_with_the_7_before(fixture_repo):
+    at = AppTest.from_string(_trend_script(6, 6))              # 2 of 6 answered now (33.3%) against 1 of 6 before (16.7%)
+    at.run(timeout=30)
+    text = _markup(at)
+    assert list(at.exception) == [] and '<div class="pf-kpi-trend pf-trend-up">▲ 16.7 pts vs previous 7 days</div>' in text
+    assert "Last 7 days: 33.3% of 6 emails" in text and "The 7 days before: 16.7% of 6 emails" in text and "Replies can take several days to arrive" in text
+    assert text.count('<div class="pf-kpi-trend') == 1                    # only the Reply rate card has one (the stylesheet mentions the class too, so look for the element)
+
+
+def test_the_change_is_hidden_when_either_week_has_too_few_emails_to_compare(fixture_repo):
+    for recent, earlier in ((4, 6), (6, 4), (0, 6)):
+        st.cache_data.clear()
+        at = AppTest.from_string(_trend_script(recent, earlier))
+        at.run(timeout=30)
+        assert list(at.exception) == [] and '<div class="pf-kpi-trend' not in _markup(at) and "Replies can take several days" not in _markup(at), (recent, earlier)
+
+
+def test_the_all_campaigns_page_total_never_shows_a_change(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    assert '<div class="pf-kpi-trend' not in _markup(at)
