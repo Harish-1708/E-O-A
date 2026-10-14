@@ -87,6 +87,29 @@ def build_updated_schedule_override(raw_override: Dict, timezone_name: str, wind
     return updated
 
 
+def validate_stage_waits(waits: Dict[str, int], labels: Optional[Dict[str, str]] = None) -> List[str]:
+    """One message per follow-up whose wait the engine would refuse: not a whole number of days, or outside 0 to MAX_STAGE_WAIT_DAYS. Mirrors
+    outreach.parse_stage_wait_overrides (a test holds the two together), so the Schedule tab can never save a wait the engine would stop the campaign for."""
+    import outreach
+    labels = labels or {}
+    errors = []
+    for stage, days in (waits or {}).items():
+        if isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= outreach.MAX_STAGE_WAIT_DAYS:
+            errors.append(f"{labels.get(stage, stage)}: the wait must be a whole number of days from 0 to {outreach.MAX_STAGE_WAIT_DAYS}.")
+    return errors
+
+
+def build_updated_stage_waits_override(raw_override: Dict, waits: Dict[str, int]) -> Dict:
+    """Returns a NEW dict — never mutates raw_override. Only 'stage_wait_days' is touched, and entries already there for other stages are kept; 'schedule',
+    'sending', 'status' and anything else pass through untouched, the same guarantee build_updated_schedule_override makes for its own key."""
+    updated = dict(raw_override)
+    existing = raw_override.get("stage_wait_days")
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged.update({str(stage): int(days) for stage, days in waits.items()})
+    updated["stage_wait_days"] = merged
+    return updated
+
+
 def get_current_schedule(campaign_cfg: Dict) -> Dict:
     """Sensible defaults for a campaign with no schedule configured yet —
     matches this codebase's existing convention of a real IANA zone as
