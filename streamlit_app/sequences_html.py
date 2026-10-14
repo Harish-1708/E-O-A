@@ -25,9 +25,11 @@ def editor_title_html(title: str) -> str:
     return _one_line(f'<div class="sq-editor-title"><span>{esc(title)}</span></div>')
 
 
-def stats_chips_html(stats: Dict) -> str:
+def stats_chips_html(stats: Dict, scope: str = "") -> str:
+    """A variant's results as three chips, followed by what they are for ('Intro · Variant A'), so it is always clear which stage and variant they describe."""
+    label = f'<span class="sq-scope">{esc(scope)}</span>' if scope else ""
     return _one_line(f'<div class="sq-chips"><span class="sq-chip sq-chip-blue">Sent {esc(stats.get("sent"))}</span><span class="sq-chip">Replies {esc(stats.get("replies"))}</span>'
-                     f'<span class="sq-chip sq-chip-green">Reply rate {esc(stats.get("rate"))}</span></div>')
+                     f'<span class="sq-chip sq-chip-green">Reply rate {esc(stats.get("rate"))}</span>{label}</div>')
 
 
 def placeholders_html() -> str:
@@ -65,12 +67,13 @@ SEQUENCES_CSS = """
 .sq-stage-sub { margin-top: 5px; font-size: 13px; color: #6b7280; }
 [class*="st-key-sq_stage_"] { position: relative; gap: 0 !important; min-height: 68px; margin-bottom: 10px; }
 [class*="st-key-sq_stage_"] [data-testid="stMarkdownContainer"] { margin-bottom: 0 !important; }
-[class*="st-key-sq_pick_"] { position: absolute; inset: 0; }
-[class*="st-key-sq_pick_"] > div, [class*="st-key-sq_pick_"] button { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; margin: 0; padding: 0; }
+[class*="st-key-sq_stage_"] [class*="st-key-sq_pick_"] { position: absolute !important; inset: 0; width: 100% !important; height: 100% !important; margin: 0 !important; z-index: 3; }
+[class*="st-key-sq_stage_"] [class*="st-key-sq_pick_"] > div { width: 100% !important; height: 100% !important; }
+[class*="st-key-sq_stage_"] [class*="st-key-sq_pick_"] button { width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; background: transparent; }
 
 /* ---- the editor card */
 [class*="st-key-sq_editor"] { position: relative; background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 20px 22px; }
-.sq-editor-title { font-size: 17px; font-weight: 700; color: #111827; min-height: 28px; }
+.sq-editor-title { font-size: 17px; font-weight: 700; color: #111827; min-height: 40px; }          /* tall enough that the variant tabs sit BELOW the badge at the card's corner */
 
 /* ---- the unlock box, shown as the card's Editing / Locked badge at its top right (the box itself is hidden, the label is the badge) */
 [class*="st-key-sq_unlock"] { position: absolute; top: 20px; right: 22px; z-index: 2; width: auto !important; }
@@ -82,6 +85,7 @@ div:has(> [class*="st-key-sq_unlock"]) { margin-bottom: -16px !important; }     
 [class*="st-key-sq_unlock"] label:has(input:checked) p { color: #15803d; }
 .sq-chips { display: flex; flex-wrap: wrap; gap: 10px; margin: 2px 0 4px; }
 .sq-chip { font-size: 12.5px; font-weight: 700; color: #374151; border: 1px solid #d1d5db; border-radius: 999px; padding: 4px 12px; background: #fff; }
+.sq-scope { align-self: center; font-size: 12.5px; color: #6b7280; }
 .sq-chip-blue { color: #1d4ed8; border-color: #bcd0f5; background: #eef4ff; }
 .sq-chip-green { color: #15803d; border-color: #bbe3c9; background: #f0fbf4; }
 .sq-placeholders { font-size: 13px; color: #6b7280; margin: 4px 0 2px; }
@@ -104,7 +108,7 @@ div:has(> [class*="st-key-sq_unlock"]) { margin-bottom: -16px !important; }     
 [class*="st-key-sq_actions"] { flex-direction: row !important; align-items: center; gap: 10px !important; flex-wrap: wrap; }
 [class*="st-key-sq_actions"] > div { width: auto !important; flex: 0 0 auto; }
 [class*="st-key-sq_actions"] > div:last-child { margin-left: auto; }
-[class*="st-key-sq_variantbar"] { flex-direction: row !important; align-items: center; gap: 12px !important; flex-wrap: wrap; }
+[class*="st-key-sq_variantbar"] { flex-direction: row !important; align-items: center; gap: 12px !important; flex-wrap: wrap; margin-top: 4px; }
 [class*="st-key-sq_variantbar"] > div { width: auto !important; flex: 0 0 auto; }
 
 /* ---- the preview and the checks */
