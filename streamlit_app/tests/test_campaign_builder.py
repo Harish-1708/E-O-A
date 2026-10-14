@@ -415,3 +415,17 @@ def test_build_campaign_duplication_files_raises_on_empty_source():
     empty."""
     with pytest.raises(ValueError, match="No template files were found"):
         build_campaign_duplication_files("Bar", {}, source_raw_override=None)
+
+
+# ---------- a campaign's own follow-up waits carry over to its duplicate ----------
+
+def test_a_duplicated_campaign_keeps_the_follow_up_waits_of_the_one_it_was_copied_from():
+    source = {"status": "active", "stage_wait_days": {"followup1": 5, "followup2": 0, "followup3": 14}, "sending": {"daily_limit": 30}}
+    duplicate = build_duplicated_config_override(source)
+    assert duplicate["stage_wait_days"] == {"followup1": 5, "followup2": 0, "followup3": 14} and duplicate["status"] == "draft" and duplicate["sending"] == {"daily_limit": 30}
+
+
+def test_duplicating_never_changes_the_source_campaigns_waits():
+    source = {"status": "active", "stage_wait_days": {"followup1": 5}}
+    build_duplicated_config_override(source)
+    assert source == {"status": "active", "stage_wait_days": {"followup1": 5}}
