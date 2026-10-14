@@ -449,3 +449,24 @@ def test_the_read_more_and_show_earlier_buttons_are_styled_by_their_own_key_pref
     """Checked by the declarations themselves: the hover rules repeat the selector text, so the text alone proves nothing."""
     assert '[class*="st-key-ux_more_"] button { background: transparent; border: 0; color: #2563eb;' in H.INBOX_CSS
     assert '[class*="st-key-ux_expand_"] button { width: 100%; background: #f3f6fb;' in H.INBOX_CSS
+
+
+# ================================================================ "Mark all read" in the list header
+
+def _inbox_rule(selector_start):
+    css = H.inbox_css(1.0)
+    i = css.index(selector_start)
+    return css[i:css.index("}", i)]
+
+
+def test_the_mark_all_read_button_is_laid_over_the_list_header_just_after_the_title_and_out_of_the_flow():
+    """Out of the flow, so the fixed-height panes below it do not move; after the title, because the conversation count at the other end varies in width."""
+    rule = _inbox_rule('[class*="st-key-ux_markall_"] {')
+    assert "position: absolute" in rule and "top: 8px" in rule and "left: 96px" in rule and "z-index: 4" in rule
+    assert "position: relative" in _inbox_rule('[class*="st-key-ux_listpane_"] { border-right')                  # so that "absolute" is measured from the list pane
+
+
+def test_the_mark_all_read_button_is_a_small_outlined_button_that_dims_when_off():
+    button = _inbox_rule('[class*="st-key-ux_markall_"] button {')
+    assert "min-height: 28px" in button and "border: 1px solid #d1d5db" in button and "border-radius: 8px" in button
+    assert "opacity: .5" in _inbox_rule('[class*="st-key-ux_markall_"] button:disabled {') and "color: #1d4ed8" in _inbox_rule('[class*="st-key-ux_markall_"] button:hover:not(:disabled) {')
