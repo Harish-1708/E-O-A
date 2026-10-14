@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from auth import login_gate, current_user  # noqa: E402
 from page_state import mark_active_page  # noqa: E402
 from config import (  # noqa: E402
-    REPO_ROOT,
+    REPO_ROOT, WORKFLOW_MARK_RESPONSES_READ,
     WORKFLOW_IMPORT_LEADS, WORKFLOW_REMOVE_LEADS, WORKFLOW_DASHBOARD,
     WORKFLOW_SEND, WORKFLOW_CHECK_REPLIES, WORKFLOW_BACKFILL_THREAD_SUBJECT, WORKFLOW_SYNC_ASANA,
     TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, SETTINGS_PATH,
@@ -47,6 +47,7 @@ from schedule_logic import (  # noqa: E402
 from launch_logic import build_status_override, build_delete_override, build_restore_override  # noqa: E402
 from responses_hub_logic import (  # noqa: E402
     group_responses_by_lead, sort_conversation_groups_newest_first, tag_responses_with_campaign, search_responses,
+    count_unread, split_keys_by_campaign, build_mark_read_payload,
 )
 from inbox_view import InboxContext, render_inbox  # noqa: E402
 from leads_view import render_lead_browser, render_extra_filters, render_clear_filters  # noqa: E402
@@ -54,7 +55,7 @@ from leads_logic import filter_counts, apply_extra_filters, any_extra_filter, st
 from leads_actions import render_lead_actions  # noqa: E402
 from sequences_view import SequencesContext, render_sequences_tab  # noqa: E402
 from campaign_html import CAMPAIGN_SKIN_CSS, UI_BUILD, build_html, chips_html, crumb_html, subline_html  # noqa: E402
-from campaign_header_logic import read_cron_minute, next_send_line, schedule_summary, sender_summary, subline  # noqa: E402
+from campaign_header_logic import read_cron_minute, next_send_line, schedule_summary, sender_summary, subline, responses_tab_label  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
 from conversation_logic import filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
@@ -997,11 +998,37 @@ def _render_schedule_tab(campaign_cfg):
                 st.error(f"Save failed: {exc}")
 
 
+def _read_state():
+    """The read/unread state the main Responses page uses (the very same session entries), so a reply read in either place is read in both: the replies
+    marked read this session, and those still waiting to be written to the Sheet. (Each reply's own IsRead column in the Sheet is the lasting record.)"""
+    return st.session_state.setdefault("read_response_keys", set()), st.session_state.setdefault("pending_sync_keys", set())
+
+
+def _render_sync_read_status(campaign_name):
+    """The same 'Sync read status' step as the Responses page, for this campaign's replies only: reading is remembered here at once, and this writes it
+    to the Sheet (through the mark-read workflow) so it lasts."""
+    _read, pending = _read_state()
+    mine = split_keys_by_campaign(pending).get(campaign_name, [])
+    if not mine or not st.button(f"🔄 Sync read status ({len(mine)} pending)", key=f"sync_read_status_{campaign_name}"):
+        return
+    try:
+        payload = build_mark_read_payload(mine)
+        path = f"mark_read/{campaign_name}/{time.strftime('%Y-%m-%d-%H%M%S')}.json"
+        client = _get_github_client()
+        client.create_file(path, payload_to_bytes(payload), message=f"Mark {len(mine)} response(s) read in {campaign_name} (via Streamlit, by {current_user()})")
+        client.dispatch_workflow(WORKFLOW_MARK_RESPONSES_READ, {"campaign": campaign_name, "payload_path": path})
+        pending.difference_update({f"{campaign_name}:{response_id}" for response_id in mine})
+        st.success(f"Synced read status for {len(mine)} reply(ies).")
+    except GitHubActionsError as exc:
+        st.error(f"Couldn't sync read status: {exc}")
+
+
 def _render_inbox_for_campaign(campaign_cfg, leads, responses):
-    """This campaign's replies in the two-pane Inbox layout — the same view as
-    the Responses page, scoped to this campaign. No read tracking here (this
-    tab never had any), so nothing shows as unread."""
+    """This campaign's replies in the two-pane Inbox layout — the same view as the Responses page, scoped to this campaign, with the same read/unread
+    tracking: unread replies are marked, opening a conversation reads it, and the tab's badge counts what is still unread."""
     campaign_name = campaign_cfg["_campaign_name"]
+    read_keys, pending_sync_keys = _read_state()
+    _render_sync_read_status(campaign_name)
     tagged = tag_responses_with_campaign(responses, campaign_name)
     query = st.text_input("🔍 Search this campaign's replies (sender, subject, snippet)",
                           key=f"responses_search_{campaign_name}")
@@ -1016,8 +1043,8 @@ def _render_inbox_for_campaign(campaign_cfg, leads, responses):
         responses_for=lambda name, lead_id: filter_responses_for_lead(tagged, lead_id, name),
         github_client=_get_github_client,
         current_user=current_user,
-        read_keys=None,
-        pending_sync_keys=None,
+        read_keys=read_keys,
+        pending_sync_keys=pending_sync_keys,
         show_campaign=False,
         pause_before_dispatch=1.0,
         sent_for=lambda name, lead_id: filter_sent_mail_for_lead(_load_sent_mail_cached(name), lead_id),
@@ -1519,7 +1546,9 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
     if load_warning:
         st.warning(load_warning)
 
-    tabs = st.tabs(["Performance", "Data", "Sequences", "Schedule", "Settings", "Responses"])
+    read_keys, _pending = _read_state()
+    unread = count_unread(tag_responses_with_campaign(responses, campaign_name), read_keys)
+    tabs = st.tabs(["Performance", "Data", "Sequences", "Schedule", "Settings", responses_tab_label(unread)])
     with tabs[0]:
         _render_performance_tab(campaign_cfg, leads, responses, send_log, error_log)
     with tabs[1]:
