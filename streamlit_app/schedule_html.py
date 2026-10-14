@@ -121,10 +121,14 @@ SCHEDULE_CSS = """
 [class*="st-key-sc_waits"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 20px 22px; margin-bottom: 14px; }
 .sc-th { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #6b7280; padding: 6px 0 4px; }
 [class*="st-key-sc_waitrow_"] { border-top: 1px solid #f0f2f5; padding: 6px 0; }
-.sc-stage { font-weight: 700; font-size: 14px; color: #111827; padding-top: 9px; }
-.sc-wait-info { font-size: 14px; color: #6b7280; padding-top: 9px; }
+.sc-stage { font-weight: 700; font-size: 14px; color: #111827; padding-top: 7px; }
+.sc-wait-info { font-size: 14px; color: #6b7280; padding-top: 7px; }
 .sc-day { color: #9ca3af; }
-[class*="st-key-wait_"] input { text-align: center; font-weight: 700; }
+/* The number box is kept compact: 136 x 34 px, not the 225 x 40 it was. Do NOT make it narrower than about 130px: below roughly 125px Streamlit hides the - and + buttons. */
+[class*="st-key-wait_"] { width: 136px !important; max-width: 136px !important; }
+[class*="st-key-wait_"] [data-testid="stNumberInputContainer"] { height: 34px !important; min-height: 0 !important; }
+[class*="st-key-wait_"] input { height: 30px !important; min-height: 30px !important; padding: 0 4px !important; font-size: 14px !important; text-align: center; font-weight: 700; }
+[class*="st-key-wait_"] button { width: 28px !important; min-width: 28px !important; height: 32px !important; padding: 0 !important; }
 
 /* ---- the cards on the right */
 .sc-next { background: linear-gradient(180deg, #f3f7ff, #fff); border-color: #c7d7fb; }
