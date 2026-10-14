@@ -30,16 +30,10 @@ from data_import_logic import (  # noqa: E402
     payload_to_bytes, filter_leads, search_leads, KNOWN_FIELDS, FILTER_OPTIONS,
     NEW_CUSTOM_FIELD_OPTION, validate_custom_field_name, find_duplicate_columns, build_full_lead_table,
 )
-from sequences_logic import (  # noqa: E402
-    next_available_variant_letter,
-    build_variant_edit_file, build_new_variant_files_for_all_stages, validate_new_variant_contents,
-    has_content_changed, can_delete_stage, build_stage_deletion_paths, can_delete_variant,
-    build_variant_deletion_paths,
-)
 from campaign_builder import (  # noqa: E402
-    next_stage_from_stages, build_campaign_files, validate_variant_content,
+    build_campaign_files,
     validate_campaign_name, commit_message_for_campaign, confirmation_matches_campaign_name,
-    list_campaign_files_to_delete, build_campaign_duplication_files, TOTAL_STAGE_COUNT,
+    list_campaign_files_to_delete, build_campaign_duplication_files,
 )
 from settings_logic import (  # noqa: E402
     load_raw_override_live, merge_live_override_into_cfg,
@@ -58,6 +52,7 @@ from inbox_view import InboxContext, render_inbox  # noqa: E402
 from leads_view import render_lead_browser, render_extra_filters, render_clear_filters  # noqa: E402
 from leads_logic import filter_counts, apply_extra_filters, any_extra_filter, stage_count, stage_labels  # noqa: E402
 from leads_actions import render_lead_actions  # noqa: E402
+from sequences_view import SequencesContext, render_sequences_tab  # noqa: E402
 from campaign_html import CAMPAIGN_SKIN_CSS, UI_BUILD, build_html, chips_html, crumb_html, subline_html  # noqa: E402
 from campaign_header_logic import read_cron_minute, next_send_line, schedule_summary, sender_summary, subline  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
@@ -788,273 +783,17 @@ def _fetch_live_template_content(client, campaign_name, stage_prefix, variant):
     return outreach.parse_template_content(content_bytes.decode("utf-8"))
 
 
-def _render_sequences_tab(campaign_cfg, leads):
-    campaign_name = campaign_cfg["_campaign_name"]
-
+def _render_sequences_tab(campaign_cfg, leads, responses=None, send_log=None, error_log=None, just_arrived=False):
+    """The Sequences tab (see sequences_view for the layout and what each action does). The page supplies its own live readers and the
+    GitHub writer; the live results shown per variant come from the same Performance figures as the Performance tab."""
     try:
-        client = _get_github_client()
-        stages, existing_variants = _fetch_live_stages_and_variants(client, campaign_name)
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Couldn't read templates for '{campaign_name}': {exc}")
-        return
-
-    # Pre-load every template file in parallel so the per-variant reads
-    # further down (unchanged, one at a time) find them already cached,
-    # instead of each costing its own sequential round trip. Best-effort
-    # and a no-op when caching is off — see GitHubClient.warm_file_cache.
-    client.warm_file_cache([
-        f"templates/{campaign_name}/{s['template_prefix']}_{v}.txt"
-        for s in stages for v in existing_variants
-    ])
-
-    sample_lead = leads[0] if leads else {}
-
-    # ---------- Edit existing variants ----------
-    st.subheader("Edit templates")
-    st.caption(
-        "Locked by default to prevent accidental changes. Unlock a variant to edit it, then Save Changes "
-        "at the bottom commits everything you've changed in one go."
-    )
-    pending_edits = {}  # (stage_prefix, variant) -> (subject, body)
-
-    for idx, stage in enumerate(stages):
-        prefix = stage["template_prefix"]
-        is_first_stage = (idx == 0)
-        st.markdown(f"**{stage['name']}**")
-        for variant in existing_variants:
-            try:
-                original = _fetch_live_template_content(client, campaign_name, prefix, variant)
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"{prefix}_{variant}: couldn't load — {exc}")
-                continue
-
-            with st.expander(f"Variant {variant}"):
-                unlocked = st.checkbox("🔓 Unlock to edit", key=f"unlock_{prefix}_{variant}")
-                subject_label = "Subject (required — this is the first stage)" if is_first_stage else \
-                    "Subject (blank continues the previous thread)"
-                subject = st.text_input(
-                    subject_label,
-                    value=original["subject"], key=f"subject_{prefix}_{variant}", disabled=not unlocked,
-                )
-                body = st.text_area("Body", value=original["body"], key=f"body_{prefix}_{variant}",
-                                     height=150, disabled=not unlocked)
-                if unlocked and has_content_changed(original, subject, body):
-                    pending_edits[(prefix, variant)] = (subject, body, is_first_stage)
-                    st.caption("✏️ Changed — will be included in Save Changes")
-
-                if sample_lead:
-                    preview_subject = outreach.render_text(subject, sample_lead)
-                    preview_body = outreach.render_text(body, sample_lead)
-                    st.markdown("**Preview** (using your first lead)")
-                    st.write(f"Subject: {preview_subject}")
-                    st.text(preview_body)
-
-    if pending_edits:
-        validation_errors = []
-        for (prefix, variant), (subject, body, is_first) in pending_edits.items():
-            err = validate_variant_content(subject, body, is_first_stage=is_first)
-            if err:
-                validation_errors.append(f"{prefix}_{variant}: {err}")
-
-        if validation_errors:
-            for e in validation_errors:
-                st.error(e)
-        elif st.button(f"💾 Save Changes ({len(pending_edits)} template(s))", type="primary"):
-            try:
-                files = [build_variant_edit_file(campaign_name, prefix, variant, subject, body)
-                         for (prefix, variant), (subject, body, _) in pending_edits.items()]
-                client = _get_github_client()
-                client.commit_campaign_files_directly(
-                    files=files,
-                    commit_message=f"Edit {len(files)} template(s) in {campaign_name} "
-                                    f"(via Streamlit, by {current_user()})",
-                )
-                st.success(f"Saved {len(files)} template(s). May take a minute to actually reflect here "
-                           "while the app redeploys — the change is live for sending immediately either way.")
-            except GitHubActionsError as exc:
-                st.error(f"Save failed: {exc}")
-
-    st.divider()
-
-    # ---------- Add a new variant (campaign-wide — see sequences_logic docstring) ----------
-    next_letter = next_available_variant_letter(existing_variants)
-    with st.expander(f"➕ Add variant {next_letter}" if next_letter else "➕ Add variant (maximum reached)"):
-        if not next_letter:
-            st.info("Every stage already has all 4 variants (A–D) — that's the maximum.")
-        else:
-            st.caption(f"Variant {next_letter} needs content for EVERY existing stage — variants are "
-                       "campaign-wide, not per-stage, so this adds it everywhere at once.")
-            contents_by_stage = {}
-            for stage in stages:
-                prefix = stage["template_prefix"]
-                st.markdown(f"**{stage['name']}**")
-                # Keyed by campaign_name and variant letter too, not just
-                # stage — without this, Streamlit reuses the SAME widget
-                # across separate "Add Variant" attempts (adding B, then
-                # later C, OR navigating to a DIFFERENT campaign that also
-                # needs the next variant — session state persists across
-                # page navigation), and whatever was typed earlier
-                # silently carries over into the next attempt instead of
-                # starting blank.
-                subject = st.text_input("Subject", key=f"newvariant_subject_{campaign_name}_{prefix}_{next_letter}")
-                body = st.text_area("Body", height=120,
-                                     key=f"newvariant_body_{campaign_name}_{prefix}_{next_letter}")
-                contents_by_stage[prefix] = {"subject": subject, "body": body}
-
-            if st.button(f"Add Variant {next_letter}", type="primary"):
-                errors = validate_new_variant_contents(stages, contents_by_stage)
-                if errors:
-                    for e in errors:
-                        st.error(e)
-                else:
-                    try:
-                        files = build_new_variant_files_for_all_stages(campaign_name, stages, next_letter,
-                                                                        contents_by_stage)
-                        client = _get_github_client()
-                        client.commit_campaign_files_directly(
-                            files=files,
-                            commit_message=f"Add variant {next_letter} to {campaign_name} "
-                                            f"(via Streamlit, by {current_user()})",
-                        )
-                        st.success(f"Variant {next_letter} added to all {len(stages)} stage(s). May take a "
-                                   "minute to actually reflect here while the app redeploys — it's live for "
-                                   "sending immediately either way.")
-                    except GitHubActionsError as exc:
-                        st.error(f"Failed to add variant: {exc}")
-
-    # ---------- Add a follow-up stage (reuses the exact New Campaign "Add Stage" logic) ----------
-    # Computed from the LIVE stages/variants already fetched at the top
-    # of this tab — never a separate re-read of the local checkout.
-    # Previously called get_next_stage_for_campaign(campaign_name,
-    # TEMPLATES_ROOT), which reads the frozen local checkout: a
-    # follow-up stage added through the app committed correctly to
-    # GitHub every time, but this expander kept showing the exact same
-    # "next stage" indefinitely, across every campaign, since the local
-    # checkout never learned about it without a redeploy.
-    next_stage = next_stage_from_stages(stages, existing_variants)
-
-    with st.expander("➕ Add a follow-up stage" if next_stage else "➕ Add a follow-up stage (none left)"):
-        if next_stage is None:
-            st.info(f"This campaign already has all {TOTAL_STAGE_COUNT} stages.")
-        else:
-            stage_prefix, required_variants = next_stage
-            st.write(f"**Next stage:** `{stage_prefix}` · **Required variants:** {', '.join(required_variants)}")
-            variant_inputs = {}
-            for letter in required_variants:
-                st.markdown(f"**Variant {letter}**")
-                subject = st.text_input(
-                    "Subject (leave blank to continue the previous thread)",
-                    # Keyed by campaign_name AND stage_prefix too, not
-                    # just letter — without this, Streamlit reuses the
-                    # SAME widget across separate "Add a follow-up stage"
-                    # attempts (adding followup5, then later followup6 to
-                    # the same campaign, OR navigating to a DIFFERENT
-                    # campaign that also needs the same stage next —
-                    # session state persists across page navigation), and
-                    # whatever was typed earlier silently carries over
-                    # instead of starting blank. The exact same fix
-                    # already applied to "Add Variant" just above, never
-                    # applied here.
-                    key=f"followup_subject_{campaign_name}_{stage_prefix}_{letter}",
-                )
-                body = st.text_area("Body", height=120,
-                                     key=f"followup_body_{campaign_name}_{stage_prefix}_{letter}")
-                variant_inputs[letter] = {"subject": subject, "body": body}
-
-            if st.button(f"Add {stage_prefix}", type="primary"):
-                errors = []
-                for letter, content in variant_inputs.items():
-                    content_error = validate_variant_content(content["subject"], content["body"],
-                                                               is_first_stage=False)
-                    if content_error:
-                        errors.append(f"Variant {letter}: {content_error}")
-                if errors:
-                    for e in errors:
-                        st.error(e)
-                else:
-                    try:
-                        files = build_campaign_files(campaign_name, stage_prefix, variant_inputs)
-                        client = _get_github_client()
-                        client.commit_campaign_files_directly(
-                            files=files,
-                            commit_message=f"Add {stage_prefix} to {campaign_name} "
-                                            f"(via Streamlit, by {current_user()})",
-                        )
-                        st.success(f"'{stage_prefix}' added. May take a minute to actually reflect here while "
-                                   "the app redeploys — it's live for sending immediately either way.")
-                    except GitHubActionsError as exc:
-                        st.error(f"Failed to add stage: {exc}")
-
-    # ---------- Delete a variant (campaign-wide, matching how add works) ----------
-    with st.expander("🗑️ Delete a variant"):
-        variant_to_delete = st.selectbox("Variant to delete", existing_variants, key="delete_variant_select")
-        can_delete_v, block_reason_v = can_delete_variant(existing_variants, variant_to_delete)
-        if can_delete_v:
-            st.warning(f"This permanently removes variant {variant_to_delete} from EVERY stage "
-                       f"({len(stages)} file(s)) — not recoverable from this app.")
-            confirm_variant_delete = st.checkbox(f"I understand, delete variant {variant_to_delete}",
-                                                  key="confirm_delete_variant")
-            if st.button(f"Delete Variant {variant_to_delete}", disabled=not confirm_variant_delete,
-                         key="delete_variant_button"):
-                try:
-                    client = _get_github_client()
-                    live_stages, live_variants = _fetch_live_stages_and_variants(client, campaign_name)
-                    if variant_to_delete not in live_variants:
-                        st.error(
-                            f"The live structure on GitHub no longer has variant '{variant_to_delete}' — "
-                            "this page's view was out of date. Refresh and try again."
-                        )
-                    else:
-                        paths = build_variant_deletion_paths(campaign_name, live_stages, variant_to_delete)
-                        for path in paths:
-                            client.delete_file(path, message=f"Delete variant {variant_to_delete} from "
-                                                               f"{campaign_name} (via Streamlit, by {current_user()})")
-                        st.success(f"Variant {variant_to_delete} deleted from all {len(paths)} stage(s). May "
-                                   "take a minute to actually reflect here while the app redeploys.")
-                except outreach.ConfigError as exc:
-                    st.error(f"Couldn't verify the campaign's current structure before deleting — nothing "
-                             f"was changed: {exc}")
-                except GitHubActionsError as exc:
-                    st.error(f"Failed to delete variant: {exc}")
-        else:
-            st.info(block_reason_v)
-
-    # ---------- Delete the last stage (stages must stay contiguous) ----------
-    with st.expander("🗑️ Delete the last stage"):
-        last_stage = stages[-1]
-        can_delete_s, block_reason_s = can_delete_stage(stages, last_stage["template_prefix"])
-        if can_delete_s:
-            st.warning(f"This permanently removes '{last_stage['name']}' — all {len(existing_variants)} "
-                       "variant file(s) for it — not recoverable from this app.")
-            confirm_stage_delete = st.checkbox(f"I understand, delete {last_stage['name']}",
-                                                key="confirm_delete_stage")
-            if st.button(f"Delete {last_stage['name']}", disabled=not confirm_stage_delete,
-                         key="delete_stage_button"):
-                try:
-                    client = _get_github_client()
-                    live_stages, live_variants = _fetch_live_stages_and_variants(client, campaign_name)
-                    live_last_stage = live_stages[-1]
-                    if live_last_stage["template_prefix"] != last_stage["template_prefix"]:
-                        st.error(
-                            f"The live structure on GitHub shows '{live_last_stage['name']}' as the last "
-                            f"stage right now, not '{last_stage['name']}' — this page's view was out of "
-                            "date. Refresh and try again rather than deleting based on a stale view."
-                        )
-                    else:
-                        paths = build_stage_deletion_paths(campaign_name, last_stage["template_prefix"],
-                                                            live_variants)
-                        for path in paths:
-                            client.delete_file(path, message=f"Delete stage {last_stage['name']} from "
-                                                               f"{campaign_name} (via Streamlit, by {current_user()})")
-                        st.success(f"'{last_stage['name']}' deleted. May take a minute to actually reflect "
-                                   "here while the app redeploys.")
-                except outreach.ConfigError as exc:
-                    st.error(f"Couldn't verify the campaign's current structure before deleting — nothing "
-                             f"was changed: {exc}")
-                except GitHubActionsError as exc:
-                    st.error(f"Failed to delete stage: {exc}")
-        else:
-            st.info(block_reason_s)
+        perf = build_campaign_performance(campaign_cfg, leads, responses or [], send_log or [], error_log or [])
+    except Exception:  # noqa: BLE001 - the results beside a variant are a bonus; the editor must work without them
+        perf = None
+    render_sequences_tab(SequencesContext(
+        campaign_cfg=campaign_cfg, leads=leads, perf=perf, just_arrived=just_arrived, get_client=_get_github_client,
+        fetch_structure=_fetch_live_stages_and_variants, fetch_content=_fetch_live_template_content, current_user=current_user,
+    ))
 
 
 def _render_settings_tab(campaign_cfg, leads):
@@ -1786,7 +1525,7 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
     with tabs[1]:
         _render_data_tab(campaign_cfg, leads)
     with tabs[2]:
-        _render_sequences_tab(campaign_cfg, leads)
+        _render_sequences_tab(campaign_cfg, leads, responses, send_log, error_log, just_arrived)
     with tabs[3]:
         _render_schedule_tab(campaign_cfg)
     with tabs[4]:
