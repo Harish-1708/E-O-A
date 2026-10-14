@@ -50,6 +50,15 @@ CAMPAIGN_SKIN_CSS = """
 [class*="st-key-cp_back"] button { border: 0 !important; background: transparent !important; color: #2563eb !important; font-weight: 600; padding: 0 !important; min-height: 0 !important; box-shadow: none !important; }
 [class*="st-key-cp_back"] button:hover { text-decoration: underline; }
 .cp-crumb-name { color: #6b7280; font-size: 13px; }
+
+/* ---- the header's ... menu: labelled groups, each action a full-width item with a short line of explanation under it */
+.cp-menu-label { font-size: 11.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #6b7280; margin: 2px 0 2px; }
+[data-testid="stPopoverBody"]:has([class*="st-key-cp_menu_"]) { min-width: 340px; }
+[class*="st-key-cp_menu_"] button { justify-content: flex-start; }
+[class*="st-key-cp_menu_"] button > div { width: 100%; }
+[class*="st-key-cp_menu_"] button p { text-align: left; }
+[class*="st-key-cp_menu_"] [data-testid="stCaptionContainer"] { margin-top: -2px; }
+[data-testid="stPopoverBody"]:has([class*="st-key-cp_menu_"]) hr { margin: 4px 0 !important; }
 .cp-build { color: #9ca3af; font-size: 11px; margin: 28px 0 0; text-align: right; }
 [class*="st-key-cp_actions"] { flex-direction: row !important; align-items: center; gap: 10px !important; }
 [class*="st-key-cp_actions"] > div { width: auto !important; flex: 0 0 auto; }
