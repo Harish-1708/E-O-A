@@ -1,3 +1,4 @@
+import pytest
 import os
 import sys
 
@@ -221,3 +222,29 @@ def test_build_variant_deletion_paths_single_stage():
     stages = [_stage("intro")]
     paths = build_variant_deletion_paths("Foo", stages, "A")
     assert paths == ["templates/Foo/intro_A.txt"]
+
+
+# ---------- has_content_changed: the saved text keeps its trailing newline ----------
+
+def test_a_variant_read_back_from_a_file_the_app_wrote_is_not_changed_until_someone_edits_it():
+    """REGRESSION: the app writes 'Subject: …\n\nbody\n' and the parser keeps the final newline; an untouched variant used to count as changed."""
+    import outreach
+    written = build_variant_edit_file("Camp", "intro", "A", "Hello", "Body line\n\nThanks")["content"].decode("utf-8")
+    saved = outreach.parse_template_content(written)
+    assert saved["body"].endswith("\n")                                           # (the premise: the saved body does carry the newline)
+    assert has_content_changed(saved, saved["subject"], saved["body"]) is False
+    assert has_content_changed(saved, saved["subject"], saved["body"].strip()) is False
+
+
+@pytest.mark.parametrize("saved_subject, saved_body, subject, body, changed", [
+    ("Hello", "Body\n", "Hello", "Body", False), ("Hello\n", "Body", "Hello", "Body", False), (" Hello ", " Body ", "Hello", "Body", False),
+    ("Hello", "Body\n\n\n", "Hello", "Body\n", False), ("Hello", "Body\n", "Hello!", "Body", True), ("Hello", "Body\n", "Hello", "Body!", True),
+    ("Hello", "Body\n", "hello", "Body", True), ("Hello", "Body\n", "Hello", "Bo dy", True), ("", "Body\n", "", "Body", False), ("", "Body\n", "x", "Body", True),
+    ("Hello", "A\n\nB\n", "Hello", "A\nB", True),
+])
+def test_only_a_change_to_the_words_counts_never_spaces_or_blank_lines_at_the_edges(saved_subject, saved_body, subject, body, changed):
+    assert has_content_changed({"subject": saved_subject, "body": saved_body}, subject, body) is changed
+
+
+def test_a_saved_variant_missing_a_field_is_treated_as_empty():
+    assert has_content_changed({}, "", "") is False and has_content_changed({}, "x", "") is True
