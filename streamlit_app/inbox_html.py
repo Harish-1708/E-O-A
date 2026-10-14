@@ -251,7 +251,12 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
   [class*="st-key-ux_shell_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) { flex: 2 1 0 !important; width: auto !important; min-width: 0 !important; }
 }
 [class*="st-key-ux_listpane_"], [class*="st-key-ux_list_"], [class*="st-key-ux_threadpane_"] { gap: 0 !important; }
-[class*="st-key-ux_listpane_"] { border-right: 1px solid #eef0f3; }
+[class*="st-key-ux_listpane_"] { border-right: 1px solid #eef0f3; position: relative; }
+/* ---- "Mark all read": a small button laid over the list header, just after the title (the conversation count sits at the other end) */
+[class*="st-key-ux_markall_"] { position: absolute; top: 8px; left: 96px; z-index: 4; width: auto !important; }
+[class*="st-key-ux_markall_"] button { min-height: 28px; padding: 2px 11px; font-size: 12px; font-weight: 600; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; color: #374151; }
+[class*="st-key-ux_markall_"] button:hover:not(:disabled) { border-color: #2563eb; color: #1d4ed8; }
+[class*="st-key-ux_markall_"] button:disabled { opacity: .5; }
 [class*="st-key-ux_threadbody_"] { gap: 0 !important; background: #fff; padding: 18px 20px; }
 
 /* ---- rail */
