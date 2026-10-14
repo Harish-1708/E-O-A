@@ -317,3 +317,33 @@ def test_the_what_worked_best_box_has_room_above_it_so_it_never_touches_the_card
     css = P.PERFORMANCE_CSS
     rule = css[css.index(".pf-callout {"):css.index("}", css.index(".pf-callout {"))]
     assert "margin: 18px 0 14px" in rule
+
+
+# ================================================================ the change line on a headline card
+
+@pytest.mark.parametrize("kind, css", [("up", "pf-trend-up"), ("down", "pf-trend-down"), ("flat", "pf-trend-flat"), ("sideways", "pf-trend-flat"), ("", "pf-trend-flat"), ('x" onclick="y', "pf-trend-flat")])
+def test_the_change_line_is_coloured_by_direction_and_an_unknown_direction_can_never_inject_a_class(kind, css):
+    markup = P.kpi_html("Reply rate", "40.0%", "9 replied", "", ("▲ 2.1 pts vs previous 7 days", kind))
+    assert f'<div class="pf-kpi-trend {css}">▲ 2.1 pts vs previous 7 days</div>' in markup and "onclick" not in markup and "\n" not in markup
+
+
+def test_a_card_without_a_change_has_no_change_line_and_the_change_comes_after_the_caption():
+    assert "pf-kpi-trend" not in P.kpi_html("Contacted", 5, "of 9") and "pf-kpi-trend" not in P.kpi_html("Contacted", 5, "of 9", "", None)
+    markup = P.kpi_html("Reply rate", "40%", "9 replied", "", ("▲ 1.0 pts", "up"))
+    assert markup.index("pf-kpi-caption") < markup.index("pf-kpi-trend")
+
+
+def test_hostile_text_in_the_change_line_is_escaped():
+    markup = P.kpi_html("Reply rate", "1", "c", HOSTILE, (HOSTILE, "up"))
+    found = _scan(markup)
+    assert found.tags <= SAFE_TAGS and found.attrs <= SAFE_ATTRS and "<script" not in markup and "&lt;script&gt;" in markup
+
+
+def test_the_change_line_colours():
+    css = P.PERFORMANCE_CSS
+
+    def rule(selector):
+        i = css.index(selector)
+        return css[i:css.index("}", i)]                                   # only what is INSIDE this rule (the same colours are used by other rules)
+
+    assert "color: #15803d" in rule(".pf-trend-up {") and "color: #b91c1c" in rule(".pf-trend-down {") and "color: #6b7280" in rule(".pf-trend-flat {")
