@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from settings_logic import (
@@ -304,3 +306,65 @@ def test_merge_live_override_reflects_paused_status_for_the_status_controls():
     stale_cfg = {"_campaign_name": "X", "status": "active"}
     merged = merge_live_override_into_cfg(stale_cfg, {"status": "paused"})
     assert merged["status"] == "paused"
+
+
+# ================================================================ a campaign's own follow-up waits, shown from the live override
+
+import copy  # noqa: E402
+
+
+def _cfg_with_stages(waits=(0, 2, 2, 2)):
+    names = ["intro", "followup1", "followup2", "followup3"]
+    return {"_campaign_name": "Camp", "sending": {"daily_limit": 10},
+            "stages": [{"name": n, "template_prefix": n, "wait_days_after_previous": w} for n, w in zip(names, waits)]}
+
+
+def _waits_of(cfg):
+    return [s["wait_days_after_previous"] for s in cfg["stages"]]
+
+
+def test_a_live_override_with_its_own_waits_changes_those_stages_only():
+    merged = merge_live_override_into_cfg(_cfg_with_stages(), {"stage_wait_days": {"followup2": 6}})
+    assert _waits_of(merged) == [0, 2, 6, 2] and merged["stage_wait_days"] == {"followup2": 6}
+
+
+def test_every_follow_up_can_have_its_own_wait():
+    assert _waits_of(merge_live_override_into_cfg(_cfg_with_stages(), {"stage_wait_days": {"followup1": 1, "followup2": 10, "followup3": 0}})) == [0, 1, 10, 0]
+
+
+def test_a_live_override_without_waits_leaves_the_stages_exactly_as_they_were():
+    cfg = _cfg_with_stages()
+    assert merge_live_override_into_cfg(cfg, {"status": "paused"})["stages"] == cfg["stages"] and "stage_wait_days" not in merge_live_override_into_cfg(cfg, {"status": "paused"})
+
+
+def test_merging_waits_never_changes_the_config_it_was_given():
+    cfg = _cfg_with_stages()
+    before = copy.deepcopy(cfg)
+    merge_live_override_into_cfg(cfg, {"stage_wait_days": {"followup1": 9}, "sending": {"daily_limit": 5}})
+    assert cfg == before
+
+
+@pytest.mark.parametrize("bad", [{"followup1": -1}, {"followup1": 2.5}, {"followup1": "3"}, {"followup1": 500}, {"followup1": True}, {"followup1": 2, "followup2": None}])
+def test_a_wait_the_engine_would_refuse_is_not_shown_and_nothing_is_half_applied(bad):
+    merged = merge_live_override_into_cfg(_cfg_with_stages(), {"stage_wait_days": bad})
+    assert _waits_of(merged) == [0, 2, 2, 2] and merged["stage_wait_days"] == {}
+
+
+@pytest.mark.parametrize("junk", ["two", 5, ["a", "b"]])
+def test_stage_wait_days_that_is_not_a_list_of_entries_is_ignored_by_the_display(junk):
+    cfg = _cfg_with_stages()
+    merged = merge_live_override_into_cfg(cfg, {"stage_wait_days": junk})
+    assert _waits_of(merged) == [0, 2, 2, 2] and "stage_wait_days" not in merged and merged == cfg                  # the config is left exactly as it was
+
+
+def test_a_wait_for_a_stage_the_campaign_does_not_have_is_harmless():
+    assert _waits_of(merge_live_override_into_cfg(_cfg_with_stages(), {"stage_wait_days": {"followup9": 5}})) == [0, 2, 2, 2]
+
+
+def test_waits_and_the_other_live_settings_merge_together():
+    merged = merge_live_override_into_cfg(_cfg_with_stages(), {"stage_wait_days": {"followup1": 4}, "sending": {"daily_limit": 77}, "status": "paused"})
+    assert _waits_of(merged)[1] == 4 and merged["sending"]["daily_limit"] == 77 and merged["status"] == "paused"
+
+
+def test_a_config_with_no_stages_yet_does_not_break_the_merge():
+    assert merge_live_override_into_cfg({"_campaign_name": "C"}, {"stage_wait_days": {"followup1": 3}})["stages"] == []
