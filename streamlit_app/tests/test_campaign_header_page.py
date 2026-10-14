@@ -369,3 +369,201 @@ def test_a_failed_sync_says_why_and_keeps_everything_pending_so_it_can_be_tried_
 def test_there_is_no_sync_button_when_nothing_of_this_campaign_is_pending():
     with campaign_page(**three_replies(preset={"pending_sync_keys": {"Other_Campaign:R9"}})) as (at, _):
         assert not any((b.key or "").startswith("sync_read_status_") for b in at.button)
+
+
+# ================================================================ the badge counts LEADS, not emails
+
+def replies_from(lead_id, how_many, read=""):
+    return [{**resp(1, read=read, lead_id=lead_id), "ResponseID": f"L{lead_id}M{k}", "ReceivedAt": f"2026-10-0{k + 1} 09:00:00", "Intent": "Interested"} for k in range(how_many)]
+
+
+def rail_unread_count(at):
+    found = re.findall(r'ux-rail-label">Unread</span><span class="ux-count">(\d+)</span>', " ".join(m.value for m in at.markdown))
+    return int(found[0]) if found else None
+
+
+def test_the_badge_counts_leads_with_something_unread_not_the_emails_they_sent():
+    """REGRESSION: it showed 255 for a campaign with 55 leads, because it counted every email."""
+    responses = replies_from(1, 4) + replies_from(2, 1) + replies_from(3, 3)                       # 8 emails from 3 leads
+    with campaign_page(leads=[lead(1), lead(2), lead(3)], responses=responses) as (at, _):
+        assert tab_labels(at)[-1] == "Responses :blue-badge[3]"
+
+
+def test_a_lead_with_one_unread_email_among_read_ones_still_counts_and_a_fully_read_lead_does_not():
+    responses = replies_from(1, 3, read="Yes")[:2] + [{**replies_from(1, 3)[2]}] + replies_from(2, 2, read="Yes")
+    with campaign_page(leads=[lead(1), lead(2)], responses=responses) as (at, _):
+        assert tab_labels(at)[-1] == "Responses :blue-badge[1]"
+
+
+def test_the_badge_always_matches_the_inboxs_own_unread_count():
+    responses = replies_from(1, 5) + replies_from(2, 2, read="Yes") + replies_from(3, 1) + replies_from(4, 7)
+    with campaign_page(leads=[lead(i) for i in (1, 2, 3, 4)], responses=responses) as (at, _):
+        assert rail_unread_count(at) == 3 and tab_labels(at)[-1] == "Responses :blue-badge[3]"
+
+
+# ================================================================ the more-menu: Check Replies lives here now
+
+def _menu_items(at):
+    """The menu's own buttons, in the order they are drawn: the header's second popover."""
+    return [b.key for b in at.button if b.key in ("campaigns_refresh_data", "campaigns_check_replies_button", "data_tab_live_diagnostic")]
+
+
+def test_check_replies_is_in_the_more_menu_after_refresh_data_and_before_the_diagnose_tool():
+    with campaign_page() as (at, _):
+        assert _menu_items(at) == ["campaigns_refresh_data", "campaigns_check_replies_button", "data_tab_live_diagnostic"]
+        more = [p for p in at.get("popover") if p.proto.popover.label == "⋯"][0]
+        assert any(b.key == "campaigns_check_replies_button" for b in more.button)               # inside that popover, not merely somewhere on the page
+
+
+def test_the_responses_tab_no_longer_carries_a_check_replies_button_or_its_explanation():
+    with campaign_page(responses=[resp(1)], leads=[lead(1)]) as (at, _):
+        tab = at.tabs[5]
+        assert not any((b.key or "").startswith("campaigns_check_replies") or "Check Replies" in b.label for b in tab.button)
+        assert not any("also runs automatically" in c.value for c in tab.caption)
+
+
+def test_the_check_replies_button_is_there_even_when_there_are_no_replies_yet():
+    with campaign_page(responses=[]) as (at, _):
+        assert any(b.key == "campaigns_check_replies_button" for b in at.button) and any(i.value == "No responses yet." for i in at.tabs[5].info)
+
+
+def test_the_menu_has_its_three_labelled_groups_and_a_line_of_explanation_for_each_action():
+    with campaign_page() as (at, _):
+        text = " ".join(m.value for m in at.markdown)
+        for label in ("Data", "Replies", "Troubleshooting"):
+            assert f'<div class="cp-menu-label">{label}</div>' in text
+        captions = " ".join(c.value for c in at.caption)
+        assert "Re-read this campaign's Google Sheets now." in captions and "Replies are also checked automatically every hour." in captions
+
+
+def test_check_replies_still_starts_the_same_workflow_with_this_campaign_and_says_so():
+    with campaign_page() as (at, captured):
+        next(b for b in at.button if b.key == "campaigns_check_replies_button").click()
+        at.run(timeout=30)
+        assert list(at.exception) == [] and list(at.error) == []
+        assert captured["dispatches"][0][0] == "check_replies.yml" and captured["dispatches"][0][1]["campaign"] == FIXTURE_CAMPAIGN
+        assert any(f"Triggered Check Replies for '{FIXTURE_CAMPAIGN}'" in s.value for s in at.success)
+
+
+def test_a_failed_check_replies_says_why():
+    from github_client import GitHubActionsError
+    with campaign_page(dispatch_error=GitHubActionsError("boom")) as (at, _):
+        next(b for b in at.button if b.key == "campaigns_check_replies_button").click()
+        at.run(timeout=30)
+        assert any("Failed to trigger Check Replies: boom" in e.value for e in at.error)
+
+
+# ================================================================ select all and mark read
+
+def _markall_popover(at):
+    return next(p for p in at.get("popover") if p.proto.popover.label == "✓ Mark all read")
+
+
+def _go(at):
+    return next(b for b in at.button if b.key == f"tab_{FIXTURE_CAMPAIGN}_markall_go")
+
+
+def test_the_inbox_offers_mark_all_read_and_says_exactly_what_it_will_do_before_doing_it():
+    responses = replies_from(1, 4) + replies_from(2, 1) + replies_from(3, 3)
+    with campaign_page(leads=[lead(1), lead(2), lead(3)], responses=responses) as (at, captured):
+        popover = _markall_popover(at)
+        assert popover.proto.popover.disabled is False
+        text = " ".join(c.value for c in popover.caption)
+        assert "3 conversations · 8 unread replies" in text and "press “Sync read status”" in text
+        assert _go(at).label == "✓ Mark 3 conversations as read" and _go(at).disabled is False
+        assert at.session_state["read_response_keys"] == set() and captured.get("commits", []) == []            # offering it changes nothing
+
+
+def test_confirming_marks_every_unread_conversation_and_every_reply_in_it_read_and_queues_the_sync():
+    responses = replies_from(1, 4) + replies_from(2, 1) + replies_from(3, 3)
+    with campaign_page(leads=[lead(1), lead(2), lead(3)], responses=responses) as (at, captured):
+        _go(at).click()
+        at.run(timeout=30)
+        assert list(at.exception) == [] and list(at.error) == []
+        expected = {f"{FIXTURE_CAMPAIGN}:L{i}M{k}" for i, n in ((1, 4), (2, 1), (3, 3)) for k in range(n)}
+        assert at.session_state["read_response_keys"] == expected and at.session_state["pending_sync_keys"] == expected
+        assert tab_labels(at)[-1] == "Responses" and rail_unread_count(at) == 0                                     # the badge and the Inbox agree: nothing unread
+        assert any("Marked 3 conversations as read (8 replies)" in s.value for s in at.success)
+        assert any(b.key == f"sync_read_status_{FIXTURE_CAMPAIGN}" and b.label == "🔄 Sync read status (8 pending)" for b in at.button)
+        assert captured.get("commits", []) == [] and captured.get("dispatches", []) == []                           # nothing is written until Sync is pressed
+
+
+def test_conversations_already_read_are_left_alone_and_not_counted_in_what_it_offers():
+    responses = replies_from(1, 3, read="Yes") + replies_from(2, 2)
+    with campaign_page(leads=[lead(1), lead(2)], responses=responses) as (at, _):
+        assert "1 conversation · 2 unread replies" in " ".join(c.value for c in _markall_popover(at).caption) and _go(at).label == "✓ Mark 1 conversation as read"
+        _go(at).click()
+        at.run(timeout=30)
+        assert at.session_state["read_response_keys"] == {f"{FIXTURE_CAMPAIGN}:L2M0", f"{FIXTURE_CAMPAIGN}:L2M1"}      # lead 1 was already read in the Sheet: untouched
+
+
+def test_nothing_unread_means_the_control_is_there_but_off():
+    with campaign_page(leads=[lead(1)], responses=replies_from(1, 2, read="Yes")) as (at, _):
+        assert _markall_popover(at).proto.popover.disabled is True
+
+
+def test_it_never_touches_another_campaigns_read_state():
+    other = {"Other_Campaign:R1", "Other_Campaign:R2"}
+    with campaign_page(leads=[lead(1)], responses=replies_from(1, 2), preset={"read_response_keys": set(other), "pending_sync_keys": {"Other_Campaign:R1"}}) as (at, _):
+        _go(at).click()
+        at.run(timeout=30)
+        assert other <= at.session_state["read_response_keys"] and "Other_Campaign:R1" in at.session_state["pending_sync_keys"] and "Other_Campaign:R2" not in at.session_state["pending_sync_keys"]
+
+
+def _two_kinds():
+    """Leads 1 and 3 are 'Interested', lead 2 is 'Not interested' — each with unread replies."""
+    return [{**r, "Intent": "Not Interested" if r["LeadID"] == "2" else "Interested"} for r in replies_from(1, 2) + replies_from(2, 3) + replies_from(3, 1)]
+
+
+def test_with_a_status_chosen_it_offers_the_choice_of_this_view_or_everything_unread():
+    with campaign_page(leads=[lead(1), lead(2), lead(3)], responses=_two_kinds(), preset={f"tab_{FIXTURE_CAMPAIGN}_rail": "interested"}) as (at, _):
+        scope = next(r for r in at.radio if r.key == f"tab_{FIXTURE_CAMPAIGN}_markall_scope")
+        assert scope.options == ["Unread in this view (2)", "All unread (3)"] and scope.value == "view"
+        assert "2 conversations · 3 unread replies" in " ".join(c.value for c in _markall_popover(at).caption) and _go(at).label == "✓ Mark 2 conversations as read"
+
+
+def test_marking_only_this_view_leaves_the_other_statuses_unread():
+    with campaign_page(leads=[lead(1), lead(2), lead(3)], responses=_two_kinds(), preset={f"tab_{FIXTURE_CAMPAIGN}_rail": "interested"}) as (at, _):
+        _go(at).click()
+        at.run(timeout=30)
+        marked = at.session_state["read_response_keys"]
+        assert marked == {f"{FIXTURE_CAMPAIGN}:L1M0", f"{FIXTURE_CAMPAIGN}:L1M1", f"{FIXTURE_CAMPAIGN}:L3M0"}                  # the two Interested leads, nobody else
+        assert tab_labels(at)[-1] == "Responses :blue-badge[1]" and any("Marked 2 conversations as read (3 replies)" in s.value for s in at.success)
+
+
+def test_choosing_everything_unread_marks_the_leads_outside_the_view_too():
+    with campaign_page(leads=[lead(1), lead(2), lead(3)], responses=_two_kinds(), preset={f"tab_{FIXTURE_CAMPAIGN}_rail": "interested"}) as (at, _):
+        next(r for r in at.radio if r.key == f"tab_{FIXTURE_CAMPAIGN}_markall_scope").set_value("all")
+        at.run(timeout=30)
+        assert _go(at).label == "✓ Mark 3 conversations as read"
+        _go(at).click()
+        at.run(timeout=30)
+        assert len(at.session_state["read_response_keys"]) == 6 and tab_labels(at)[-1] == "Responses"
+
+
+def test_a_view_with_nothing_unread_starts_on_the_everything_choice_so_the_button_is_never_a_dead_end():
+    responses = [{**r, "Intent": "Interested", "IsRead": "Yes"} for r in replies_from(1, 2)] + [{**r, "Intent": "Not Interested"} for r in replies_from(2, 2)]
+    with campaign_page(leads=[lead(1), lead(2)], responses=responses, preset={f"tab_{FIXTURE_CAMPAIGN}_rail": "interested"}) as (at, _):
+        scope = next(r for r in at.radio if r.key == f"tab_{FIXTURE_CAMPAIGN}_markall_scope")
+        assert scope.value == "all" and _go(at).disabled is False and _go(at).label == "✓ Mark 1 conversation as read"
+
+
+def test_after_marking_all_read_syncing_commits_exactly_those_replies():
+    import json
+    responses = replies_from(1, 2) + replies_from(2, 1)
+    with campaign_page(leads=[lead(1), lead(2)], responses=responses) as (at, captured):
+        _go(at).click()
+        at.run(timeout=30)
+        next(b for b in at.button if b.key == f"sync_read_status_{FIXTURE_CAMPAIGN}").click()
+        at.run(timeout=30)
+        payload = json.loads(captured["commits"][0]["content"].decode("utf-8"))
+        assert sorted(json.dumps(payload, sort_keys=True).count(f'"{rid}"') for rid in ("L1M0", "L1M1", "L2M0")) == [1, 1, 1]
+        assert captured["dispatches"][0][0] == "mark_responses_read.yml" and at.session_state["pending_sync_keys"] == set()
+
+
+def test_choosing_a_view_with_nothing_unread_turns_the_confirm_button_off_instead_of_marking_nothing():
+    responses = [{**r, "Intent": "Interested", "IsRead": "Yes"} for r in replies_from(1, 2)] + [{**r, "Intent": "Not Interested"} for r in replies_from(2, 2)]
+    with campaign_page(leads=[lead(1), lead(2)], responses=responses, preset={f"tab_{FIXTURE_CAMPAIGN}_rail": "interested"}) as (at, captured):
+        next(r for r in at.radio if r.key == f"tab_{FIXTURE_CAMPAIGN}_markall_scope").set_value("view")             # deliberately the empty one
+        at.run(timeout=30)
+        assert _go(at).disabled is True and _go(at).label == "✓ Mark 0 conversations as read" and at.session_state["read_response_keys"] == set()
