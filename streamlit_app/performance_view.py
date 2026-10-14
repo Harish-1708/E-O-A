@@ -162,7 +162,8 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
             for text, count in perf["top_send_errors"]:
                 st.write(f"{count} × {text}")
     if perf["error_rows"]:
-        _show(H.card_html("Errors (all time)", "", H.table_html(["Error type", "Count"], [[r["error_type"], r["count"]] for r in perf["error_rows"]])))
+        with st.expander("Errors (all time)"):
+            _show(H.table_html(["Error type", "Count"], [[r["error_type"], r["count"]] for r in perf["error_rows"]]))
     elif not perf["error_log_read"]:
         st.caption("The Error Log tab could not be read, so all-time errors are not shown.")
 
