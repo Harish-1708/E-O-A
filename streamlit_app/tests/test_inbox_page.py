@@ -1105,11 +1105,15 @@ def test_the_campaign_tab_opens_in_the_inbox_layout_with_only_that_campaigns_con
         assert len(at.tabs) == 6                                                    # the tab count is unchanged
 
 
-def test_the_campaign_tab_has_no_unread_tracking_so_nothing_is_marked_unread():
+def test_the_campaign_tab_tracks_unread_replies_like_the_responses_page():
+    """Changed on purpose: the campaign's own tab used to have no read tracking; it now shares the main page's, so unread replies are marked here too
+    (and the tab's badge counts them)."""
     with _campaign_tab() as (at, _):
-        assert not any(r["unread"] for r in _rows(at)) and all(r["nudge"] == "" for r in _rows(at))
-        assert not any((b.key or "").startswith(f"{TAB}_mark_read_") for b in at.button)
-        assert "Unread" not in _rail_counts(at)                                     # no Unread item in the rail either
+        rows = _rows(at)
+        assert rows and all(r["unread"] for r in rows)                              # nothing in this campaign has been read yet
+        assert any((b.key or "").startswith(f"{TAB}_mark_read_") for b in at.button)
+        assert "Unread" in _rail_counts(at)                                          # and the rail has its Unread item
+
 
 
 def test_the_campaign_tab_does_not_repeat_the_campaign_name_on_every_row():
