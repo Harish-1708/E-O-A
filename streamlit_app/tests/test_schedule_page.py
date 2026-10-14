@@ -13,7 +13,6 @@ from streamlit.testing.v1 import AppTest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-import schedule_view_logic as L  # noqa: E402
 from test_pages_smoke import FakeWorksheet, FakeSpreadsheet, FIXTURE_CAMPAIGN, PAGES_DIR, _authed_session, _dashboard_secrets, _mock_github_writes  # noqa: E402
 
 CHICAGO = {"timezone": "America/Chicago", "window_start": "08:30", "window_end": "18:15", "send_days": ["mon", "wed", "fri"]}
@@ -53,8 +52,10 @@ def stamp(minutes_ago=0):
 
 
 @contextlib.contextmanager
-def sched_page(leads=None, send_log=None, status=None, cfg=None, commit_error=None):
-    """The campaign page (the Schedule tab is one of its tabs) against fake Sheets and a fake GitHub. `cfg` REPLACES keys of the campaign's own settings."""
+def sched_page(leads=None, send_log=None, status=None, cfg=None, commit_error=None, live=None, templates=None):
+    """The campaign page (the Schedule tab is one of its tabs) against fake Sheets and a fake GitHub. `cfg` REPLACES keys of the campaign's own settings.
+    `live` is a dict of the files that are on GitHub right now ({path: bytes}); with it, saves are remembered in it and read back from it, like the real thing.
+    Without it, reading the settings file from GitHub fails, so the page falls back to its local copy."""
     leads = [lead(1)] if leads is None else leads
     ws = {f"{FIXTURE_CAMPAIGN} Master Sheet": FakeWorksheet(leads), f"{FIXTURE_CAMPAIGN} Response Sheet": FakeWorksheet([]),
           f"{FIXTURE_CAMPAIGN} Custom Log Sheet": FakeWorksheet(send_log or []), f"{FIXTURE_CAMPAIGN} Error Log": FakeWorksheet([])}
@@ -63,12 +64,24 @@ def sched_page(leads=None, send_log=None, status=None, cfg=None, commit_error=No
     def create_file(self, path, content, message="", **kw):
         if commit_error:
             raise commit_error
+        if live is not None:
+            live[path] = content
         return fake_create_file(self, path, content, message=message, **kw)
+
+    def get_file(self, path, ref="main"):
+        if path.startswith("config/campaigns/"):
+            if live is None:
+                raise RuntimeError("GitHub is not reachable")                  # -> the page falls back to its local copy
+            return live.get(path)                                              # None: the file is not there (a normal state)
+        return b"Subject: S\n\nBody."
 
     patches = [patch("gspread.authorize", return_value=type("C", (), {"open_by_key": lambda self, k: FakeSpreadsheet(ws)})()),
                patch("google.oauth2.service_account.Credentials.from_service_account_info", return_value=object()),
                patch("github_client.GitHubClient.create_file", create_file),
                patch("github_client.GitHubClient.dispatch_workflow", lambda self, workflow, inputs, ref="main": captured.setdefault("dispatches", []).append((workflow, inputs)) or {"id": 1})]
+    patches.append(patch("github_client.GitHubClient.get_file_content", get_file))
+    if templates is not None:
+        patches.append(patch("github_client.GitHubClient.list_directory_files", lambda self, path, ref="main": list(templates)))
     if cfg is not None:
         import preview_logic
         real_cfg = preview_logic.get_campaign_cfg
@@ -85,6 +98,25 @@ def sched_page(leads=None, send_log=None, status=None, cfg=None, commit_error=No
         at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
         at.run(timeout=30)
         yield at, captured
+
+
+def waits(at):
+    """The follow-up wait number boxes, in order."""
+    return [n for n in at.number_input if (n.key or "").startswith(f"wait_{FIXTURE_CAMPAIGN}_")]
+
+
+def save_waits(at):
+    return next(b for b in at.button if b.key == "sc_savewaits_button")
+
+
+def info_rows(at):
+    """[(what it means in words, day)] for each follow-up row."""
+    return [(a, int(b)) for a, b in re.findall(r'sc-wait-info">(.*?)<span class="sc-day"> · day (\d+)<', markup(at))]
+
+
+def override_yaml(**keys):
+    import yaml
+    return yaml.safe_dump(keys).encode("utf-8")
 
 
 def markup(at):
@@ -215,7 +247,7 @@ def test_leads_whose_follow_up_is_due_now_or_falls_due_tomorrow_are_counted_as_s
         return (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
     leads = [lead(1, IntroSentAt=intro_sent(3)), lead(2, IntroSentAt=intro_sent(2)), lead(3, IntroSentAt=intro_sent(0))]
     with sched_page(leads=leads, cfg={"schedule": None}) as (at, _):
-        assert re.findall(r'<span class="sc-pill">(.*?)</span>', markup(at))[0] == "3 days"
+        assert waits(at)[0].value == 3
         assert "Due now: <b>1</b> leads · Due tomorrow: <b>1</b> leads" in markup(at)
 
 
@@ -236,15 +268,6 @@ def test_this_week_lists_the_send_days_and_todays_count_from_the_campaigns_own_d
         today = rows[now.astimezone(timezone.utc).weekday()]
         assert today[2] == "2" and today[1] == "50"                                      # 2 of a daily limit of 4
         assert all(r[2] == "—" for r in rows[now.weekday() + 1:])                        # days still to come show a dash
-
-
-def test_the_follow_up_waits_shown_are_the_campaigns_own():
-    import preview_logic
-    expected = L.wait_rows(preview_logic.get_campaign_cfg(FIXTURE_CAMPAIGN)["stages"])
-    with sched_page() as (at, _):
-        text = markup(at)
-        assert [m for m in re.findall(r'<td class="sc-stage">(.*?)</td>', text)] == [r["stage"] for r in expected]
-        assert re.findall(r'<span class="sc-pill">(.*?)</span>', text) == [r["wait"] for r in expected] and expected
 
 
 def test_looking_at_the_schedule_tab_never_writes_anything():
@@ -305,3 +328,176 @@ def test_a_running_campaign_with_nothing_due_in_the_next_days_says_so():
     at = AppTest.from_string(_card_script(True, None, next_run="None"))
     at.run(timeout=30)
     assert '<div class="sc-next-none">Nothing is due in the next 8 days</div>' in markup(at)
+
+
+
+# ================================================================ editing each follow-up's wait
+
+OVERRIDE_PATH = f"config/campaigns/{FIXTURE_CAMPAIGN}.yaml"
+
+
+def test_each_follow_up_has_a_number_box_with_its_current_wait_and_the_allowed_range():
+    with sched_page() as (at, _):
+        boxes = waits(at)
+        assert list(at.exception) == [] and [b.value for b in boxes] == [3, 4, 5, 5]                  # the fixture's shared waits for follow-ups 1 to 4
+        assert all(b.min == 0 and b.max == 90 and b.step == 1 for b in boxes)
+        assert [b.label for b in boxes] == [f"Days before Follow-up {i}" for i in range(1, 5)]
+        assert all(b.key.startswith(f"wait_{FIXTURE_CAMPAIGN}_followup") for b in boxes)         # per campaign, so switching campaigns can never carry a value over
+
+
+def test_each_row_says_what_its_wait_means_and_the_day_it_lands_on_counted_from_the_intro():
+    with sched_page() as (at, _):
+        assert info_rows(at) == [("3 days after the intro", 3), ("4 days after follow-up 1", 7), ("5 days after follow-up 2", 12), ("5 days after follow-up 3", 17)]
+        assert re.findall(r'class="sc-stage">(.*?)</div>', markup(at)) == ["Follow-up 1", "Follow-up 2", "Follow-up 3", "Follow-up 4"]
+
+
+def test_changing_a_wait_updates_its_description_and_every_day_after_it_at_once():
+    with sched_page() as (at, _):
+        waits(at)[1].set_value(1)
+        at.run(timeout=30)
+        assert info_rows(at) == [("3 days after the intro", 3), ("1 day after follow-up 1", 4), ("5 days after follow-up 2", 9), ("5 days after follow-up 3", 14)]
+
+
+def test_a_wait_of_zero_is_said_plainly_as_the_same_day():
+    with sched_page() as (at, _):
+        waits(at)[2].set_value(0)
+        at.run(timeout=30)
+        assert info_rows(at)[2] == ("Same day as follow-up 2", 7)
+
+
+def test_save_waits_is_off_until_something_changes_and_nothing_is_saved_by_editing_alone():
+    with sched_page() as (at, captured):
+        assert save_waits(at).disabled is True and not any("Not saved yet" in c.value for c in at.caption)
+        waits(at)[0].set_value(6)
+        at.run(timeout=30)
+        assert save_waits(at).disabled is False and captured.get("commits") is None and captured.get("dispatches") is None
+
+
+def test_putting_a_wait_back_to_what_it_was_turns_save_off_again():
+    with sched_page() as (at, _):
+        waits(at)[0].set_value(6)
+        at.run(timeout=30)
+        waits(at)[0].set_value(3)
+        at.run(timeout=30)
+        assert save_waits(at).disabled is True
+
+
+def test_unsaved_changes_are_listed_and_only_a_shorter_wait_brings_the_warning():
+    with sched_page() as (at, _):
+        waits(at)[0].set_value(7)                                                               # longer
+        at.run(timeout=30)
+        assert any("Not saved yet: Follow-up 1 was 3 days, now 7 days." in c.value for c in at.caption) and not any("shorter wait" in w.value for w in at.warning)
+        waits(at)[1].set_value(1)                                                               # shorter
+        at.run(timeout=30)
+        assert any("Follow-up 2 was 4 days, now 1 day" in c.value for c in at.caption)
+        assert any("A shorter wait can make leads due straight away" in w.value for w in at.warning)
+
+
+def test_saving_commits_every_follow_ups_wait_to_the_campaigns_settings_file_and_keeps_everything_else():
+    import yaml
+    live = {OVERRIDE_PATH: override_yaml(status="active", sending={"daily_limit": 50}, schedule={"timezone": "UTC", "window_start": "08:00", "window_end": "12:00", "send_days": ["mon"]})}
+    with sched_page(live=live) as (at, captured):
+        waits(at)[1].set_value(9)
+        at.run(timeout=30)
+        save_waits(at).click()
+        at.run(timeout=30)
+        assert list(at.exception) == [] and list(at.error) == []
+        assert len(captured["commits"]) == 1 and captured.get("dispatches") is None                  # exactly one commit, and nothing was started
+        commit = captured["commits"][0]
+        saved = yaml.safe_load(commit["content"])
+        assert commit["path"] == OVERRIDE_PATH and "Update follow-up waits for " in commit["message"] and FIXTURE_CAMPAIGN in commit["message"]
+        assert saved["stage_wait_days"] == {"followup1": 3, "followup2": 9, "followup3": 5, "followup4": 5}
+        assert saved["status"] == "active" and saved["sending"] == {"daily_limit": 50} and saved["schedule"]["window_end"] == "12:00"
+        assert any("Follow-up waits saved." in s.value for s in at.success)
+
+
+def test_saving_waits_reads_the_live_file_so_a_schedule_saved_a_moment_ago_is_never_undone():
+    """The page's own copy of the file can be old. The live file has a schedule that this page has not seen; saving waits must keep it."""
+    import yaml
+    live = {OVERRIDE_PATH: override_yaml(schedule={"timezone": "Asia/Kolkata", "window_start": "10:00", "window_end": "15:00", "send_days": ["tue", "thu"]})}
+    with sched_page(live=live, cfg={"schedule": None}) as (at, captured):
+        waits(at)[0].set_value(8)
+        at.run(timeout=30)
+        save_waits(at).click()
+        at.run(timeout=30)
+        saved = yaml.safe_load(captured["commits"][0]["content"])
+        assert saved["schedule"] == {"timezone": "Asia/Kolkata", "window_start": "10:00", "window_end": "15:00", "send_days": ["tue", "thu"]} and saved["stage_wait_days"]["followup1"] == 8
+
+
+def test_saving_the_schedule_reads_the_live_file_so_waits_saved_a_moment_ago_are_never_undone():
+    import yaml
+    live = {OVERRIDE_PATH: override_yaml(stage_wait_days={"followup1": 6, "followup2": 7})}
+    with sched_page(live=live, cfg={"schedule": dict(CHICAGO)}) as (at, captured):
+        set_text(at, "Start", "10:00")
+        next(b for b in at.button if b.label == "💾 Save schedule").click()
+        at.run(timeout=30)
+        saved = yaml.safe_load(captured["commits"][0]["content"])
+        assert saved["stage_wait_days"] == {"followup1": 6, "followup2": 7} and saved["schedule"]["window_start"] == "10:00"
+
+
+def test_when_github_cannot_be_read_the_page_falls_back_to_its_local_copy_instead_of_failing():
+    with sched_page(live=None) as (at, captured):
+        waits(at)[0].set_value(4)
+        at.run(timeout=30)
+        save_waits(at).click()
+        at.run(timeout=30)
+        assert list(at.exception) == [] and list(at.error) == [] and len(captured["commits"]) == 1
+
+
+def test_after_saving_a_fresh_page_shows_the_new_waits_and_has_nothing_left_to_save():
+    live = {}
+    with sched_page(live=live) as (at, _):
+        waits(at)[1].set_value(11)
+        at.run(timeout=30)
+        save_waits(at).click()
+        at.run(timeout=30)
+        assert OVERRIDE_PATH in live
+    st.cache_data.clear()
+    with sched_page(live=live) as (at, _):                                                      # a new visit, reading what GitHub now holds
+        assert [b.value for b in waits(at)] == [3, 11, 5, 5] and save_waits(at).disabled is True
+        assert info_rows(at)[1] == ("11 days after follow-up 1", 14)
+
+
+def test_a_failed_save_says_why_and_keeps_the_edit_so_it_can_be_tried_again():
+    from github_client import GitHubActionsError
+    with sched_page(live={}, commit_error=GitHubActionsError("boom")) as (at, captured):
+        waits(at)[0].set_value(6)
+        at.run(timeout=30)
+        save_waits(at).click()
+        at.run(timeout=30)
+        assert any("Save failed: boom" in e.value for e in at.error) and not at.success and captured.get("commits") is None
+        assert waits(at)[0].value == 6 and save_waits(at).disabled is False
+
+
+def test_a_campaigns_own_waits_in_its_live_settings_file_are_what_the_boxes_show():
+    with sched_page(live={OVERRIDE_PATH: override_yaml(stage_wait_days={"followup2": 6, "followup4": 1})}) as (at, _):
+        assert [b.value for b in waits(at)] == [3, 6, 5, 1] and save_waits(at).disabled is True
+        assert info_rows(at) == [("3 days after the intro", 3), ("6 days after follow-up 1", 9), ("5 days after follow-up 2", 14), ("1 day after follow-up 3", 15)]
+
+
+@pytest.mark.parametrize("bad", [{"followup2": -5}, {"followup2": 2.5}, {"followup2": "x"}, {"followup2": 500}, {"followup2": True}, {"followup1": 2, "followup3": None}])
+def test_a_wait_the_engine_would_refuse_in_the_live_file_is_not_shown_and_the_page_still_works(bad):
+    with sched_page(live={OVERRIDE_PATH: override_yaml(stage_wait_days=bad)}) as (at, _):
+        assert list(at.exception) == [] and [b.value for b in waits(at)] == [3, 4, 5, 5]
+
+
+def test_a_campaign_with_only_an_intro_has_no_boxes_no_save_button_and_says_why():
+    with sched_page(templates=["intro_A.txt", "intro_B.txt", "intro_C.txt", "intro_D.txt"]) as (at, _):
+        assert list(at.exception) == [] and waits(at) == [] and not any(b.key == "sc_savewaits_button" for b in at.button)
+        assert "only its intro, so there are no follow-up waits to set" in markup(at)
+
+
+def test_only_the_follow_ups_are_listed_never_the_intro():
+    with sched_page() as (at, _):
+        assert not any("intro" in b.key for b in waits(at)) and len(waits(at)) == 4
+
+
+def test_if_the_final_check_refuses_a_wait_nothing_is_committed_and_the_reason_is_shown():
+    """The number boxes already stop out-of-range typing, so this last check is defence in depth: it is made to fail here to prove it really is wired in."""
+    with sched_page(live={}) as (at, captured):
+        with patch("schedule_view.validate_stage_waits", lambda values, labels=None: ["Follow-up 1: the wait must be a whole number of days from 0 to 90."]):
+            waits(at)[0].set_value(6)
+            at.run(timeout=30)
+            save_waits(at).click()
+            at.run(timeout=30)
+        assert any("Follow-up 1: the wait must be a whole number of days from 0 to 90." in e.value for e in at.error) and captured.get("commits") is None and not at.success
