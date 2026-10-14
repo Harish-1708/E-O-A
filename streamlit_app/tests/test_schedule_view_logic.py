@@ -256,24 +256,73 @@ def test_an_empty_log_gives_zero_for_past_days_and_dashes_for_the_future():
     assert [(r["day"], r["count"], r["fraction"]) for r in rows] == [("Mon", 0, 0.0), ("Tue", 0, 0.0), ("Wed", None, 0.0)]
 
 
-# ================================================================ follow-up waits
+# ================================================================ follow-up waits, as they are edited
 
-def test_each_follow_up_shows_its_wait_and_what_it_counts_from():
-    rows = S.wait_rows(_stages(0, 2, 3, 4))
-    assert rows == [{"stage": "Follow-up 1", "wait": "2 days", "sends_on": "2 days after the intro"}, {"stage": "Follow-up 2", "wait": "3 days", "sends_on": "3 days after follow-up 1"},
-                    {"stage": "Follow-up 3", "wait": "4 days", "sends_on": "4 days after follow-up 2"}]
-
-
-def test_one_day_is_singular_and_zero_days_is_said_plainly():
-    rows = S.wait_rows(_stages(0, 1, 0))
-    assert rows[0]["wait"] == "1 day" and rows[0]["sends_on"] == "1 day after the intro" and rows[1]["wait"] == "0 days"
+def _stage_list(*waits):
+    names = ["intro"] + [f"followup{i}" for i in range(1, len(waits))]
+    return [{"name": n, "template_prefix": n, "wait_days_after_previous": w} for n, w in zip(names, waits)]
 
 
-@pytest.mark.parametrize("wait", [None, "2", -1, True, 2.5])
-def test_a_wait_that_is_not_a_whole_number_of_days_is_a_dash_not_a_guess(wait):
+@pytest.mark.parametrize("wait, after, text", [(0, "the intro", "Same day as the intro"), (1, "the intro", "1 day after the intro"), (2, "follow-up 1", "2 days after follow-up 1"), (90, "follow-up 9", "90 days after follow-up 9"),
+                                               (0, "follow-up 2", "Same day as follow-up 2")])
+def test_a_wait_is_put_in_words_with_what_it_counts_from(wait, after, text):
+    assert S.sends_on_text(wait, after) == text
+
+
+def test_each_follow_up_is_a_row_with_its_saved_wait_and_what_it_counts_from_and_the_intro_is_not_one():
+    assert S.wait_edit_rows(_stage_list(0, 2, 3, 4)) == [
+        {"prefix": "followup1", "label": "Follow-up 1", "saved": 2, "after": "the intro"},
+        {"prefix": "followup2", "label": "Follow-up 2", "saved": 3, "after": "follow-up 1"},
+        {"prefix": "followup3", "label": "Follow-up 3", "saved": 4, "after": "follow-up 2"}]
+
+
+@pytest.mark.parametrize("wait", [None, "2", -1, True, 2.5, 91, [2]])
+def test_a_wait_that_is_not_a_usable_whole_number_of_days_is_offered_as_not_saved_rather_than_guessed(wait):
     stages = [{"name": "intro", "template_prefix": "intro"}, {"name": "followup1", "template_prefix": "followup1", "wait_days_after_previous": wait}]
-    assert S.wait_rows(stages) == [{"stage": "Follow-up 1", "wait": "—", "sends_on": "Not set"}]
+    assert S.wait_edit_rows(stages)[0]["saved"] is None
 
 
-def test_a_campaign_with_only_an_intro_has_no_waits():
-    assert S.wait_rows(_stages(0)) == [] and S.wait_rows([]) == [] and S.wait_rows(None) == []
+@pytest.mark.parametrize("wait", [0, 1, 45, 90])
+def test_zero_to_ninety_are_all_usable_saved_waits(wait):
+    assert S.wait_edit_rows(_stage_list(0, wait))[0]["saved"] == wait
+
+
+def test_a_campaign_with_only_an_intro_has_no_rows():
+    assert S.wait_edit_rows(_stage_list(0)) == [] and S.wait_edit_rows([]) == [] and S.wait_edit_rows(None) == []
+
+
+def test_the_timeline_adds_the_waits_up_so_each_follow_up_has_its_day_counted_from_the_intro():
+    rows = S.wait_edit_rows(_stage_list(0, 2, 5, 1))
+    described = S.describe_waits(rows, {"followup1": 2, "followup2": 5, "followup3": 1})
+    assert [(d["label"], d["wait"], d["day"]) for d in described] == [("Follow-up 1", 2, 2), ("Follow-up 2", 5, 7), ("Follow-up 3", 1, 8)]
+    assert [d["sends_on"] for d in described] == ["2 days after the intro", "5 days after follow-up 1", "1 day after follow-up 2"]
+
+
+def test_the_timeline_follows_what_is_being_typed_not_what_was_saved():
+    rows = S.wait_edit_rows(_stage_list(0, 2, 2))
+    assert [d["day"] for d in S.describe_waits(rows, {"followup1": 10, "followup2": 0})] == [10, 10]
+
+
+def test_a_follow_up_with_no_edited_value_uses_its_saved_wait_and_a_never_saved_one_counts_as_zero():
+    rows = S.wait_edit_rows([{"template_prefix": "intro"}, {"template_prefix": "followup1", "wait_days_after_previous": 3}, {"template_prefix": "followup2"}])
+    assert [d["wait"] for d in S.describe_waits(rows, {})] == [3, 0]
+
+
+def test_only_the_waits_that_differ_from_the_saved_ones_are_changes():
+    rows = S.wait_edit_rows(_stage_list(0, 2, 3, 4))
+    assert S.changed_waits(rows, {"followup1": 2, "followup2": 3, "followup3": 4}) == []
+    assert S.changed_waits(rows, {"followup1": 2, "followup2": 9, "followup3": 1}) == [{"label": "Follow-up 2", "was": 3, "now": 9}, {"label": "Follow-up 3", "was": 4, "now": 1}]
+
+
+def test_a_row_with_nothing_saved_is_only_a_change_once_it_differs_from_zero_the_engines_own_default():
+    rows = S.wait_edit_rows([{"template_prefix": "intro"}, {"template_prefix": "followup1"}])
+    assert S.changed_waits(rows, {"followup1": 0}) == [] and S.changed_waits(rows, {"followup1": 3}) == [{"label": "Follow-up 1", "was": None, "now": 3}]
+
+
+def test_a_follow_up_missing_from_the_edited_values_is_not_a_change():
+    assert S.changed_waits(S.wait_edit_rows(_stage_list(0, 2, 3)), {"followup1": 5}) == [{"label": "Follow-up 1", "was": 2, "now": 5}]
+
+
+def test_only_a_shorter_wait_counts_as_shortened_and_a_wait_that_had_nothing_saved_never_does():
+    changes = [{"label": "a", "was": 5, "now": 2}, {"label": "b", "was": 2, "now": 5}, {"label": "c", "was": 3, "now": 3}, {"label": "d", "was": None, "now": 0}, {"label": "e", "was": 1, "now": 0}]
+    assert [c["label"] for c in S.shortened(changes)] == ["a", "e"]
