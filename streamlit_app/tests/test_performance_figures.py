@@ -40,7 +40,7 @@ def test_there_are_ten_headline_figures_in_the_order_the_page_shows_them():
     figures = F.headline_figures(perf())
     assert [f["label"] for f in figures] == ["Contacted", "Emails sent", "Reply rate", "Positive replies", "Negotiating", "Rights secured",
                                              "Median time to first reply", "Needs follow-up", "Hard bounce rate", "Sequence completion"]
-    assert all(set(f) == {"label", "value", "caption", "help"} for f in figures)
+    assert all(set(f) == {"label", "value", "caption", "help", "trend"} for f in figures)
 
 
 def test_the_figures_are_formatted_for_people_and_a_missing_asana_figure_is_a_dash():
@@ -116,3 +116,42 @@ def test_safe_cell_leaves_ordinary_text_and_numbers_alone():
 ])
 def test_the_download_file_name_is_safe_and_always_ends_in_performance_csv(name, expected):
     assert F.export_filename(name) == expected
+
+
+# ================================================================ the reply-rate change
+
+TREND_UP = {"days": 7, "current_rate": 0.25, "previous_rate": 0.1, "delta_pts": 15.0, "sent_current": 8, "sent_previous": 10, "answered_current": 2, "answered_previous": 1}
+
+
+@pytest.mark.parametrize("delta, text, kind", [(2.1, "▲ 2.1 pts vs previous 7 days", "up"), (15.0, "▲ 15.0 pts vs previous 7 days", "up"), (-0.8, "▼ 0.8 pts vs previous 7 days", "down"),
+                                               (-40.0, "▼ 40.0 pts vs previous 7 days", "down"), (0.0, "▬ no change vs previous 7 days", "flat"), (0.1, "▲ 0.1 pts vs previous 7 days", "up")])
+def test_the_change_is_worded_with_an_arrow_the_size_in_points_and_what_it_is_compared_with(delta, text, kind):
+    assert F.format_trend({**TREND_UP, "delta_pts": delta}) == (text, kind)
+
+
+def test_there_is_nothing_to_show_when_there_is_no_trend():
+    assert F.format_trend(None) is None and F.trend_help(None) == ""
+
+
+def test_the_tooltip_gives_both_periods_and_warns_that_the_latest_days_are_still_filling_in():
+    tip = F.trend_help(TREND_UP)
+    assert "Last 7 days: 25.0% of 8 emails" in tip and "The 7 days before: 10.0% of 10 emails" in tip and "Replies can take several days to arrive" in tip and "may rise" in tip
+
+
+def test_only_the_reply_rate_card_carries_the_change_and_its_tooltip():
+    figures = {f["label"]: f for f in F.headline_figures(perf(reply_trend=TREND_UP))}
+    assert figures["Reply rate"]["trend"] == ("▲ 15.0 pts vs previous 7 days", "up") and "Replies can take several days" in figures["Reply rate"]["help"]
+    assert all(f["trend"] is None for label, f in figures.items() if label != "Reply rate")
+
+
+def test_with_no_trend_the_reply_rate_card_is_exactly_as_it_was():
+    for given in (perf(), perf(reply_trend=None)):
+        card = next(f for f in F.headline_figures(given) if f["label"] == "Reply rate")
+        assert card["trend"] is None and card["help"] == "" and card["caption"] == "2 replied"
+
+
+def test_the_export_notes_the_change_beside_the_reply_rate_and_says_nothing_extra_when_there_is_none():
+    with_trend = {r[0]: r for r in rows_of(F.build_performance_csv(perf(reply_trend=TREND_UP))) if r}
+    assert with_trend["Reply rate"] == ["Reply rate", "66.7%", "2 replied · ▲ 15.0 pts vs previous 7 days"]
+    without = {r[0]: r for r in rows_of(F.build_performance_csv(perf())) if r}
+    assert without["Reply rate"] == ["Reply rate", "66.7%", "2 replied"]
