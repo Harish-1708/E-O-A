@@ -210,18 +210,54 @@ def week_rows(send_log: List[Dict], tz_name: Optional[str], now_utc: datetime, s
 
 # ---------------------------------------------------------------- follow-up waits
 
-def wait_rows(stages: List[Dict]) -> List[Dict]:
-    """One row per follow-up: {stage: 'Follow-up 2', wait: '3 days', sends_on: '3 days after follow-up 1'}. The first stage (the intro) has no wait and is not listed.
-    A wait the settings do not give as a whole number of days is shown as a dash rather than guessed."""
+def sends_on_text(wait: int, after: str) -> str:
+    """'3 days after follow-up 1', '1 day after the intro', 'Same day as the intro' (a wait of 0 goes out on the next run that same day)."""
+    if wait == 0:
+        return f"Same day as {after}"
+    return f"{wait} day" + ("" if wait == 1 else "s") + f" after {after}"
+
+
+def wait_edit_rows(stages: List[Dict]) -> List[Dict]:
+    """One row per follow-up, in order (the intro has no wait and is not listed): {prefix, label, saved, after}. `saved` is the wait the campaign has now, a whole
+    number of days from 0 to the engine's limit, or None when the settings do not give one (it is then offered as 0, which is what the engine would use).
+    `after` says what the wait counts from: 'the intro', or the previous follow-up in lower case."""
     from leads_logic import humanize_stage
     rows, previous = [], None
     for index, stage in enumerate(stages or []):
         prefix = str(stage.get("template_prefix") or stage.get("name") or "")
         if index > 0:
             wait = stage.get("wait_days_after_previous")
-            known = isinstance(wait, int) and not isinstance(wait, bool) and wait >= 0
-            earlier = "the intro" if index == 1 else humanize_stage(previous).lower()
-            rows.append({"stage": humanize_stage(prefix), "wait": (f"{wait} day" + ("" if wait == 1 else "s")) if known else "—",
-                         "sends_on": (f"{wait} day" + ("" if wait == 1 else "s") + f" after {earlier}") if known else "Not set"})
+            known = isinstance(wait, int) and not isinstance(wait, bool) and 0 <= wait <= outreach.MAX_STAGE_WAIT_DAYS
+            rows.append({"prefix": prefix, "label": humanize_stage(prefix), "saved": wait if known else None,
+                         "after": "the intro" if index == 1 else humanize_stage(previous).lower()})
         previous = prefix
     return rows
+
+
+def describe_waits(rows: List[Dict], values: Dict[str, int]) -> List[Dict]:
+    """The rows with the waits as they are being edited: {label, wait, sends_on, day}. `day` counts from the intro (day 0) through every wait before it, so a
+    campaign reads as a timeline: 'Follow-up 2: day 5'."""
+    described, day = [], 0
+    for row in rows:
+        wait = values.get(row["prefix"], row["saved"] or 0)
+        day += wait
+        described.append({"label": row["label"], "wait": wait, "sends_on": sends_on_text(wait, row["after"]), "day": day})
+    return described
+
+
+def changed_waits(rows: List[Dict], values: Dict[str, int]) -> List[Dict]:
+    """The follow-ups whose edited wait differs from the saved one: {label, was, now}. `was` is None when nothing usable was saved for it, in which case the
+    comparison is against 0, the wait the engine would use, so merely looking at such a row is never a change."""
+    changes = []
+    for row in rows:
+        if row["prefix"] not in values:
+            continue
+        current = row["saved"] if row["saved"] is not None else 0
+        if values[row["prefix"]] != current:
+            changes.append({"label": row["label"], "was": row["saved"], "now": values[row["prefix"]]})
+    return changes
+
+
+def shortened(changes: List[Dict]) -> List[Dict]:
+    """The changes that make a wait SHORTER: those can make leads due straight away."""
+    return [change for change in changes if change["was"] is not None and change["now"] < change["was"]]
