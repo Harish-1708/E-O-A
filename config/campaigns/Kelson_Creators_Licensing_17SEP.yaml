@@ -1,6 +1,6 @@
 schedule:
   timezone: America/New_York
-  window_start: '9:30'
+  window_start: '9:00'
   window_end: '17:00'
   send_days:
   - mon
