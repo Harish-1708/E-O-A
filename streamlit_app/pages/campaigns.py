@@ -40,10 +40,7 @@ from settings_logic import (  # noqa: E402
     load_raw_override, validate_settings, build_updated_override, override_to_yaml_bytes, override_file_path,
     build_asana_settings_override, build_tracker_sync_settings_override,
 )
-from schedule_logic import (  # noqa: E402
-    validate_schedule, build_updated_schedule_override, get_current_schedule,
-    timezone_display_name, COMMON_TIMEZONES, DAY_OPTIONS,
-)
+from schedule_view import ScheduleContext, render_schedule_tab  # noqa: E402
 from launch_logic import build_status_override, build_delete_override, build_restore_override  # noqa: E402
 from responses_hub_logic import (  # noqa: E402
     group_responses_by_lead, sort_conversation_groups_newest_first, tag_responses_with_campaign, search_responses,
@@ -55,7 +52,7 @@ from leads_logic import filter_counts, apply_extra_filters, any_extra_filter, st
 from leads_actions import render_lead_actions  # noqa: E402
 from sequences_view import SequencesContext, render_sequences_tab  # noqa: E402
 from campaign_html import CAMPAIGN_SKIN_CSS, UI_BUILD, build_html, chips_html, crumb_html, subline_html  # noqa: E402
-from campaign_header_logic import read_cron_minute, next_send_line, schedule_summary, sender_summary, subline, responses_tab_label  # noqa: E402
+from campaign_header_logic import read_cron_minute, next_automatic_send, next_send_line, schedule_summary, sender_summary, subline, responses_tab_label  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
 from conversation_logic import filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
@@ -947,55 +944,24 @@ def _render_delete_campaign_section(campaign_cfg):
                 st.error(f"Failed to delete campaign: {exc}")
 
 
-def _render_schedule_tab(campaign_cfg):
-    campaign_name = campaign_cfg["_campaign_name"]
-    current = get_current_schedule(campaign_cfg)
-
-    st.caption(
-        "Leave this alone and your campaign sends anytime — matching how it's always worked. Setting a "
-        "schedule restricts Send Batch to only run within the window and days you choose below (Preview "
-        "still works anytime either way)."
-    )
-
-    display_names = [d for d, _ in COMMON_TIMEZONES]
-    iana_names = [i for _, i in COMMON_TIMEZONES]
-    current_display = timezone_display_name(current["timezone"]) or display_names[0]
-    selected_display = st.selectbox("Time zone", display_names, index=display_names.index(current_display))
-    selected_timezone = iana_names[display_names.index(selected_display)]
-
-    col1, col2 = st.columns(2)
-    with col1:
-        window_start = st.text_input("Start time (24-hour, HH:MM)", value=current["window_start"])
-    with col2:
-        window_end = st.text_input("End time (24-hour, HH:MM)", value=current["window_end"])
-
-    st.write("Days")
-    day_cols = st.columns(7)
-    send_days = []
-    for col, (label, code) in zip(day_cols, DAY_OPTIONS):
-        with col:
-            if st.checkbox(label[:3], value=code in current["send_days"], key=f"schedule_day_{code}"):
-                send_days.append(code)
-
-    if st.button("💾 Save Schedule", type="primary"):
-        errors = validate_schedule(selected_timezone, window_start, window_end, send_days)
-        if errors:
-            for e in errors:
-                st.error(e)
-        else:
-            try:
-                raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
-                updated = build_updated_schedule_override(raw_override, selected_timezone, window_start,
-                                                            window_end, send_days)
-                client = _get_github_client()
-                client.create_file(
-                    override_file_path(campaign_name), override_to_yaml_bytes(updated),
-                    message=f"Update schedule for {campaign_name} (via Streamlit, by {current_user()})",
-                )
-                st.success("Schedule saved. May take a minute to actually reflect here while the app "
-                           "redeploys — it's in effect for sending immediately either way.")
-            except GitHubActionsError as exc:
-                st.error(f"Save failed: {exc}")
+def _render_schedule_tab(campaign_cfg, leads=None, send_log=None):
+    """The Schedule tab (see schedule_view for the layout and what saving does). The page supplies its own GitHub writer, and — for the 'Next automatic run'
+    card — when the sender will next run, worked out with the engine's own sending-window rule."""
+    status, _problems = compute_campaign_status(campaign_cfg, leads or [])
+    running = status == STATUS_RUNNING
+    next_run = None
+    if running:
+        try:
+            minute = _auto_send_cron_minute()
+            if minute is not None:
+                next_run = next_automatic_send(campaign_cfg.get("schedule") or {}, datetime.now(timezone.utc), minute, outreach.is_within_sending_window)
+        except Exception:  # noqa: BLE001 - a card that cannot be worked out shows its 'nothing due' note; it must never break the tab
+            next_run = None
+    notes = {STATUS_PAUSED: "Paused: nothing is scheduled", STATUS_DRAFT: "Draft: not launched yet", STATUS_COMPLETED: "Completed: nothing more to send"}
+    render_schedule_tab(ScheduleContext(
+        campaign_cfg=campaign_cfg, leads=leads or [], send_log=send_log or [], running=running, status_note=notes.get(status, "Nothing is scheduled"),
+        next_run=next_run, get_client=_get_github_client, current_user=current_user, campaigns_dir=CAMPAIGNS_DIR,
+    ))
 
 
 def _read_state():
@@ -1564,7 +1530,7 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
     with tabs[2]:
         _render_sequences_tab(campaign_cfg, leads, responses, send_log, error_log, just_arrived)
     with tabs[3]:
-        _render_schedule_tab(campaign_cfg)
+        _render_schedule_tab(campaign_cfg, leads, send_log)
     with tabs[4]:
         _render_settings_tab(campaign_cfg, leads)
     with tabs[5]:
