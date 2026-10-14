@@ -20,7 +20,7 @@ tracker_sync:
   enabled: true
 status: active
 stage_wait_days:
-  followup1: 3
+  followup1: 2
   followup2: 2
   followup3: 2
   followup4: 2
