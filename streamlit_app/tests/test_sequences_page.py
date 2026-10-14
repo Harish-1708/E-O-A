@@ -207,10 +207,10 @@ def test_the_editor_shows_one_variant_at_a_time_chosen_with_the_tabs():
 def test_a_variant_starts_locked_and_the_unlock_box_is_the_editing_badge():
     with seq_page() as (at, _):
         box = next(c for c in at.checkbox if c.key == "unlock_intro_A")
-        assert box.label == "🔒 Locked — tick to edit" and box.value is False and subject_input(at).disabled and body_input(at).disabled
+        assert box.label == "🔒 Locked" and box.value is False and subject_input(at).disabled and body_input(at).disabled
         unlock(at, "intro", "A")
         box = next(c for c in at.checkbox if c.key == "unlock_intro_A")
-        assert box.label == "🔓 Editing" and box.value is True and not subject_input(at).disabled and not body_input(at).disabled
+        assert box.label == "🔓 Unlocked" and box.value is True and not subject_input(at).disabled and not body_input(at).disabled
 
 
 def test_the_first_stage_needs_a_subject_and_a_follow_up_may_continue_the_thread():
@@ -788,3 +788,27 @@ def test_deleting_a_variant_is_refused_if_github_changed_since_the_page_was_draw
         next(b for b in at.button if b.key == "delete_variant_button").click()
         go(at)
         assert world.deleted == [] and any("no longer has variant 'C'" in e.value for e in at.error)
+
+
+def test_every_stage_and_variant_shows_its_own_results_and_says_which_they_are():
+    """Hand-derived: intro A 4 sent / 2 replied, intro B 3 sent / 0, followup1 A 2 sent / 1 replied, followup1 B 5 sent / 1 replied — every combination must show ONLY its own numbers."""
+    plan = [("intro", "A", 4, 2), ("intro", "B", 3, 0), ("followup1", "A", 2, 1), ("followup1", "B", 5, 1)]
+    leads, log, responses, n = [], [], [], 0
+    for stage, variant, sent, replied in plan:
+        for k in range(sent):
+            n += 1
+            leads.append(lead(n, Status="Stopped - Replied" if k < replied else "Intro Sent"))
+            log.append({"Timestamp": "2026-09-01 10:00:00", "LeadID": str(n), "Stage": stage, "Variant": variant, "Status": "sent", "MessageID": f"<m{n}@x>", "Error": "", "SenderAccount": "sales1"})
+            if k < replied:
+                responses.append({"ResponseID": f"R{n}", "LeadID": str(n), "ReceivedAt": "2026-09-02 10:00:00", "Classification": "Genuine Reply", "Intent": "Interested", "InReplyTo": f"<m{n}@x>"})
+    with seq_page(leads=leads, send_log=log, responses=responses) as (at, _):
+        seen = {}
+        for stage_index, prefix in ((0, "intro"), (1, "followup1")):
+            pick_stage(at, stage_index)
+            for letter in "AB":
+                pick_variant(at, letter)
+                text = markup(at)
+                seen[(prefix, letter)] = tuple(re.search(pattern, text).group(1) for pattern in (r">Sent (\d+)<", r">Replies (\d+)<", r">Reply rate ([^<]+)<"))
+                title = "Intro" if prefix == "intro" else "Follow-up 1"
+                assert f'<span class="sq-scope">{title} · Variant {letter}</span>' in text
+        assert seen == {("intro", "A"): ("4", "2", "50.0%"), ("intro", "B"): ("3", "0", "0.0%"), ("followup1", "A"): ("2", "1", "50.0%"), ("followup1", "B"): ("5", "1", "20.0%")}
