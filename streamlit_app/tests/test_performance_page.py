@@ -245,9 +245,12 @@ def test_the_by_sender_and_errors_tables_the_old_analytics_tab_had_are_here(fixt
     at = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_campaign").set_value(FIXTURE_CAMPAIGN))
     assert list(at.exception) == [] and list(at.error) == []
     headings = [s.value for s in at.subheader] + _card_titles(at)
-    assert "By sender account" in headings and "Errors (all time)" in headings
-    errors = next(t for t in _tables(at) if t[0] == ["Error type", "Count"])                       # now a card with a table, not a bare dataframe
+    assert "By sender account" in headings
+    errors_dropdown = next(e for e in at.expander if e.label == "Errors (all time)")             # a dropdown, not a block that is always on show
+    assert errors_dropdown.proto.expanded is False
+    errors = next(t for t in _tables(at) if t[0] == ["Error type", "Count"])
     assert errors == [["Error type", "Count"], ["SMTP", "2"]]
+    assert "Errors (all time)" not in _card_titles(at)
 
 
 def test_the_full_details_the_old_dashboard_page_showed_are_available_for_one_campaign(fixture_repo):
@@ -545,3 +548,18 @@ def test_the_sender_bars_are_relative_to_the_best_account_not_to_one_hundred_per
     table = next(t for t in _tables(at) if t[0][0] == "Account")
     assert [(row[0], row[4]) for row in table[1:]] == [("salesA", "50.0%"), ("salesB", "25.0%")]
     assert [int(w) for w in re.findall(r'class="pf-minibar"><i style="width:(\d+)%"', _markup(at))] == [100, 50]
+
+
+def test_all_time_errors_are_a_closed_dropdown_next_to_the_most_common_sending_errors_one(fixture_repo):
+    sheet = _realistic_sheet()
+    sheet._worksheets[f"{FIXTURE_CAMPAIGN} Custom Log Sheet"]._records.append({"Timestamp": "2026-09-05 10:00:00", "LeadID": "1", "Stage": "intro", "Variant": "A", "Status": "failed", "MessageID": "", "Error": "550 mailbox full", "SenderAccount": ""})
+    at = _one_campaign(sheet)
+    labels = [e.label for e in at.expander]
+    assert "Most common sending errors" in labels and "Errors (all time)" in labels
+    assert labels.index("Most common sending errors") < labels.index("Errors (all time)")
+    assert all(e.proto.expanded is False for e in at.expander if e.label in ("Most common sending errors", "Errors (all time)"))
+
+
+def test_with_no_errors_in_the_log_there_is_no_errors_dropdown_at_all(fixture_repo):
+    at = _run_page(_sheet([], [], []))
+    assert list(at.exception) == [] and not any(e.label == "Errors (all time)" for e in at.expander)
