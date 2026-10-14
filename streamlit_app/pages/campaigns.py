@@ -17,7 +17,7 @@ from config import (  # noqa: E402
     TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, SETTINGS_PATH,
 )
 from email_account_slots_logic import read_slot_mapping_live  # noqa: E402
-from accounts_logic import merge_account_directories  # noqa: E402
+from accounts_logic import build_health_lookup, merge_account_directories  # noqa: E402
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
@@ -37,10 +37,11 @@ from campaign_builder import (  # noqa: E402
 )
 from settings_logic import (  # noqa: E402
     load_raw_override_live, merge_live_override_into_cfg,
-    load_raw_override, validate_settings, build_updated_override, override_to_yaml_bytes, override_file_path,
+    override_to_yaml_bytes, override_file_path,
     build_asana_settings_override, build_tracker_sync_settings_override,
 )
 from schedule_view import ScheduleContext, render_schedule_tab  # noqa: E402
+from settings_view import SettingsContext, render_settings_tab  # noqa: E402
 from launch_logic import build_status_override, build_delete_override, build_restore_override  # noqa: E402
 from responses_hub_logic import (  # noqa: E402
     group_responses_by_lead, sort_conversation_groups_newest_first, tag_responses_with_campaign, search_responses,
@@ -798,154 +799,58 @@ def _render_sequences_tab(campaign_cfg, leads, responses=None, send_log=None, er
     ))
 
 
-def _render_settings_tab(campaign_cfg, leads):
-    campaign_name = campaign_cfg["_campaign_name"]
-    sending = campaign_cfg.get("sending", {})
+@st.cache_resource(ttl=300, show_spinner=False)
+def _load_account_health():
+    """{account name: {status, detail, checked_at}} from the Email Accounts Health tab (written by the health check). Held for five minutes in a resource cache,
+    which a refresh of the page's own data (the 30-second data cache) does not clear: a deployment whose health tab does not exist yet cannot cache a failed lookup,
+    so a data refresh must not repeat it. An empty answer on any failure: the Settings tab must never break because a health lookup did."""
+    try:
+        return build_health_lookup(_get_connector().get_account_health())
+    except Exception:  # noqa: BLE001 - no health data just means 'Not checked yet' on each account
+        return {}
 
-    # Merges BOTH sources — the legacy Streamlit-secrets-based directory
-    # AND the slot-mapping file the Email Accounts page's Add Account
-    # button writes to — so an account added there shows up here too,
-    # without needing to also hand-maintain [email_accounts_directory].
+
+def _read_intro_texts(campaign_cfg):
+    """The intro template (subject and body) of every variant, for the Readiness check of its placeholders. None when they cannot be read right now (no GitHub
+    access, a missing file): the checklist then says it could not check, rather than guessing."""
+    client = _safe_github_client()
+    stages = campaign_cfg.get("stages") or []
+    if client is None or not stages:
+        return None
+    prefix = stages[0].get("template_prefix") or stages[0].get("name")
+    try:
+        texts = []
+        for variant in campaign_cfg.get("variants") or []:
+            parsed = outreach.parse_template_content(client.get_file_content(f"templates/{campaign_cfg['_campaign_name']}/{prefix}_{variant}.txt").decode("utf-8"))
+            texts.append(f"{parsed['subject']}\n{parsed['body']}")
+        return texts
+    except Exception:  # noqa: BLE001 - unreadable templates are reported as 'couldn't check', never as a failure
+        return None
+
+
+def _render_settings_tab(campaign_cfg, leads, send_log=None):
+    """The Settings tab (see settings_view for the layout and what saving does). The page supplies the account directory (the legacy secrets and the live slot file
+    merged, so an account added on the Email Accounts page shows up here too), and every action that reaches outside the page."""
     streamlit_secret_directory = dict(st.secrets.get("email_accounts_directory", {}))
-    # LIVE read — an account added via Email Accounts commits this file to
-    # GitHub, but the local checkout stays frozen until redeploy, so a new
-    # account never appeared in this picker. See read_slot_mapping_live.
-    slot_mapping = read_slot_mapping_live(_safe_github_client(),
-                                           EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH)
+    # LIVE read — an account added via Email Accounts commits this file to GitHub, but the local checkout stays frozen until redeploy, so a new account never
+    # appeared in this picker. See read_slot_mapping_live.
+    slot_mapping = read_slot_mapping_live(_safe_github_client(), EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH)
     account_directory = merge_account_directories(streamlit_secret_directory, slot_mapping)
-    available_accounts = list(account_directory.keys())
+    status, _problems = compute_campaign_status(campaign_cfg, leads)
 
-    st.subheader("Sender accounts")
-    if not available_accounts:
-        st.info(
-            "No accounts configured yet — add one on the Email Accounts page (➕ Add Account), or add "
-            "[email_accounts_directory] to Streamlit Secrets for the legacy path. Sending will still use "
-            "whatever's configured directly in EMAIL_ACCOUNTS_JSON either way."
-        )
-        rotation_accounts = list(sending.get("rotation_accounts") or [])
-    else:
-        # Driven entirely by session_state (keyed per campaign) rather than
-        # a `default=` argument — that's what actually lets "Select all"
-        # work. A plain `rotation_accounts = available_accounts` after the
-        # button click only reassigns a local variable for this one run;
-        # the multiselect widget's own displayed state doesn't change, and
-        # a LATER click on Save re-reads the widget fresh, silently
-        # discarding what "Select all" did. Mutating session_state before
-        # the widget is created, then rerunning, is what actually sticks.
-        ms_key = f"settings_rotation_accounts_{campaign_name}"
-        if ms_key not in st.session_state:
-            st.session_state[ms_key] = [a for a in (sending.get("rotation_accounts") or [])
-                                         if a in available_accounts]
+    def extras():
+        # Not in the design, kept exactly as they were: collapsed tools for this campaign.
+        _render_maintenance_section_in_settings(campaign_cfg)
+        _render_asana_sync_section_in_settings(campaign_cfg)
+        _render_tracker_sync_section_in_settings(campaign_cfg)
 
-        if st.button("Select all accounts"):
-            st.session_state[ms_key] = available_accounts
-            st.rerun()
-
-        rotation_accounts = st.multiselect(
-            "🔍 Search sender accounts", available_accounts, key=ms_key,
-            help="Leave empty to use every configured account for rotation.",
-        )
-
-    sender_rotation = st.checkbox("Rotate across multiple sender accounts", value=bool(sending.get("sender_rotation")))
-
-    st.divider()
-    st.subheader("Sending limits")
-    daily_limit = st.number_input("Daily limit (across all accounts)", min_value=1,
-                                   value=int(sending.get("daily_limit", 100)))
-    has_per_account_limit = st.checkbox("Set a per-account daily limit",
-                                         value=sending.get("per_account_daily_limit") is not None)
-    per_account_daily_limit = None
-    if has_per_account_limit:
-        per_account_daily_limit = st.number_input(
-            "Per-account daily limit", min_value=1,
-            value=int(sending.get("per_account_daily_limit") or 20),
-        )
-
-    st.divider()
-    if st.button("💾 Save Settings", type="primary"):
-        errors = validate_settings(daily_limit, per_account_daily_limit)
-        if errors:
-            for e in errors:
-                st.error(e)
-        else:
-            try:
-                raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
-                updated = build_updated_override(raw_override, daily_limit, per_account_daily_limit,
-                                                  sender_rotation, rotation_accounts)
-                client = _get_github_client()
-                client.create_file(
-                    override_file_path(campaign_name), override_to_yaml_bytes(updated),
-                    message=f"Update settings for {campaign_name} (via Streamlit, by {current_user()})",
-                )
-                st.success("Settings saved. May take a minute to actually reflect here while the app "
-                           "redeploys — it's in effect for sending immediately either way.")
-            except GitHubActionsError as exc:
-                st.error(f"Save failed: {exc}")
-
-    _render_maintenance_section_in_settings(campaign_cfg)
-    _render_asana_sync_section_in_settings(campaign_cfg)
-    _render_tracker_sync_section_in_settings(campaign_cfg)
-    _render_delete_campaign_section(campaign_cfg)
-
-
-def _render_delete_campaign_section(campaign_cfg):
-    """Danger Zone — always last in Settings. Two distinct actions:
-
-    Temporarily Remove: just flips campaign_cfg["status"] to "deleted" —
-    a one-line config change, nothing about the campaign is touched.
-    It disappears from the everyday Campaigns list and shows up instead
-    in the Deleted Campaigns view (Hub page), with a Restore button.
-
-    Permanently Delete: removes the campaign's templates (and its
-    settings override, if any) from the repo, so outreach.py's own
-    auto-discovery no longer recognizes it as a campaign at all — not
-    reversible from this app. Neither option ever touches the Google
-    Sheet — leads, sends, and replies stay fully intact and readable
-    directly there either way, same soft-removal spirit as remove_leads
-    never hard-deleting a lead row. See
-    campaign_builder.list_campaign_files_to_delete's docstring."""
-    campaign_name = campaign_cfg["_campaign_name"]
-    st.divider()
-    with st.expander("🗑️ Danger Zone"):
-        st.subheader("Temporarily Remove")
-        st.caption(
-            "Hides this campaign from the everyday Campaigns list — nothing about it changes (leads, "
-            "sends, replies, templates, settings all stay exactly as they are). Find it in Deleted "
-            "Campaigns (on the Campaigns Hub page) and Restore it any time — it comes back exactly how "
-            "it was, including its Running/Paused/Draft state."
-        )
-        if st.button("Temporarily Remove Campaign", key="temp_remove_campaign_button"):
-            current_status = campaign_cfg.get("status") or "active"
-            if _temporarily_remove_campaign(campaign_name, current_status):
-                st.success(f"'{campaign_name}' temporarily removed. Find it in Deleted Campaigns on the "
-                           "Campaigns Hub page to restore it later, exactly as it is now.")
-                st.session_state["selected_campaign"] = None
-                st.rerun()
-
-        st.divider()
-        st.subheader("Permanently Delete")
-        st.warning(
-            "This removes the campaign's templates — it will no longer appear anywhere, including "
-            "Deleted Campaigns, and this can't be undone from this app. Your Sheet data (leads, sends, "
-            "replies) is NOT deleted and stays fully accessible directly in the Sheet."
-        )
-        typed_name = st.text_input(f'Type the campaign name ("{campaign_name}") to confirm',
-                                    key="delete_campaign_confirm_text")
-        confirmed = confirmation_matches_campaign_name(typed_name, campaign_name)
-        if st.button("Permanently Delete Campaign", type="primary", disabled=not confirmed,
-                     key="delete_campaign_button"):
-            try:
-                paths = list_campaign_files_to_delete(campaign_name, TEMPLATES_ROOT, CAMPAIGNS_DIR)
-                client = _get_github_client()
-                for path in paths:
-                    client.delete_file(path, message=f"Delete campaign {campaign_name} "
-                                                       f"(via Streamlit, by {current_user()})")
-                st.success(f"'{campaign_name}' deleted ({len(paths)} file(s)). It'll disappear from the "
-                           "Campaigns list within a minute or two. Its Sheet data is untouched.")
-                st.session_state["selected_campaign"] = None
-                st.rerun()
-            except GitHubActionsError as exc:
-                st.error(f"Failed to delete campaign: {exc}")
+    render_settings_tab(SettingsContext(
+        campaign_cfg=campaign_cfg, leads=leads or [], send_log=list(send_log or []), status=status, status_label=status_label(status), account_directory=account_directory,
+        health=_load_account_health(), intro_texts=_read_intro_texts(campaign_cfg), get_client=_get_github_client, current_user=current_user, campaigns_dir=CAMPAIGNS_DIR,
+        update_status=_update_campaign_status, request_launch=lambda: st.session_state.__setitem__("show_launch_confirm", True), archive=_temporarily_remove_campaign,
+        files_to_delete=lambda name: list_campaign_files_to_delete(name, TEMPLATES_ROOT, CAMPAIGNS_DIR), name_matches=confirmation_matches_campaign_name, extras=extras,
+        default_account=campaign_cfg.get("default_sender_account") or campaign_cfg.get("_global_default_account") or "",
+    ))
 
 
 def _render_schedule_tab(campaign_cfg, leads=None, send_log=None):
@@ -1035,9 +940,9 @@ def _update_campaign_status(campaign_name: str, new_status: str) -> bool:
     passed — same "may take a minute" caveat as every other config write
     in this app."""
     try:
-        raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
-        updated = build_status_override(raw_override, new_status)
         client = _get_github_client()
+        raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)           # the LIVE file: a setting saved a moment ago must not be undone
+        updated = build_status_override(raw_override, new_status)
         client.create_file(
             override_file_path(campaign_name), override_to_yaml_bytes(updated),
             message=f"Set status={new_status} for {campaign_name} (via Streamlit, by {current_user()})",
@@ -1054,9 +959,9 @@ def _temporarily_remove_campaign(campaign_name: str, current_status: str) -> boo
     the campaign back exactly as it was — see
     launch_logic.build_delete_override's docstring."""
     try:
-        raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
-        updated = build_delete_override(raw_override, current_status)
         client = _get_github_client()
+        raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)           # the LIVE file: a setting saved a moment ago must not be undone
+        updated = build_delete_override(raw_override, current_status)
         client.create_file(
             override_file_path(campaign_name), override_to_yaml_bytes(updated),
             message=f"Temporarily remove {campaign_name} (via Streamlit, by {current_user()})",
@@ -1072,9 +977,9 @@ def _restore_campaign(campaign_name: str) -> bool:
     """Restores whatever status was recorded at Temporarily Remove time —
     see launch_logic.build_restore_override's docstring."""
     try:
-        raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
-        updated = build_restore_override(raw_override)
         client = _get_github_client()
+        raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)           # the LIVE file: a setting saved a moment ago must not be undone
+        updated = build_restore_override(raw_override)
         client.create_file(
             override_file_path(campaign_name), override_to_yaml_bytes(updated),
             message=f"Restore {campaign_name} (via Streamlit, by {current_user()})",
@@ -1185,9 +1090,9 @@ def _render_asana_sync_section_in_settings(campaign_cfg):
                 st.error("Enter the Asana project name, or uncheck Enable.")
             else:
                 try:
-                    raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
-                    updated = build_asana_settings_override(raw_override, enabled, project_name.strip())
                     client = _get_github_client()
+                    raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)             # the LIVE file, not a possibly stale local copy
+                    updated = build_asana_settings_override(raw_override, enabled, project_name.strip())
                     client.create_file(
                         override_file_path(campaign_name), override_to_yaml_bytes(updated),
                         message=f"Update Asana sync settings for {campaign_name} (via Streamlit, "
@@ -1234,9 +1139,9 @@ def _render_tracker_sync_section_in_settings(campaign_cfg):
                                        key="tracker_sync_enabled")
         if st.button("💾 Save Creator Tracker Settings", key="tracker_sync_save"):
             try:
-                raw_override = load_raw_override(campaign_name, CAMPAIGNS_DIR)
-                updated = build_tracker_sync_settings_override(raw_override, tracker_enabled)
                 client = _get_github_client()
+                raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)             # the LIVE file, not a possibly stale local copy
+                updated = build_tracker_sync_settings_override(raw_override, tracker_enabled)
                 client.create_file(
                     override_file_path(campaign_name), override_to_yaml_bytes(updated),
                     message=f"Update Creator Tracker sync settings for {campaign_name} (via Streamlit, "
@@ -1536,7 +1441,7 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
     with tabs[3]:
         _render_schedule_tab(campaign_cfg, leads, send_log)
     with tabs[4]:
-        _render_settings_tab(campaign_cfg, leads)
+        _render_settings_tab(campaign_cfg, leads, send_log)
     with tabs[5]:
         _render_responses_tab(campaign_cfg, leads, responses)
     st.markdown(build_html(UI_BUILD), unsafe_allow_html=True)
