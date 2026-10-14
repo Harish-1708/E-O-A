@@ -19,3 +19,13 @@ asana:
 tracker_sync:
   enabled: true
 status: active
+stage_wait_days:
+  followup1: 3
+  followup2: 2
+  followup3: 2
+  followup4: 2
+  followup5: 2
+  followup6: 2
+  followup7: 2
+  followup8: 2
+  followup9: 2
