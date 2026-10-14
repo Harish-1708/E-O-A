@@ -15,6 +15,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+import outreach  # noqa: E402
+
 
 def load_raw_override(campaign_name: str, campaigns_dir: str) -> Dict:
     """The override file's raw content, exactly as it is on disk — NOT
@@ -109,6 +111,16 @@ def merge_live_override_into_cfg(campaign_cfg: Dict, live_override: Dict) -> Dic
     for scalar in ("status", "previous_status"):
         if scalar in live_override:
             merged[scalar] = live_override[scalar]
+    waits = live_override.get("stage_wait_days")
+    if isinstance(waits, dict):
+        # This campaign's own follow-up waits, as the engine will read them. A value the engine would refuse is not shown (the page keeps the shared
+        # waits); the engine itself reports it when it next loads the campaign.
+        try:
+            valid = outreach.parse_stage_wait_overrides(merged.get("_campaign_name", ""), waits)
+        except outreach.ConfigError:
+            valid = {}
+        merged["stage_wait_days"] = valid
+        merged["stages"] = outreach.apply_stage_wait_overrides(merged.get("stages") or [], valid)
     return merged
 
 
