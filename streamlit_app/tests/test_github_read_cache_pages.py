@@ -91,6 +91,13 @@ def _open_campaign_page(repo, clock):
     return at, patches
 
 
+def _open_add_stage_form(at):
+    """The add-stage form (where 'Next stage:' is shown) is opened from the Sequences tab; keep it open for the reruns below without an extra click, which would add reads of its own."""
+    for state in at.session_state["seq_state"].values():
+        state["mode"] = "add_stage"
+    at.run(timeout=30)
+
+
 def _next_stage_shown(at):
     for m in at.markdown:
         if "Next stage:" in m.value:
@@ -130,6 +137,7 @@ def test_a_new_commit_shows_up_on_the_page_without_waiting_for_any_long_cache_ex
     at, patches = _open_campaign_page(repo, clock)
     with patches[0], patches[1], patches[2], patches[3]:
         at.run(timeout=30)
+        _open_add_stage_form(at)
         assert "followup6" in _next_stage_shown(at)
 
         repo.push_new_stage("followup6", "d" * 40)
