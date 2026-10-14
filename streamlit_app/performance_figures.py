@@ -6,7 +6,7 @@ PURE and READ-ONLY: it only formats what performance_logic already computed.
 import csv
 import io
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from leads_logic import humanize_stage
 from performance_logic import INTENT_ORDER, INTENT_NOT_CLASSIFIED, format_duration_hours, format_rate
@@ -14,14 +14,37 @@ from performance_logic import INTENT_ORDER, INTENT_NOT_CLASSIFIED, format_durati
 _DASH = "—"
 
 
+def format_trend(trend: Optional[Dict]) -> Optional[Tuple[str, str]]:
+    """('▲ 2.1 pts vs previous 7 days', 'up'), ('▼ 0.8 pts …', 'down') or ('▬ no change …', 'flat'); None when there is no trend to show."""
+    if not trend:
+        return None
+    delta, days = trend["delta_pts"], trend["days"]
+    if delta > 0:
+        return f"▲ {delta:.1f} pts vs previous {days} days", "up"
+    if delta < 0:
+        return f"▼ {abs(delta):.1f} pts vs previous {days} days", "down"
+    return f"▬ no change vs previous {days} days", "flat"
+
+
+def trend_help(trend: Optional[Dict]) -> str:
+    """The tooltip on the Reply rate card: the two periods behind the change, and why the latest one can still move."""
+    if not trend:
+        return ""
+    days = trend["days"]
+    return (f"Share of emails answered so far. Last {days} days: {format_rate(trend['current_rate'])} of {trend['sent_current']} emails. "
+            f"The {days} days before: {format_rate(trend['previous_rate'])} of {trend['sent_previous']} emails. Replies can take several days to arrive, "
+            "so the most recent days are still filling in and their rate may rise.")
+
+
 def headline_figures(perf: Dict) -> List[Dict]:
     """The ten headline figures in the order the page shows them (six on the first row, four on the second), each as
     {label, value, caption, help}."""
     n_replies = len(perf["reply_hours"])
-    return [
+    trend = perf.get("reply_trend")
+    figures = [
         {"label": "Contacted", "value": perf["contacted"], "caption": f"of {perf['total_leads']} leads · {perf['pending']} not yet contacted", "help": ""},
         {"label": "Emails sent", "value": perf["sent"], "caption": f"{perf['send_failures']} failed" if perf["send_failures"] else "", "help": ""},
-        {"label": "Reply rate", "value": format_rate(perf["reply_rate"]), "caption": f"{perf['replies']} replied", "help": ""},
+        {"label": "Reply rate", "value": format_rate(perf["reply_rate"]), "caption": f"{perf['replies']} replied", "help": trend_help(trend)},
         {"label": "Positive replies", "value": perf["positive"], "caption": f"{format_rate(perf['positive_rate'])} of contacted",
          "help": "Replies the AI read as Interested. Replies without an AI reading are counted under 'Not classified' below."},
         {"label": "Negotiating", "value": _DASH if perf["negotiating"] is None else perf["negotiating"], "caption": "from the Asana sync",
@@ -34,6 +57,9 @@ def headline_figures(perf: Dict) -> List[Dict]:
         {"label": "Hard bounce rate", "value": format_rate(perf["bounce_rate_hard"]), "caption": f"{perf['bounced_hard']} bounced", "help": ""},
         {"label": "Sequence completion", "value": format_rate(perf["sequence_completion"]), "caption": f"{perf['completed']} reached the final stage", "help": ""},
     ]
+    for figure in figures:
+        figure["trend"] = format_trend(trend) if figure["label"] == "Reply rate" else None
+    return figures
 
 
 def export_filename(name: str) -> str:
@@ -63,7 +89,7 @@ def build_performance_csv(perf: Dict, title: str = "Performance") -> str:
             writer.writerow([safe_cell(cell) for cell in row])
 
     writer.writerow([safe_cell(f"{title} — Performance")])
-    section("Headline figures", ["Figure", "Value", "Note"], [[f["label"], f["value"], f["caption"]] for f in headline_figures(perf)])
+    section("Headline figures", ["Figure", "Value", "Note"], [[f["label"], f["value"], f["caption"] + (f" · {f['trend'][0]}" if f["trend"] else "")] for f in headline_figures(perf)])
     section("What the replies say", ["Reading", "Creators"], [[label, perf["intents"][label]] for label in INTENT_ORDER] + [[INTENT_NOT_CLASSIFIED, perf["intents"][INTENT_NOT_CLASSIFIED]]])
     rate_header = ["Emails sent", "Replies", "Reply rate", "Positive", "Positive rate"]
     rate = lambda r: [r["sent"], r["replies"], format_rate(r["reply_rate"]), r["positive"], format_rate(r["positive_rate"])]      # noqa: E731
