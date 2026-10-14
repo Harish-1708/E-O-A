@@ -1461,3 +1461,40 @@ def test_a_stored_keyword_yes_or_no_counts_as_a_clear_reading():
     _stored_keywords(ws, "rA2", "Not Interested")
     with hub(ws) as (at, _):
         assert _header(at)["chips"][-1] == "👎 Not interested · by keywords"       # newer than her earlier AI-read yes
+
+
+# ================================================================ "Mark all read" on the all-campaigns Responses page
+
+def _unread_response_keys(ws):
+    """Every reply in every campaign's Response Sheet that the Sheet itself does not already call read, as the page keys it ('campaign:ResponseID')."""
+    keys = set()
+    for name, sheet in ws.items():
+        if name.endswith(" Response Sheet"):
+            campaign = name[: -len(" Response Sheet")]
+            keys |= {f"{campaign}:{r['ResponseID']}" for r in sheet._records if str(r.get("IsRead") or "").strip().lower() not in ("yes", "true", "1")}
+    return keys
+
+
+def test_the_all_campaigns_page_marks_every_unread_conversation_of_every_campaign_read_in_one_go():
+    ws = _two_campaign_ws()
+    expected = _unread_response_keys(ws)
+    assert expected and len({k.split(":")[0] for k in expected}) == 2                      # the premise: unread replies in BOTH campaigns
+    with hub(ws) as (at, captured):
+        popover = next(p for p in at.get("popover") if p.proto.popover.label == "✓ Mark all read")
+        assert popover.proto.popover.disabled is False
+        at.button(key="hub_markall_go").click()
+        at.run(timeout=25)
+        assert list(at.exception) == [] and list(at.error) == []
+        assert at.session_state["read_response_keys"] == expected and at.session_state["pending_sync_keys"] == expected
+        assert any(s.value.startswith("Marked ") and "as read" in s.value for s in at.success)
+        assert any(b.label == f"🔄 Sync read status ({len(expected)} pending)" for b in at.button)
+        assert captured.get("commits", []) == [] and captured.get("dispatches", []) == []   # nothing is written until Sync is pressed
+
+
+def test_the_campaign_tab_and_the_all_campaigns_page_use_the_same_control_with_the_same_wording():
+    with _campaign_tab() as (at, _):
+        tab_go = at.button(key=f"{TAB}_markall_go")
+        assert tab_go.label.startswith("✓ Mark ") and tab_go.label.endswith(" as read")
+    with hub() as (at, _):
+        hub_go = at.button(key="hub_markall_go")
+        assert hub_go.label.startswith("✓ Mark ") and hub_go.label.endswith(" as read")
