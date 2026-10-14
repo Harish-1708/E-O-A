@@ -223,6 +223,13 @@ def group_unread_count(group: Dict, read_keys: Set[str]) -> int:
     return sum(1 for r in group["messages"] if not is_response_read(r, read_keys))
 
 
+def count_unread_conversations(responses: List[Dict], read_keys: Set[str]) -> int:
+    """How many CONVERSATIONS (one per lead) still have at least one unread reply — the number the Inbox's own 'Unread' item shows, and the number on the
+    campaign's Responses tab. A lead who wrote six times with all six unread counts once. `responses` must already carry their campaign
+    (tag_responses_with_campaign), because a reply's read key includes it."""
+    return sum(1 for group in group_responses_by_lead(responses) if group_unread_count(group, read_keys) > 0)
+
+
 def all_response_keys_in_group(group: Dict) -> List[str]:
     """Every message's own key within one conversation — used so
     "mark as read" acts on the WHOLE conversation at once, matching
