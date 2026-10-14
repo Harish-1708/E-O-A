@@ -758,14 +758,18 @@ def _fetch_live_stages_and_variants(client, campaign_name, stage_wait_days=None)
     return outreach.parse_stages_and_variants_from_filenames(filenames, stage_wait_days or {})
 
 
-def _live_stage_wait_days():
-    """The stage_wait_days DEFAULTS from settings.yaml — safe to read
-    from the local checkout because, unlike campaign config or template
-    files, the app never writes this file, so it can never go stale the
-    way those can. There is currently no per-campaign override for
-    this, so the default is the only source of truth."""
+def _live_stage_wait_days(campaign_cfg=None):
+    """The follow-up waits for a campaign: the shared table in settings.yaml (safe to read from the local checkout, because the app never writes that file,
+    so it cannot go stale), with this campaign's OWN waits laid over it. Those are already live: campaign_cfg has had the live override file merged in."""
     settings = outreach.load_settings(SETTINGS_PATH)
-    return dict(settings.get("default_campaign_settings", {}).get("stage_wait_days", {}))
+    waits = dict(settings.get("default_campaign_settings", {}).get("stage_wait_days", {}))
+    own = (campaign_cfg or {}).get("stage_wait_days")
+    if isinstance(own, dict):
+        try:
+            waits.update(outreach.parse_stage_wait_overrides((campaign_cfg or {}).get("_campaign_name", ""), own))
+        except outreach.ConfigError:
+            pass                                                         # a value the engine would refuse is not shown; the engine reports it itself
+    return waits
 
 
 def _fetch_live_template_content(client, campaign_name, stage_prefix, variant):
@@ -1496,7 +1500,7 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
     if _github_client_for_stages is not None:
         try:
             live_stages, live_variants = _fetch_live_stages_and_variants(
-                _github_client_for_stages, campaign_name, _live_stage_wait_days())
+                _github_client_for_stages, campaign_name, _live_stage_wait_days(campaign_cfg))
             if live_stages and live_variants:
                 campaign_cfg["stages"] = live_stages
                 campaign_cfg["variants"] = live_variants
