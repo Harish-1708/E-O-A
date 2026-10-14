@@ -15,8 +15,10 @@ import schedule_html as H
 import schedule_view_logic as L
 from campaign_header_logic import daily_limit, sent_today
 from github_client import GitHubActionsError
-from schedule_logic import COMMON_TIMEZONES, DAY_OPTIONS, build_updated_schedule_override, get_current_schedule, timezone_display_name, validate_schedule
-from settings_logic import load_raw_override, override_file_path, override_to_yaml_bytes
+import outreach
+from schedule_logic import (COMMON_TIMEZONES, DAY_OPTIONS, build_updated_schedule_override, build_updated_stage_waits_override, get_current_schedule, timezone_display_name,
+                            validate_schedule, validate_stage_waits)
+from settings_logic import load_raw_override_live, override_file_path, override_to_yaml_bytes
 
 
 @dataclass
@@ -48,8 +50,7 @@ def render_schedule_tab(ctx: ScheduleContext) -> None:
     left, right = st.columns([1.55, 1], gap="large")
     with left:
         _render_form(ctx)
-        stages = ctx.campaign_cfg.get("stages") or []
-        st.markdown(H.waits_card_html(L.wait_rows(stages)), unsafe_allow_html=True)
+        _render_waits(ctx)
     with right:
         _render_cards(ctx)
 
@@ -101,9 +102,9 @@ def _render_form(ctx: ScheduleContext) -> None:
                     st.error(e)
             else:
                 try:
-                    raw_override = load_raw_override(campaign_name, ctx.campaigns_dir)
-                    updated = build_updated_schedule_override(raw_override, selected_timezone, window_start, window_end, send_days)
                     client = ctx.get_client()
+                    raw_override = load_raw_override_live(campaign_name, client, ctx.campaigns_dir)             # the LIVE file, not a possibly stale local copy
+                    updated = build_updated_schedule_override(raw_override, selected_timezone, window_start, window_end, send_days)
                     client.create_file(
                         override_file_path(campaign_name), override_to_yaml_bytes(updated),
                         message=f"Update schedule for {campaign_name} (via Streamlit, by {ctx.current_user()})",
@@ -112,6 +113,59 @@ def _render_form(ctx: ScheduleContext) -> None:
                                "redeploys — it's in effect for sending immediately either way.")
                 except GitHubActionsError as exc:
                     st.error(f"Save failed: {exc}")
+
+
+# ---------------------------------------------------------------- left: the follow-up waits
+
+def _render_waits(ctx: ScheduleContext) -> None:
+    """Each follow-up's wait, editable: a number box (- and + buttons, or type) per follow-up. Nothing is saved until 'Save waits'. Saving reads the LIVE
+    settings file and changes only 'stage_wait_days', so it can never undo a schedule saved a moment earlier."""
+    campaign_name = ctx.campaign_cfg["_campaign_name"]
+    rows = L.wait_edit_rows(ctx.campaign_cfg.get("stages") or [])
+    with st.container(key="sc_waits"):
+        st.markdown(H.waits_heading_html(), unsafe_allow_html=True)
+        if not rows:
+            st.markdown(H.waits_empty_html(), unsafe_allow_html=True)
+            return
+        widths = [1.1, 1.2, 2.5]
+        for column, text in zip(st.columns(widths), ("Stage", "Wait (days)", "Sends on")):
+            column.markdown(H.waits_header_html(text), unsafe_allow_html=True)
+        keys = {row["prefix"]: f"wait_{campaign_name}_{row['prefix']}" for row in rows}           # per campaign: switching campaigns must never carry a value over
+        values: Dict[str, int] = {}
+        for index, row in enumerate(rows):
+            with st.container(key=f"sc_waitrow_{index}"):
+                label_column, input_column, info_column = st.columns(widths)
+                with input_column:
+                    values[row["prefix"]] = int(st.number_input(f"Days before {row['label']}", min_value=0, max_value=outreach.MAX_STAGE_WAIT_DAYS, value=row["saved"] or 0, step=1,
+                                                                format="%d", key=keys[row["prefix"]], label_visibility="collapsed"))
+                described = L.describe_waits(rows[:index + 1], values)[-1]               # a row's day only needs the waits above it and its own
+                label_column.markdown(H.wait_stage_html(row["label"]), unsafe_allow_html=True)
+                info_column.markdown(H.wait_sends_on_html(described["sends_on"], described["day"]), unsafe_allow_html=True)
+        changes = L.changed_waits(rows, values)
+        if changes:
+            st.caption("Not saved yet: " + ", ".join(f"{c['label']} {'was ' + str(c['was']) + ' days, now' if c['was'] is not None else 'now'} {c['now']} day{'' if c['now'] == 1 else 's'}" for c in changes) + ".")
+        if L.shortened(changes):
+            st.warning("A shorter wait can make leads due straight away: they go out on the next run, up to the daily limit.")
+        with st.container(key="sc_savewaits"):
+            save_clicked = st.button("💾 Save waits", type="primary", disabled=not changes, key="sc_savewaits_button")
+        st.caption("Applies from the next hourly run, to every lead already waiting for that follow-up.")
+        if save_clicked:
+            errors = validate_stage_waits(values, {row["prefix"]: row["label"] for row in rows})
+            if errors:
+                for e in errors:
+                    st.error(e)
+                return
+            try:
+                client = ctx.get_client()
+                raw_override = load_raw_override_live(campaign_name, client, ctx.campaigns_dir)
+                updated = build_updated_stage_waits_override(raw_override, values)
+                client.create_file(
+                    override_file_path(campaign_name), override_to_yaml_bytes(updated),
+                    message=f"Update follow-up waits for {campaign_name} (via Streamlit, by {ctx.current_user()})",
+                )
+                st.success("Follow-up waits saved. May take a minute to actually reflect here while the app redeploys — they are in effect for sending from the next run.")
+            except GitHubActionsError as exc:
+                st.error(f"Save failed: {exc}")
 
 
 # ---------------------------------------------------------------- right: what is happening
