@@ -95,7 +95,9 @@ def has_content_changed(original: Dict[str, str], edited_subject: str, edited_bo
     """Whether an edited variant actually differs from what's on disk —
     used to decide what belongs in the batched Save commit, so an
     untouched variant a user merely glanced at never gets re-committed."""
-    return original.get("subject", "") != edited_subject.strip() or original.get("body", "") != edited_body.strip()
+    # Both sides are trimmed: every file this app writes ends with a newline, which the parser keeps, so comparing the saved text as stored against the
+    # trimmed edit made an untouched variant look "changed".
+    return original.get("subject", "").strip() != edited_subject.strip() or original.get("body", "").strip() != edited_body.strip()
 
 
 def can_delete_stage(stages: List[Dict], stage_prefix: str) -> Tuple[bool, str]:
