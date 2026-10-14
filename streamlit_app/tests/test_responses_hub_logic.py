@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from responses_hub_logic import (
@@ -503,3 +505,50 @@ def test_filter_groups_by_unread_all_filter_is_a_no_op():
     groups = group_responses_by_lead(responses)
     result = filter_groups_by_unread(groups, INBOX_FILTER_ALL, set())
     assert len(result) == 1
+
+
+# ================================================================ unread CONVERSATIONS (one per lead), not unread emails
+
+from responses_hub_logic import count_unread_conversations  # noqa: E402
+
+
+def _reply(response_id, lead_id, campaign="Camp", read="", at="2026-10-01 09:00:00"):
+    return {"ResponseID": response_id, "LeadID": str(lead_id), "_campaign": campaign, "IsRead": read, "ReceivedAt": at, "Classification": "Genuine Reply"}
+
+
+def test_a_lead_who_wrote_many_times_counts_once_not_once_per_email():
+    """REGRESSION: the Responses tab said 255 when there were 55 leads — it was counting every email, not every lead."""
+    replies = [_reply(f"A{i}", 1) for i in range(6)] + [_reply("B1", 2)] + [_reply(f"C{i}", 3) for i in range(4)]
+    assert count_unread(replies, set()) == 11 and count_unread_conversations(replies, set()) == 3
+
+
+def test_a_conversation_is_unread_while_any_one_reply_in_it_is_unread():
+    replies = [_reply("A1", 1, read="Yes"), _reply("A2", 1, read="Yes"), _reply("A3", 1), _reply("B1", 2, read="Yes")]
+    assert count_unread_conversations(replies, set()) == 1                                    # lead 1 has one unread among three; lead 2 is fully read
+
+
+def test_a_conversation_is_read_only_when_every_reply_in_it_is_read():
+    replies = [_reply("A1", 1), _reply("A2", 1), _reply("A3", 1)]
+    assert count_unread_conversations(replies, {"Camp:A1", "Camp:A2"}) == 1                     # two of three read: still unread
+    assert count_unread_conversations(replies, {"Camp:A1", "Camp:A2", "Camp:A3"}) == 0
+
+
+@pytest.mark.parametrize("flag, unread", [("Yes", 0), ("yes", 0), ("TRUE", 0), ("1", 0), ("", 1), ("No", 1), ("0", 1)])
+def test_the_sheets_read_flag_decides_it_for_a_single_reply_conversation(flag, unread):
+    assert count_unread_conversations([_reply("A1", 1, read=flag)], set()) == unread
+
+
+def test_replies_marked_read_in_another_campaign_do_not_count_here():
+    assert count_unread_conversations([_reply("A1", 1)], {"Other:A1"}) == 1
+
+
+def test_two_leads_with_the_same_reply_id_in_different_campaigns_are_told_apart():
+    replies = [_reply("R1", 1, campaign="One"), _reply("R1", 2, campaign="Two")]
+    assert count_unread_conversations(replies, {"One:R1"}) == 1
+
+
+def test_nothing_at_all_is_zero_and_the_count_matches_the_groups_the_inbox_draws():
+    assert count_unread_conversations([], set()) == 0
+    replies = [_reply("A1", 1), _reply("A2", 1), _reply("B1", 2, read="Yes"), _reply("C1", 3)]
+    groups = group_responses_by_lead(replies)
+    assert count_unread_conversations(replies, set()) == sum(1 for g in groups if group_unread_count(g, set()) > 0) == 2
