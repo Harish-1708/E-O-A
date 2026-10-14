@@ -1844,6 +1844,32 @@ def _mock_github_writes():
     return captured, fake_create_file
 
 
+def _open_add_variant(at):
+    """Sequences: the add-variant form opens from the editor's '＋ Add variant' button (if it is already open there is no such button, and nothing to do)."""
+    buttons = [b for b in at.button if b.key == "sq_add_variant_button"]
+    if buttons:
+        buttons[0].click()
+        at.run(timeout=15)
+
+
+def _open_add_stage(at):
+    """Sequences: the add-stage form opens from the stage list's '＋ Add a follow-up stage' button (a form that is already open stays open)."""
+    buttons = [b for b in at.button if b.key == "sq_add_stage_button" and not b.disabled]
+    if buttons:
+        buttons[0].click()
+        at.run(timeout=15)
+
+
+def _pick_stage(at, index):
+    next(b for b in at.button if b.key == f"sq_pick_{index}").click()
+    at.run(timeout=15)
+
+
+def _pick_variant(at, letter):
+    next(r for r in at.radio if (r.key or "").startswith("sq_variant_")).set_value(letter)
+    at.run(timeout=15)
+
+
 def test_sequences_tab_template_content_reads_live_not_from_local_disk(fixture_repo):
     """The other half of the reported problem: not just stage/variant
     counts going stale, but the actual template TEXT showing an old
@@ -1896,23 +1922,26 @@ def test_sequences_tab_shows_locked_variants_for_real_campaign(fixture_repo):
         at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
         at.run(timeout=15)
 
-    assert list(at.exception) == [], f"Sequences tab raised: {list(at.exception)}"
-    assert list(at.error) == []
-    # The fixture campaign has 5 stages x 4 variants = 20 "Variant X" expanders
-    variant_expanders = [e for e in at.expander if e.label.startswith("Variant ")]
-    assert len(variant_expanders) == 20
-    # Every EXISTING variant's own editor starts disabled (locked) — keyed
-    # "subject_{stage}_{variant}" specifically. Filtering by key rather than
-    # by label is what's needed here: the page also renders live, correctly
-    # ENABLED subject inputs elsewhere (adding a new variant to an existing
-    # stage, or — once a campaign isn't yet at the current stage cap, which
-    # this fixture no longer is now that the cap is 10 follow-ups, not 4 —
-    # adding a brand new follow-up stage). A label-based filter can't tell
-    # those apart from the locked ones, since Streamlit renders every tab's
-    # content regardless of which is visually selected.
-    subject_inputs = [ti for ti in at.text_input if ti.key and ti.key.startswith("subject_")]
-    assert len(subject_inputs) == 20
-    assert all(ti.disabled for ti in subject_inputs)
+        assert list(at.exception) == [], f"Sequences tab raised: {list(at.exception)}"
+        assert list(at.error) == []
+        # The fixture campaign has 5 stages x 4 variants. The stage list shows all 5; the editor shows ONE variant at a time.
+        assert [b.key for b in at.button if (b.key or "").startswith("sq_pick_")] == [f"sq_pick_{i}" for i in range(5)]
+        assert next(r for r in at.radio if (r.key or "").startswith("sq_variant_")).options == ["Variant A", "Variant B", "Variant C", "Variant D"]
+        # EVERY stage x variant — all 20 — starts locked: its inputs disabled and its unlock box unticked.
+        prefixes = ["intro", "followup1", "followup2", "followup3", "followup4"]
+        seen = []
+        for index, prefix in enumerate(prefixes):
+            _pick_stage(at, index)
+            for letter in "ABCD":
+                _pick_variant(at, letter)
+                subjects = [ti for ti in at.text_input if (ti.key or "").startswith("subject_")]
+                bodies = [ta for ta in at.text_area if (ta.key or "").startswith("body_")]
+                unlocks = [cb for cb in at.checkbox if (cb.key or "").startswith("unlock_")]
+                assert [ti.key for ti in subjects] == [f"subject_{prefix}_{letter}"] and subjects[0].disabled is True
+                assert [ta.key for ta in bodies] == [f"body_{prefix}_{letter}"] and bodies[0].disabled is True
+                assert [cb.key for cb in unlocks] == [f"unlock_{prefix}_{letter}"] and unlocks[0].value is False
+                seen.append((prefix, letter))
+        assert len(seen) == 20 and list(at.exception) == []
 
 
 def test_sequences_tab_intro_subject_label_never_says_continues_thread(fixture_repo):
@@ -1992,7 +2021,7 @@ def test_sequences_tab_unlock_and_save_edits_one_variant(fixture_repo):
         subject_input.set_value("A brand new intro subject")
         at.run(timeout=15)
 
-        save_button = next(b for b in at.button if b.label.startswith("💾 Save Changes"))
+        save_button = next(b for b in at.button if b.label.startswith("💾 Save changes"))
         save_button.click()
         at.run(timeout=15)
 
@@ -2005,9 +2034,8 @@ def test_sequences_tab_unlock_and_save_edits_one_variant(fixture_repo):
 
 
 def test_sequences_tab_locked_variant_edit_is_not_saved(fixture_repo):
-    """Typing into a field while still locked must never reach Save —
-    the disabled widget shouldn't even accept the value, but this proves
-    the end-to-end behavior regardless of how disabling is implemented."""
+    """Typing into a variant and then LOCKING it again must never reach Save: only unlocked edits count. (A locked field cannot even be typed
+    into — the test framework refuses, as a browser would — so the edit is made while unlocked and the variant is locked again afterwards.)"""
     fake_spreadsheet = FakeSpreadsheet(_campaigns_page_fake_ws())
     captured, fake_create_file = _mock_github_writes()
 
@@ -2021,11 +2049,25 @@ def test_sequences_tab_locked_variant_edit_is_not_saved(fixture_repo):
         at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
         at.run(timeout=15)
 
-    assert list(at.exception) == []
-    # No "Save Changes" button should even appear — nothing is unlocked, so
-    # nothing can be pending.
-    save_buttons = [b for b in at.button if b.label.startswith("💾 Save Changes")]
-    assert save_buttons == []
+        # Locked from the start: nothing pending, the one Save button is there but disabled and counts 0.
+        save = next(b for b in at.button if b.key == "sq_save_button")
+        assert save.disabled is True and save.label == "💾 Save changes (0)"
+
+        next(cb for cb in at.checkbox if cb.key == "unlock_intro_A").set_value(True)
+        at.run(timeout=15)
+        next(ti for ti in at.text_input if ti.key == "subject_intro_A").set_value("typed while unlocked")
+        at.run(timeout=15)
+        save = next(b for b in at.button if b.key == "sq_save_button")
+        assert save.disabled is False and save.label == "💾 Save changes (1)"                  # the edit counts while unlocked …
+
+        next(cb for cb in at.checkbox if cb.key == "unlock_intro_A").set_value(False)           # … and stops counting the moment it is locked again
+        at.run(timeout=15)
+
+    assert list(at.exception) == [] and list(at.error) == []
+    save = next(b for b in at.button if b.key == "sq_save_button")
+    assert save.disabled is True and save.label == "💾 Save changes (0)"
+    assert at.session_state["seq_state"][FIXTURE_CAMPAIGN]["drafts"] == {}
+    assert captured.get("commits", []) == []
 
 
 def test_sequences_tab_add_variant_maxed_out_for_real_campaign(fixture_repo):
@@ -2041,7 +2083,7 @@ def test_sequences_tab_add_variant_maxed_out_for_real_campaign(fixture_repo):
         at.run(timeout=15)
 
     assert list(at.exception) == []
-    info_texts = " ".join(i.value for i in at.info)
+    info_texts = " ".join(c.value for c in at.caption)                       # the message now sits beside the (disabled) Add variant button
     # This test is specifically about ADDING A VARIANT being maxed out
     # (all 4 letters A-D already exist on every stage this fixture has)
     # — a completely separate concept from ADDING A STAGE being maxed
@@ -2088,7 +2130,8 @@ def test_sequences_tab_successive_add_variant_never_carries_over_prior_content(t
         at.session_state["selected_campaign"] = "SeqCarryoverCampaign"
         at.run(timeout=15)
 
-        # Type distinct content into "Add Variant B" and submit it.
+        # Open the "Add variant" form, type distinct content into "Add Variant B" and submit it.
+        _open_add_variant(at)
         subject_b = next(ti for ti in at.text_input if (ti.key or "").endswith("_B"))
         subject_b.set_value("Variant B's own subject")
         at.run(timeout=15)
@@ -2102,6 +2145,7 @@ def test_sequences_tab_successive_add_variant_never_carries_over_prior_content(t
         at.run(timeout=15)
 
         # Now "Add Variant C" must start completely blank.
+        _open_add_variant(at)
         subject_c = next(ti for ti in at.text_input if (ti.key or "").endswith("_C"))
         assert subject_c.value in ("", None)
 
@@ -2149,8 +2193,8 @@ def test_sequences_tab_successive_add_stage_never_carries_over_prior_content(tmp
         at.session_state["selected_campaign"] = "StageCarryoverCampaign"
         at.run(timeout=15)
 
-        # Type distinct content into followup5's own "Add a follow-up
-        # stage" form and submit it.
+        # Open the "Add a follow-up stage" form, type distinct content into followup5's own form and submit it.
+        _open_add_stage(at)
         assert any("followup5" in ti.key for ti in at.text_input if ti.key)
         subject_f5 = next(ti for ti in at.text_input if (ti.key or "").startswith("followup_subject_") and
                            "followup5" in ti.key)
@@ -2167,6 +2211,7 @@ def test_sequences_tab_successive_add_stage_never_carries_over_prior_content(tmp
 
         # Now "Add a follow-up stage" for followup6 must start completely
         # blank — never pre-filled with followup5's own subject.
+        _open_add_stage(at)
         subject_f6 = next(ti for ti in at.text_input if (ti.key or "").startswith("followup_subject_") and
                            "followup6" in ti.key)
         assert subject_f6.value in ("", None)
@@ -2206,6 +2251,7 @@ def test_sequences_tab_successive_add_stage_never_carries_over_prior_content(tmp
         at.session_state["selected_campaign"] = "PartialSeqCampaign"
         at.run(timeout=15)
 
+        _open_add_variant(at)
         add_button = next((b for b in at.button if b.label == "Add Variant B"), None)
         assert add_button is not None, "Expected an 'Add Variant B' button for a 1-variant campaign"
         add_button.click()  # click with everything still blank — should show validation errors, not commit
@@ -2771,7 +2817,7 @@ def test_delete_variant_actually_deletes_every_stage_file(tmp_path, fixture_repo
         at.run(timeout=15)
 
         # Default selectbox value is the first variant, "A".
-        confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "confirm_delete_variant")
+        confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "confirm_delete_variant_A")
         confirm_checkbox.set_value(True)
         at.run(timeout=15)
 
@@ -2805,8 +2851,10 @@ def test_delete_stage_only_offered_for_the_last_stage(fixture_repo):
     assert list(at.exception) == []
     delete_stage_button = next(b for b in at.button if b.key == "delete_stage_button")
     assert delete_stage_button.disabled is True  # confirm checkbox not checked yet
-    markdown_text = " ".join(m.value for m in at.markdown)
-    assert "followup4" in markdown_text  # offered stage is genuinely the last one
+    # the offer to delete names the genuinely last stage: the button, the tick box and the warning all say followup4
+    assert delete_stage_button.label == "Delete followup4"
+    assert [cb.label for cb in at.checkbox if (cb.key or "").startswith("confirm_delete_stage_")] == ["I understand, delete followup4"]
+    assert any("'followup4'" in w.value for w in at.warning)
 
 
 def test_delete_stage_blocks_when_live_structure_is_already_inconsistent(fixture_repo):
@@ -2918,7 +2966,7 @@ def test_delete_stage_actually_deletes_all_variant_files_for_it(fixture_repo):
         at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
         at.run(timeout=15)
 
-        confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "confirm_delete_stage")
+        confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "confirm_delete_stage_followup4")
         confirm_checkbox.set_value(True)
         at.run(timeout=15)
 
@@ -3872,5 +3920,3 @@ def test_responses_hub_check_replies_button_triggers_every_campaign(fixture_repo
     assert list(at.exception) == []
     assert list(at.error) == []
     assert dispatched == [("check_replies.yml", FIXTURE_CAMPAIGN)]
-
-
