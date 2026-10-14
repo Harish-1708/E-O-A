@@ -198,7 +198,7 @@ def _render_editor(ctx, client, campaign_name, stages, variants, state) -> Optio
         editing_now = bool(st.session_state.get(unlock_key, draft is not None))
         if original is not None:
             with st.container(key="sq_unlock"):
-                unlocked = st.checkbox("🔓 Editing" if editing_now else "🔒 Locked — tick to edit", key=unlock_key, value=draft is not None)
+                unlocked = st.checkbox("🔓 Unlocked" if editing_now else "🔒 Locked", key=unlock_key, value=draft is not None)
         st.markdown(H.editor_title_html(humanize_stage(prefix)), unsafe_allow_html=True)
         with st.container(key="sq_variantbar"):
             st.radio("Variant", variants, key=variant_key, horizontal=True, label_visibility="collapsed", format_func=lambda letter: f"Variant {letter}")
@@ -212,7 +212,7 @@ def _render_editor(ctx, client, campaign_name, stages, variants, state) -> Optio
             return None
 
         rows = (ctx.perf or {}).get("variant_stage_rows") or []
-        st.markdown(H.stats_chips_html(L.variant_stats(rows, prefix, variant)), unsafe_allow_html=True)
+        st.markdown(H.stats_chips_html(L.variant_stats(rows, prefix, variant), f"{humanize_stage(prefix)} · Variant {variant}"), unsafe_allow_html=True)
 
         subject_label = "Subject (required — this is the first stage)" if is_first_stage else "Subject (blank continues the previous thread)"
         subject = st.text_input(subject_label, value=draft["subject"] if draft else original["subject"], key=subject_key, disabled=not unlocked)
