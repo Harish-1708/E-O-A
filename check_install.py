@@ -123,6 +123,10 @@ EXPECTED = {
 }
 
 
+# A file that is allowed to live in more than one place. The theme file works from either folder, so it is not "missing" when it is in the other one.
+ALSO_ACCEPTED = {".streamlit/config.toml": ["streamlit_app/.streamlit/config.toml"]}
+
+
 def digest(path):
     with open(path, "rb") as handle:
         return hashlib.sha256(handle.read().replace(b"\r\n", b"\n")).hexdigest()
@@ -134,12 +138,14 @@ def main():
         return 2
     stale, missing = [], []
     for path, expected in sorted(EXPECTED.items()):
-        if not os.path.exists(path):
+        places = [path] + ALSO_ACCEPTED.get(path, [])
+        found = [place for place in places if os.path.exists(place)]
+        if not found:
             missing.append(path)
-            print(f"MISSING  {path}")
-        elif digest(path) != expected:
+            print(f"MISSING  {path}" + (f"   (also looked in: {', '.join(places[1:])})" if len(places) > 1 else ""))
+        elif not any(digest(place) == expected for place in found):
             stale.append(path)
-            print(f"STALE    {path}")
+            print(f"STALE    {found[0]}")
     ok = len(EXPECTED) - len(stale) - len(missing)
     print(f"\n{ok} of {len(EXPECTED)} files are exactly the tested version.")
     if stale or missing:
