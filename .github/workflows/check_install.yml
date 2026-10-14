@@ -1,0 +1,24 @@
+name: Check install
+
+# Confirms that every file in the repo is exactly the version that was tested together, and says which file is not.
+# A failing test is almost always one file from a set that was not replaced (a new test against an old page, or the
+# reverse). This finds it in seconds and names it, instead of showing a confusing test failure.
+#
+# It needs nothing installed (Python's standard library only). To run it by hand: Actions tab > Check install > Run workflow.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Every file is the tested version
+        run: python check_install.py
