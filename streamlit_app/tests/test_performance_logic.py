@@ -547,3 +547,82 @@ def test_every_at_a_glance_column_shows_its_own_figure_each_number_distinct_so_n
         "Campaign": "Camp", "Status": "running", "Total leads": "7", "Contacted": "5", "Pending": "2", "Emails sent": "11",
         "Delivered (est.)": "8", "Hard bounces": "3", "Soft bounces": "1", "Replies": "4", "Reply rate": "80.0%",
         "Sequence completion": "40.0%"}
+
+
+# ================================================================ the 7-day reply-rate trend
+
+TODAY = date(2026, 3, 18)            # last 7 days: Mar 12 to Mar 18 · the 7 before: Mar 5 to Mar 11
+
+
+def _rows(count, day_text, first_lead, stage="intro"):
+    return [send(first_lead + i, stage, "A", f"{day_text} 10:00:00") for i in range(count)]
+
+
+def test_the_trend_compares_the_share_of_emails_answered_in_the_last_7_days_with_the_7_before():
+    rows = _rows(8, "2026-03-16", 1) + _rows(10, "2026-03-09", 11)
+    answered = {("1", "intro"), ("2", "intro"), ("11", "intro")}                 # 2 of the 8 recent emails, 1 of the 10 earlier ones
+    trend = pl.reply_rate_trend(rows, answered, TODAY)
+    assert trend == {"days": 7, "current_rate": 0.25, "previous_rate": 0.1, "delta_pts": 15.0, "sent_current": 8, "sent_previous": 10, "answered_current": 2, "answered_previous": 1}
+
+
+@pytest.mark.parametrize("stamp, period", [
+    ("2026-03-18 23:59:59", "current"), ("2026-03-12 00:00:00", "current"), ("2026-03-11 23:59:59", "previous"), ("2026-03-05 00:00:00", "previous"),
+    ("2026-03-04 23:59:59", None), ("2026-03-19 00:00:00", None),
+])
+def test_each_day_belongs_to_exactly_one_period_or_none(stamp, period):
+    """One email in the period under test, five anchors in each period to clear the minimum: it moves the counts only if it is in that period."""
+    anchors = _rows(5, "2026-03-14", 100) + _rows(5, "2026-03-07", 200)
+    trend = pl.reply_rate_trend(anchors + [send(1, "intro", "A", stamp)], set(), TODAY)
+    assert (trend["sent_current"], trend["sent_previous"]) == {"current": (6, 5), "previous": (5, 6), None: (5, 5)}[period]
+
+
+@pytest.mark.parametrize("recent, earlier, shown", [(5, 5, True), (4, 5, False), (5, 4, False), (0, 9, False), (9, 0, False), (0, 0, False), (50, 50, True)])
+def test_the_trend_needs_at_least_five_emails_in_both_weeks_and_is_hidden_otherwise(recent, earlier, shown):
+    rows = _rows(recent, "2026-03-16", 1) + _rows(earlier, "2026-03-09", 100)
+    assert (pl.reply_rate_trend(rows, set(), TODAY) is not None) is shown
+
+
+def test_the_minimum_can_be_changed_and_a_log_with_no_sends_gives_no_trend():
+    rows = _rows(2, "2026-03-16", 1) + _rows(2, "2026-03-09", 100)
+    assert pl.reply_rate_trend(rows, set(), TODAY) is None and pl.reply_rate_trend(rows, set(), TODAY, min_emails=2) is not None
+    assert pl.reply_rate_trend([], set(), TODAY) is None
+
+
+def test_an_email_counts_as_answered_only_when_the_reply_was_credited_to_that_very_email():
+    rows = _rows(5, "2026-03-16", 1) + _rows(5, "2026-03-09", 100)
+    credited_elsewhere = {("1", "followup1"), ("2", "intro" + "x"), ("999", "intro")}          # another stage, another name, another lead
+    assert pl.reply_rate_trend(rows, credited_elsewhere, TODAY)["answered_current"] == 0
+
+
+def test_rounding_direction_and_no_change():
+    up = pl.reply_rate_trend(_rows(3, "2026-03-16", 1) + _rows(4, "2026-03-16", 50) + _rows(4, "2026-03-09", 100), {("1", "intro"), ("50", "intro")}, TODAY, min_emails=3)
+    assert up["current_rate"] == 2 / 7 and up["previous_rate"] == 0.0
+    rows = _rows(3, "2026-03-16", 1) + _rows(4, "2026-03-09", 100)
+    third_vs_quarter = pl.reply_rate_trend(rows, {("1", "intro"), ("100", "intro")}, TODAY, min_emails=3)
+    assert third_vs_quarter["delta_pts"] == 8.3                                              # 33.33… − 25.00 = 8.33…, shown to one decimal
+    down = pl.reply_rate_trend(_rows(5, "2026-03-16", 1) + _rows(5, "2026-03-09", 100), {("1", "intro"), ("100", "intro"), ("101", "intro"), ("102", "intro")}, TODAY)
+    assert down["delta_pts"] == -40.0 and down["current_rate"] == 0.2 and down["previous_rate"] == 0.6          # 1 of 5 now against 3 of 5 before: 20% − 60%
+    flat = pl.reply_rate_trend(_rows(5, "2026-03-16", 1) + _rows(5, "2026-03-09", 100), {("1", "intro"), ("100", "intro")}, TODAY)
+    assert flat["delta_pts"] == 0.0
+
+
+def test_failed_sends_and_rows_with_bad_dates_are_not_emails_sent():
+    good = _rows(5, "2026-03-16", 1) + _rows(5, "2026-03-09", 100)
+    log = good + [send(1, "intro", "A", "2026-03-16 10:00:00", status="failed"), send(2, "intro", "A", "not a date"), send(3, "intro", "A", "")]
+    p = pl.build_campaign_performance(cfg(), [lead(i) for i in range(1, 4)], [], log, [], today=TODAY)
+    assert p["reply_trend"]["sent_current"] == 5 and p["reply_trend"]["sent_previous"] == 5
+
+
+def test_a_campaign_report_carries_the_trend_and_it_follows_the_same_credit_rules_as_the_rest():
+    """Recent: 6 emails, leads 1-2 answered (lead 1 by exact message id, lead 2 by timing). Earlier: 6 emails, lead 11 answered. 33.3% vs 16.7%."""
+    log = [send(i, "intro", "A", "2026-03-16 10:00:00", f"<m{i}@x>") for i in range(1, 7)] + [send(i, "intro", "B", "2026-03-09 10:00:00", f"<m{i}@x>") for i in range(11, 17)]
+    leads = [lead(i, **{sent_field(0): "2026-03-16 10:00:00" if i < 10 else "2026-03-09 10:00:00"}) for i in list(range(1, 7)) + list(range(11, 17))]
+    responses = [reply(1, "2026-03-17 09:00:00", in_reply_to="<m1@x>"), reply(2, "2026-03-18 09:00:00"), reply(11, "2026-03-10 09:00:00", in_reply_to="<m11@x>")]
+    trend = pl.build_campaign_performance(cfg(), leads, responses, log, [], today=TODAY)["reply_trend"]
+    assert (trend["sent_current"], trend["answered_current"], trend["sent_previous"], trend["answered_previous"]) == (6, 2, 6, 1) and trend["delta_pts"] == 16.7
+
+
+def test_the_trend_never_appears_in_the_all_campaigns_total():
+    log = _rows(6, "2026-03-16", 1) + _rows(6, "2026-03-09", 100)
+    one = pl.build_campaign_performance(cfg(), [lead(1)], [], log, [], today=TODAY)
+    assert one["reply_trend"] is not None and pl.combine_performance([one, one])["reply_trend"] is None
