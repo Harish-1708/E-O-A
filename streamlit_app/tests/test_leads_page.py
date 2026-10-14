@@ -646,15 +646,6 @@ def _expander_labels(at):
     return [e.label for e in at.expander]
 
 
-def test_the_toolbar_has_an_add_leads_button_and_the_import_panel_starts_collapsed_at_the_foot():
-    with data_tab([lead(1)]) as (at, _):
-        assert _has(at.button, "ld_add_leads") and next(b for b in at.button if b.key == "ld_add_leads").label == "＋ Add leads"
-        labels = _expander_labels(at)
-        assert labels.index(IMPORT_LABEL) > labels.index(COLUMNS_LABEL)                    # down at the foot, after the table's own sections
-        assert next(e for e in at.expander if e.label == IMPORT_LABEL).proto.expanded is False
-        assert not _has(at.button, "ld_import_close")
-
-
 def test_clicking_add_leads_opens_the_import_panel_right_under_the_toolbar_and_draws_it_only_once():
     with data_tab([lead(1)]) as (at, _):
         _click(at, "ld_add_leads")
@@ -662,15 +653,6 @@ def test_clicking_add_leads_opens_the_import_panel_right_under_the_toolbar_and_d
         labels = _expander_labels(at)
         assert labels.count(IMPORT_LABEL) == 1 and labels.index(IMPORT_LABEL) < labels.index(COLUMNS_LABEL)
         assert next(e for e in at.expander if e.label == IMPORT_LABEL).proto.expanded is True and _has(at.button, "ld_import_close")
-
-
-def test_closing_the_import_panel_puts_it_back_at_the_foot_collapsed():
-    with data_tab([lead(1)]) as (at, _):
-        _click(at, "ld_add_leads")
-        _click(at, "ld_import_close")
-        labels = _expander_labels(at)
-        assert labels.count(IMPORT_LABEL) == 1 and labels.index(IMPORT_LABEL) > labels.index(COLUMNS_LABEL)
-        assert next(e for e in at.expander if e.label == IMPORT_LABEL).proto.expanded is False and not _has(at.button, "ld_import_close")
 
 
 def test_a_csv_can_still_be_uploaded_and_mapped_when_the_panel_was_opened_from_the_toolbar():
@@ -698,3 +680,54 @@ def test_a_campaign_with_no_leads_has_no_toolbar_and_its_import_panel_is_already
     with data_tab([]) as (at, _):
         assert not _has(at.button, "ld_add_leads") and list(at.exception) == []
         assert next(e for e in at.expander if e.label == IMPORT_LABEL).proto.expanded is True
+
+
+DIAGNOSE_LABEL = "🔍 Diagnose: what is this page actually reading?"
+REMOVE_SEVERAL_LABEL = "🗑️ Remove several leads at once"
+
+
+def test_the_toolbar_has_an_add_leads_button_and_the_import_panel_is_not_on_the_page_until_it_is_pressed():
+    with data_tab([lead(1)]) as (at, _):
+        assert _has(at.button, "ld_add_leads") and next(b for b in at.button if b.key == "ld_add_leads").label == "＋ Add leads"
+        assert IMPORT_LABEL not in _expander_labels(at) and not _has(at.button, "ld_import_close") and not _has(at.file_uploader, "data_csv_upload")
+
+
+def test_closing_the_import_panel_removes_it_from_the_page_again():
+    with data_tab([lead(1)]) as (at, _):
+        _click(at, "ld_add_leads")
+        assert IMPORT_LABEL in _expander_labels(at)
+        _click(at, "ld_import_close")
+        assert IMPORT_LABEL not in _expander_labels(at) and not _has(at.button, "ld_import_close") and not _has(at.file_uploader, "data_csv_upload")
+
+
+def test_the_foot_of_the_data_tab_has_only_the_all_columns_and_remove_several_sections():
+    with data_tab([lead(1)]) as (at, _):
+        labels = _expander_labels(at)
+        i = labels.index(COLUMNS_LABEL)
+        assert labels[i:i + 2] == [COLUMNS_LABEL, REMOVE_SEVERAL_LABEL]                        # the Data tab's own sections, in this order …
+        assert labels[i + 2] not in (IMPORT_LABEL, DIAGNOSE_LABEL)                             # … and nothing of the removed ones after them (what follows belongs to other tabs)
+        assert not any("Approval is informational only" in c.value for c in at.caption)
+        assert IMPORT_LABEL not in labels
+
+
+def test_the_diagnose_tool_is_not_on_the_data_tab_but_lives_once_in_the_headers_more_menu():
+    with data_tab([lead(1)]) as (at, _):
+        labels = _expander_labels(at)
+        assert labels.count(DIAGNOSE_LABEL) == 1 and labels.index(DIAGNOSE_LABEL) < labels.index(COLUMNS_LABEL)          # in the header, before the tabs' own sections
+        assert sum(1 for b in at.button if b.key == "data_tab_live_diagnostic") == 1
+        more = at.get("popover")[1]
+        assert any(getattr(child, "label", "") == DIAGNOSE_LABEL for child in more.children.values())
+
+
+def test_a_campaign_with_no_leads_shows_the_import_panel_and_still_has_exactly_one_diagnose_tool():
+    with data_tab([]) as (at, _):
+        labels = _expander_labels(at)
+        assert list(at.exception) == [] and labels.count(DIAGNOSE_LABEL) == 1 and labels.count(IMPORT_LABEL) == 1
+        assert sum(1 for b in at.button if b.key == "data_tab_live_diagnostic") == 1
+
+
+def test_the_diagnose_tool_from_the_more_menu_still_compares_the_cached_and_the_live_lead_count():
+    with data_tab([lead(1), lead(2)]) as (at, _):
+        _click(at, "data_tab_live_diagnostic")
+        assert list(at.exception) == [] and any("Leads actually on the Sheet right now, read live:** 2" in m.value for m in at.markdown)
+        assert any("These numbers match" in i.value for i in at.info)
