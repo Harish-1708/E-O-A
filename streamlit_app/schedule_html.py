@@ -24,14 +24,26 @@ def strip_html(blocks: List[Dict]) -> str:
     return _one_line(f'<div class="sc-strip-title">Sending window across the day</div><div class="sc-strip" style="{columns}">{cells}</div><div class="sc-hours" style="{columns}">{labels}</div>')
 
 
-def waits_card_html(rows: List[Dict]) -> str:
-    """The follow-up waits: which stage, how long after the previous email, and what that means in words."""
-    body = "".join(f'<tr><td class="sc-stage">{esc(row["stage"])}</td><td><span class="sc-pill">{esc(row["wait"])}</span></td><td class="sc-muted">{esc(row["sends_on"])}</td></tr>'
-                   for row in rows)
-    table = (f'<table class="sc-table"><thead><tr><th>Stage</th><th>Wait</th><th>Sends on</th></tr></thead><tbody>{body}</tbody></table>' if rows
-             else '<div class="sc-muted sc-empty">This campaign has only its intro, so there are no follow-up waits.</div>')
-    return _one_line(f'<div class="sc-card"><div class="sc-title">Follow-up waits</div>'
-                     f'<div class="sc-sub">Days after the previous email. Counted in calendar days in this campaign\'s time zone.</div>{table}</div>')
+def waits_heading_html() -> str:
+    return _one_line('<div class="sc-title">Follow-up waits</div><div class="sc-sub">Days after the previous email. Counted in calendar days in this campaign\'s time zone.</div>')
+
+
+def waits_header_html(text: str) -> str:
+    """A column heading of the waits table: small grey capitals."""
+    return f'<div class="sc-th">{esc(text)}</div>'
+
+
+def wait_stage_html(label: str) -> str:
+    return f'<div class="sc-stage">{esc(label)}</div>'
+
+
+def wait_sends_on_html(sends_on: str, day: int) -> str:
+    """What the wait means in words, with the day it lands on counted from the intro."""
+    return _one_line(f'<div class="sc-wait-info">{esc(sends_on)}<span class="sc-day"> · day {esc(day)}</span></div>')
+
+
+def waits_empty_html() -> str:
+    return '<div class="sc-muted sc-empty">This campaign has only its intro, so there are no follow-up waits to set.</div>'
 
 
 def next_run_html(card: Optional[Dict], note: str = "") -> str:
@@ -101,18 +113,18 @@ SCHEDULE_CSS = """
 
 /* ---- the Save schedule button and its note */
 [class*="st-key-sc_save"] button { background: #2563eb !important; border: 1px solid #2563eb !important; color: #fff !important; border-radius: 9px !important; font-weight: 700 !important; }
+[class*="st-key-sc_save"] button:disabled { opacity: .45; }
 [class*="st-key-sc_saverow"] { margin-top: 20px; }
 .sc-save-note { color: #6b7280; font-size: 13.5px; padding-top: 9px; }
 
-/* ---- the follow-up waits table */
-.sc-table { width: 100%; border-collapse: collapse; border: 0 !important; margin-top: 8px; font-size: 14px; }
-.sc-table th, .sc-table td { border-left: 0 !important; border-right: 0 !important; border-top: 0 !important; }
-.sc-table th { text-align: left; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #6b7280; padding: 10px 10px; border-bottom: 1px solid #e5e7eb !important; background: transparent !important; }
-.sc-table td { padding: 14px 10px; border-bottom: 1px solid #f0f2f5 !important; color: #111827 !important; }
-.sc-table tr:last-child td { border-bottom: 0 !important; }
-.sc-table td.sc-stage { font-weight: 700; }
-.sc-table td.sc-muted { color: #6b7280 !important; }
-.sc-pill { display: inline-block; border: 1px solid #d1d5db; border-radius: 8px; padding: 4px 12px; font-size: 13.5px; color: #111827; background: #fff; }
+/* ---- the follow-up waits: a native container styled as a card, one row per follow-up with a number box (- and + buttons, or type) in the middle */
+[class*="st-key-sc_waits"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 20px 22px; margin-bottom: 14px; }
+.sc-th { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #6b7280; padding: 6px 0 4px; }
+[class*="st-key-sc_waitrow_"] { border-top: 1px solid #f0f2f5; padding: 6px 0; }
+.sc-stage { font-weight: 700; font-size: 14px; color: #111827; padding-top: 9px; }
+.sc-wait-info { font-size: 14px; color: #6b7280; padding-top: 9px; }
+.sc-day { color: #9ca3af; }
+[class*="st-key-wait_"] input { text-align: center; font-weight: 700; }
 
 /* ---- the cards on the right */
 .sc-next { background: linear-gradient(180deg, #f3f7ff, #fff); border-color: #c7d7fb; }
