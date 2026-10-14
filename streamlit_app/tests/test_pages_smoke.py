@@ -2996,7 +2996,7 @@ def test_schedule_tab_renders_sensible_defaults_for_unconfigured_campaign(fixtur
     assert list(at.error) == []
     tz_selector = next(sb for sb in at.selectbox if sb.label == "Time zone")
     assert tz_selector.value == "Pacific Time (US & Canada)"
-    start_input = next(ti for ti in at.text_input if "Start time" in ti.label)
+    start_input = next(ti for ti in at.text_input if ti.label == "Start")
     assert start_input.value == "09:00"
     day_checkboxes = {cb.label: cb.value for cb in at.checkbox if cb.key and cb.key.startswith("schedule_day_")}
     assert day_checkboxes["Mon"] is True
@@ -3029,7 +3029,7 @@ def test_schedule_tab_save_writes_correct_yaml_and_preserves_other_keys(tmp_path
         sat_checkbox.set_value(True)
         at.run(timeout=15)
 
-        save_button = next(b for b in at.button if b.label == "💾 Save Schedule")
+        save_button = next(b for b in at.button if b.label == "💾 Save schedule")
         save_button.click()
         at.run(timeout=15)
 
@@ -3063,7 +3063,7 @@ def test_schedule_tab_save_rejects_when_no_days_selected(fixture_repo):
             cb.set_value(False)
         at.run(timeout=15)
 
-        save_button = next(b for b in at.button if b.label == "💾 Save Schedule")
+        save_button = next(b for b in at.button if b.label == "💾 Save schedule")
         save_button.click()
         at.run(timeout=15)
 
