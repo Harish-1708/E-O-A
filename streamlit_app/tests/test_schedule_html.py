@@ -50,24 +50,6 @@ def test_the_strip_follows_however_many_hours_it_is_given():
     assert "repeat(24, 1fr)" in H.strip_html([{"hour": h, "active": True} for h in range(24)]) and "repeat(0, 1fr)" in H.strip_html([])
 
 
-def test_the_waits_card_lists_each_follow_up_with_its_wait_as_a_pill():
-    rows = [{"stage": "Follow-up 1", "wait": "2 days", "sends_on": "2 days after the intro"}, {"stage": "Follow-up 2", "wait": "3 days", "sends_on": "3 days after follow-up 1"}]
-    markup = H.waits_card_html(rows)
-    assert "Follow-up waits" in markup and "Days after the previous email. Counted in calendar days in this campaign's time zone." in markup
-    assert markup.count('<span class="sc-pill">') == 2 and '<td class="sc-stage">Follow-up 2</td>' in markup and "3 days after follow-up 1" in markup
-    assert [h for h in re.findall(r"<th>(.*?)</th>", markup)] == ["Stage", "Wait", "Sends on"]
-    _clean(markup)
-
-
-def test_with_no_follow_ups_the_card_says_so_instead_of_showing_an_empty_table():
-    markup = H.waits_card_html([])
-    assert "<table" not in markup and "only its intro" in markup
-
-
-def test_hostile_text_in_the_waits_is_shown_as_text_never_as_markup():
-    _clean(H.waits_card_html([{"stage": HOSTILE, "wait": HOSTILE, "sends_on": HOSTILE}]))
-
-
 def test_the_next_run_card_shows_the_time_the_wait_and_the_viewers_own_time():
     markup = H.next_run_html({"headline": "Today 2:15 PM EDT", "relative": "in 55 minutes", "viewer": "11:45 PM IST"})
     assert ">Next automatic run<" in markup and '<div class="sc-next-time">Today 2:15 PM EDT</div>' in markup and "in 55 minutes · <b>11:45 PM IST</b>" in markup
@@ -174,18 +156,63 @@ def test_the_open_window_is_green_and_the_closed_one_amber():
     assert "color: #15803d" in _rule(".sc-line b.sc-open {") and "color: #b45309" in _rule(".sc-closed {")
 
 
-def test_the_waits_table_has_small_grey_capital_headings_and_a_pill_for_each_wait():
-    assert "text-transform: uppercase" in _rule(".sc-table th {") and "border-radius: 8px" in _rule(".sc-pill {")
-
-
 def test_the_stylesheet_targets_streamlits_stable_attributes_not_its_generated_class_names():
     assert not re.search(r"st-emotion|\.e[0-9a-z]{6,}\b|css-[0-9a-z]+", CSS)
 
 
-def test_the_waits_table_has_only_horizontal_rules_like_the_design_not_streamlits_full_grid():
-    assert "border: 0 !important" in _rule(".sc-table {") and all(side in _rule(".sc-table th, .sc-table td {") for side in ("border-left: 0 !important", "border-right: 0 !important", "border-top: 0 !important"))
-    assert "border-bottom: 1px solid #e5e7eb !important" in _rule(".sc-table th { text-align") and "border-bottom: 1px solid #f0f2f5 !important" in _rule(".sc-table td { padding")
-
-
 def test_the_save_row_has_room_above_it_so_it_never_touches_the_hour_strip():
     assert "margin-top: 20px" in _rule('[class*="st-key-sc_saverow"] {') and "padding-top: 9px" in _rule(".sc-save-note {")
+
+
+# ================================================================ the editable follow-up waits card
+
+def test_the_waits_heading_says_what_the_waits_are_counted_in():
+    markup = H.waits_heading_html()
+    assert ">Follow-up waits<" in markup and "Days after the previous email. Counted in calendar days in this campaign's time zone." in markup and "\n" not in markup
+
+
+def test_each_row_has_its_stage_and_what_the_wait_means_in_words_with_the_day_it_lands_on():
+    assert H.wait_stage_html("Follow-up 2") == '<div class="sc-stage">Follow-up 2</div>'
+    markup = H.wait_sends_on_html("3 days after follow-up 1", 5)
+    assert markup == '<div class="sc-wait-info">3 days after follow-up 1<span class="sc-day"> · day 5</span></div>'
+
+
+def test_a_column_heading_is_small_grey_capitals_text():
+    assert H.waits_header_html("Wait (days)") == '<div class="sc-th">Wait (days)</div>'
+
+
+def test_with_no_follow_ups_the_card_says_so():
+    assert "only its intro" in H.waits_empty_html() and "no follow-up waits to set" in H.waits_empty_html()
+
+
+def test_hostile_text_in_the_waits_rows_is_shown_as_text_never_as_markup():
+    for markup in (H.wait_stage_html(HOSTILE), H.wait_sends_on_html(HOSTILE, HOSTILE), H.waits_header_html(HOSTILE)):
+        _clean(markup)
+
+
+def test_the_waits_card_is_a_white_rounded_bordered_card_like_the_others():
+    rule = _rule('[class*="st-key-sc_waits"] {')
+    assert "background: #fff" in rule and "border: 1px solid #e5e7eb" in rule and "border-radius: 14px" in rule
+
+
+def test_each_row_is_separated_by_a_fine_rule_and_the_number_is_centred_and_bold():
+    assert "border-top: 1px solid #f0f2f5" in _rule('[class*="st-key-sc_waitrow_"] {')
+    assert "text-align: center" in _rule('[class*="st-key-wait_"] input {') and "font-weight: 700" in _rule('[class*="st-key-wait_"] input {')
+
+
+def test_the_stage_is_bold_and_the_description_grey_with_the_day_lighter_still():
+    assert "font-weight: 700" in _rule(".sc-stage {") and "color: #6b7280" in _rule(".sc-wait-info {") and "color: #9ca3af" in _rule(".sc-day {")
+
+
+def test_save_waits_shares_the_blue_save_button_and_dims_when_off():
+    assert "background: #2563eb !important" in _rule('[class*="st-key-sc_save"] button {') and "opacity: .45" in _rule('[class*="st-key-sc_save"] button:disabled {')
+
+
+def test_no_other_element_has_a_name_that_the_waits_card_rule_would_also_match():
+    """REGRESSION: the Save waits button's container used to be called 'sc_waitsave', which contains 'sc_waits', so the card style (border, padding) was drawn around the
+    button as a stray box. Every key the Schedule view gives an element must be matched by AT MOST ONE of the card rules."""
+    source = open(os.path.join(os.path.dirname(__file__), "..", "schedule_view.py"), encoding="utf-8").read()
+    keys = re.findall(r'key=f?"([^"]+)"', source)
+    for card in ("sc_waits", "sc_when"):
+        matching = [k for k in keys if card in k]
+        assert matching == [card], (card, matching)
