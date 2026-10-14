@@ -67,6 +67,12 @@ def test_the_result_chips_show_sent_replies_and_reply_rate_in_the_designs_colour
     _clean(H.stats_chips_html({"sent": HOSTILE, "replies": HOSTILE, "rate": HOSTILE}))
 
 
+def test_the_chips_say_which_stage_and_variant_they_describe():
+    markup = H.stats_chips_html({"sent": 5, "replies": 1, "rate": "20.0%"}, "Follow-up 2 · Variant C")
+    assert '<span class="sq-scope">Follow-up 2 · Variant C</span>' in markup and "sq-scope" not in H.stats_chips_html({"sent": 5, "replies": 1, "rate": "20.0%"})
+    _clean(H.stats_chips_html({"sent": 1, "replies": 1, "rate": "1%"}, HOSTILE))
+
+
 def test_the_placeholders_line_says_what_clicking_does():
     assert "click one to add it to the end of the body" in H.placeholders_html()
 
@@ -132,8 +138,15 @@ def test_a_stage_cards_container_is_as_tall_as_the_card_and_the_whole_card_is_th
     container = _rule('[class*="st-key-sq_stage_"] {')
     assert "min-height: 68px" in container and "position: relative" in container and "gap: 0 !important" in container
     assert "margin-bottom: 0 !important" in _rule('[class*="st-key-sq_stage_"] [data-testid="stMarkdownContainer"] {')
-    pick = _rule('[class*="st-key-sq_pick_"] > div, [class*="st-key-sq_pick_"] button {')
-    assert "position: absolute" in pick and "inset: 0" in pick and "opacity: 0" in pick and "width: 100%" in pick and "height: 100%" in pick
+    layer = _rule('[class*="st-key-sq_stage_"] [class*="st-key-sq_pick_"] {')                 # REGRESSION: without these !important sizes the layer was 16px wide and the cards ignored clicks
+    assert "position: absolute !important" in layer and "inset: 0" in layer and "width: 100% !important" in layer and "height: 100% !important" in layer and "z-index: 3" in layer
+    assert "width: 100% !important" in _rule('[class*="st-key-sq_stage_"] [class*="st-key-sq_pick_"] > div {') and "height: 100% !important" in _rule('[class*="st-key-sq_stage_"] [class*="st-key-sq_pick_"] > div {')
+    button = _rule('[class*="st-key-sq_stage_"] [class*="st-key-sq_pick_"] button {')
+    assert "width: 100%" in button and "height: 100%" in button and "opacity: 0" in button
+
+
+def test_the_title_row_is_tall_enough_that_the_variant_tabs_never_collide_with_the_badge():
+    assert "min-height: 40px" in _rule(".sq-editor-title {") and "margin-top: 4px" in _rule('[class*="st-key-sq_variantbar"] {')
 
 
 def test_the_editor_is_a_white_card_the_unlock_box_floats_at_its_corner_as_the_badge():
