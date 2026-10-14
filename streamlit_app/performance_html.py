@@ -65,7 +65,7 @@ PERFORMANCE_CSS = """
 .pf-bar-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; font-size: 13px; }
 .pf-bar-label { width: 150px; flex: none; color: #111827; } .pf-bar-track { flex: 1; height: 8px; border-radius: 99px; background: #eef0f4; overflow: hidden; }
 .pf-bar-fill { display: block; height: 100%; border-radius: 99px; } .pf-bar-count { width: 34px; text-align: right; font-weight: 700; flex: none; }
-.pf-callout { background: linear-gradient(180deg, #f3f7ff, #fff); border: 1px solid #c7d7fb; border-radius: 14px; padding: 16px 20px; margin: 0 0 14px; }
+.pf-callout { background: linear-gradient(180deg, #f3f7ff, #fff); border: 1px solid #c7d7fb; border-radius: 14px; padding: 16px 20px; margin: 18px 0 14px; }     /* the top margin: Streamlit's markdown wrapper would otherwise pull it up against the card above */
 .pf-callout-title { font-weight: 700; font-size: 15.5px; color: #111827; margin-bottom: 8px; }
 .pf-callout-line { color: #374151; font-size: 13.5px; line-height: 1.6; margin: 4px 0; }
 .pf-note { color: #6b7280; font-size: 12.5px; margin-top: 10px; }
