@@ -222,7 +222,8 @@ def test_the_page_still_works_when_the_workflow_file_cannot_be_read():
 
 def test_the_header_has_a_send_now_popover_and_a_more_menu_with_refresh_inside():
     with campaign_page(status="running") as (at, _):
-        assert [p.proto.popover.label for p in at.get("popover")] == ["➤ Send now", "⋯"]
+        popovers = [p.proto.popover.label for p in at.get("popover")]
+        assert popovers[:2] == ["➤ Send now", "⋯"] and popovers[2:] == ["🗑 Delete variant"]            # the header's two, then the Sequences editor's own
         assert any(b.key == "campaigns_refresh_data" for b in at.button) and any(b.key == "campaigns_send_batch_button" for b in at.button)
 
 
