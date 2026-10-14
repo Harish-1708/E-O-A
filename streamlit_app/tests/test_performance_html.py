@@ -310,3 +310,10 @@ def test_an_ordinary_cell_and_a_bar_cell_can_share_a_row_and_a_short_row_is_stil
 def test_the_bar_is_styled_in_the_stylesheet():
     css = P.PERFORMANCE_CSS
     assert ".pf-cellbar { display: flex; align-items: center;" in css and ".pf-minibar i { display: block; height: 100%;" in css
+
+
+def test_the_what_worked_best_box_has_room_above_it_so_it_never_touches_the_card_before_it():
+    """It followed a pair of columns whose bottom edge Streamlit pulls up by about 16px: measured in a real browser it overlapped the Activity card by 2px."""
+    css = P.PERFORMANCE_CSS
+    rule = css[css.index(".pf-callout {"):css.index("}", css.index(".pf-callout {"))]
+    assert "margin: 18px 0 14px" in rule
