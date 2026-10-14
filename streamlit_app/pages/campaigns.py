@@ -504,6 +504,35 @@ def _render_performance_tab(campaign_cfg, leads, responses, send_log, error_log)
                        actions=_refresh_button, export_name=campaign_cfg["_campaign_name"])
 
 
+def _render_diagnose(campaign_cfg, leads):
+    """What this campaign's Data is actually reading, with a live (uncached) check — opened from the header's ⋯ menu."""
+    with st.expander("🔍 Diagnose: what is this page actually reading?"):
+        st.caption(
+            "If leads you've confirmed are in the Sheet aren't showing up here, this tells you exactly "
+            "which tab this page is reading and whether the problem is a stale cache or something else "
+            "entirely — compare the tab name below against the ACTUAL tab name in Google Sheets."
+        )
+        st.write(f"**Tab this page reads:** `{campaign_cfg['master_tab']}`")
+        st.write(f"**Leads currently shown (cached, up to 30s old):** {len(leads)}")
+        if st.button("Force a live check (bypasses every cache)", key="data_tab_live_diagnostic"):
+            try:
+                live_leads = _get_connector().get_all_leads(campaign_cfg["master_tab"])
+                st.write(f"**Leads actually on the Sheet right now, read live:** {len(live_leads)}")
+                if len(live_leads) != len(leads):
+                    st.warning(
+                        "These numbers differ — the cache genuinely is stale. Click '🔄 Refresh data' "
+                        "above (or reload the page) to clear it."
+                    )
+                else:
+                    st.info(
+                        "These numbers match — the cache isn't the problem. If leads you've confirmed "
+                        "are in the Sheet still aren't in this count, the issue is which TAB is being "
+                        "read (check the tab name above against Google Sheets' actual tab name), not caching."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Live check failed: {exc}")
+
+
 def _open_import_panel():
     st.session_state["ld_import_open"] = True
 
@@ -514,33 +543,6 @@ def _close_import_panel():
 
 def _render_data_tab(campaign_cfg, leads):
     campaign_name = campaign_cfg["_campaign_name"]
-
-    def _diagnose_panel():
-        with st.expander("🔍 Diagnose: what is this page actually reading?"):
-            st.caption(
-                "If leads you've confirmed are in the Sheet aren't showing up here, this tells you exactly "
-                "which tab this page is reading and whether the problem is a stale cache or something else "
-                "entirely — compare the tab name below against the ACTUAL tab name in Google Sheets."
-            )
-            st.write(f"**Tab this page reads:** `{campaign_cfg['master_tab']}`")
-            st.write(f"**Leads currently shown (cached, up to 30s old):** {len(leads)}")
-            if st.button("Force a live check (bypasses every cache)", key="data_tab_live_diagnostic"):
-                try:
-                    live_leads = _get_connector().get_all_leads(campaign_cfg["master_tab"])
-                    st.write(f"**Leads actually on the Sheet right now, read live:** {len(live_leads)}")
-                    if len(live_leads) != len(leads):
-                        st.warning(
-                            "These numbers differ — the cache genuinely is stale. Click '🔄 Refresh data' "
-                            "above (or reload the page) to clear it."
-                        )
-                    else:
-                        st.info(
-                            "These numbers match — the cache isn't the problem. If leads you've confirmed "
-                            "are in the Sheet still aren't in this count, the issue is which TAB is being "
-                            "read (check the tab name above against Google Sheets' actual tab name), not caching."
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"Live check failed: {exc}")
 
     def _add_leads_panel():
         with st.expander("➕ Add Leads (upload CSV)", expanded=(not leads) or bool(st.session_state.get("ld_import_open"))):
@@ -666,7 +668,6 @@ def _render_data_tab(campaign_cfg, leads):
     if not leads:
         st.info("No leads yet — add some below.")
         _add_leads_panel()
-        _diagnose_panel()
         return
 
     # the search, the status chips and the three extra filters live together in one card
@@ -736,10 +737,6 @@ def _render_data_tab(campaign_cfg, leads):
                 except GitHubActionsError as exc:
                     st.error(f"Removal failed: {exc}")
 
-    st.caption("Approval is informational only — every lead with a valid email is eligible to send.")
-    if not st.session_state.get("ld_import_open"):
-        _add_leads_panel()
-    _diagnose_panel()
 
 
 def _fetch_live_stages_and_variants(client, campaign_name, stage_wait_days=None):
@@ -1396,6 +1393,7 @@ def _render_status_controls(campaign_cfg, leads, just_arrived: bool, send_log=()
                 with st.popover("⋯"):
                     if st.button("🔄 Refresh data", key="campaigns_refresh_data"):
                         _refresh_all_data()
+                    _render_diagnose(campaign_cfg, leads)
     if problems:
         st.caption("⚠️ " + " · ".join(problems))
     next_line = None
