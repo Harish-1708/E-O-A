@@ -51,9 +51,9 @@ def lead(i, **kw):
 
 
 @contextlib.contextmanager
-def campaign_page(leads=None, send_log=None, status=None, selected=FIXTURE_CAMPAIGN, drop_master=False, draft=False):
+def campaign_page(leads=None, send_log=None, status=None, selected=FIXTURE_CAMPAIGN, drop_master=False, draft=False, responses=None, preset=None, dispatch_error=None):
     leads = [lead(1)] if leads is None else leads
-    ws = {f"{FIXTURE_CAMPAIGN} Master Sheet": FakeWorksheet(leads), f"{FIXTURE_CAMPAIGN} Response Sheet": FakeWorksheet([]),
+    ws = {f"{FIXTURE_CAMPAIGN} Master Sheet": FakeWorksheet(leads), f"{FIXTURE_CAMPAIGN} Response Sheet": FakeWorksheet(responses or []),
           f"{FIXTURE_CAMPAIGN} Custom Log Sheet": FakeWorksheet(send_log or []), f"{FIXTURE_CAMPAIGN} Error Log": FakeWorksheet([])}
     if drop_master:
         del ws[f"{FIXTURE_CAMPAIGN} Master Sheet"]                                      # the Sheet cannot be read for this campaign
@@ -62,7 +62,7 @@ def campaign_page(leads=None, send_log=None, status=None, selected=FIXTURE_CAMPA
     patches = [patch("gspread.authorize", return_value=type("C", (), {"open_by_key": lambda self, k: FakeSpreadsheet(ws)})()),
                patch("google.oauth2.service_account.Credentials.from_service_account_info", return_value=object()),
                patch("github_client.GitHubClient.create_file", fake_create_file),
-               patch("github_client.GitHubClient.dispatch_workflow", lambda self, workflow, inputs, ref="main": captured.setdefault("dispatches", []).append((workflow, inputs)) or {"id": 1})]
+               patch("github_client.GitHubClient.dispatch_workflow", lambda self, workflow, inputs, ref="main": (_raise(dispatch_error) if dispatch_error else captured.setdefault("dispatches", []).append((workflow, inputs))) or {"id": 1})]
     if draft:
         import preview_logic
         real_cfg = preview_logic.get_campaign_cfg
@@ -79,8 +79,14 @@ def campaign_page(leads=None, send_log=None, status=None, selected=FIXTURE_CAMPA
             at.session_state[key] = value
         if selected:
             at.session_state["selected_campaign"] = selected
+        for key, value in (preset or {}).items():
+            at.session_state[key] = value
         at.run(timeout=30)
         yield at, captured
+
+
+def _raise(error):
+    raise error
 
 
 def _chips(at):
@@ -261,3 +267,105 @@ def test_the_more_menus_refresh_does_the_same_as_the_performance_one():
         next(b for b in at.button if b.key == "campaigns_refresh_data").click()
         at.run(timeout=30)
         assert captured["master"].read_call_count > reads
+
+
+
+# ================================================================ the Responses tab badge and read tracking
+
+def resp(i, read="", lead_id=None):
+    return {"ResponseID": f"R{i}", "LeadID": str(lead_id or i), "From": f"p{i}@x.com", "Subject": "Re: Hi", "Snippet": "hello", "FullBody": "hello", "Classification": "Genuine Reply",
+            "ReceivedAt": f"2026-10-0{i} 09:00:00", "Intent": "Interested", "InReplyTo": "", "IsRead": read}
+
+
+def tab_labels(at):
+    return [t.label for t in at.tabs]
+
+
+def three_replies(**kw):
+    return dict(leads=[lead(1), lead(2), lead(3)], responses=[resp(1), resp(2), resp(3)], **kw)
+
+
+def test_the_responses_tab_shows_a_badge_with_the_number_of_unread_replies():
+    with campaign_page(**three_replies()) as (at, _):
+        assert list(at.exception) == [] and tab_labels(at) == ["Performance", "Data", "Sequences", "Schedule", "Settings", "Responses :blue-badge[3]"]
+
+
+def test_no_replies_or_all_replies_read_means_no_badge():
+    with campaign_page(responses=[]) as (at, _):
+        assert tab_labels(at)[-1] == "Responses"
+    st.cache_data.clear()
+    with campaign_page(leads=[lead(1), lead(2)], responses=[resp(1, "Yes"), resp(2, "yes")]) as (at, _):
+        assert tab_labels(at)[-1] == "Responses"
+
+
+@pytest.mark.parametrize("flag, counted", [("Yes", False), ("yes", False), ("TRUE", False), ("1", False), (" yes ", False), ("", True), ("No", True), ("0", True), ("later", True)])
+def test_only_the_sheets_own_read_flag_decides_whether_a_reply_is_already_read(flag, counted):
+    with campaign_page(leads=[lead(1)], responses=[resp(1, flag)]) as (at, _):
+        assert tab_labels(at)[-1] == ("Responses :blue-badge[1]" if counted else "Responses")
+
+
+def test_a_reply_read_in_this_session_but_not_yet_synced_is_not_counted():
+    with campaign_page(**three_replies(preset={"read_response_keys": {f"{FIXTURE_CAMPAIGN}:R1", f"{FIXTURE_CAMPAIGN}:R3"}})) as (at, _):
+        assert tab_labels(at)[-1] == "Responses :blue-badge[1]"
+
+
+def test_replies_read_in_another_campaign_never_affect_this_ones_badge():
+    with campaign_page(**three_replies(preset={"read_response_keys": {"Other_Campaign:R1", "Other_Campaign:R2", f"{FIXTURE_CAMPAIGN}x:R3"}})) as (at, _):
+        assert tab_labels(at)[-1] == "Responses :blue-badge[3]"
+
+
+@pytest.mark.parametrize("value, label", [(4, "Responses :blue-badge[4]"), (1, "Responses :blue-badge[1]"), (0, "Responses"), (-3, "Responses"), (None, "Responses"), ("x", "Responses"), ("7", "Responses :blue-badge[7]")])
+def test_the_badge_label_is_only_ever_a_positive_number(value, label):
+    from campaign_header_logic import responses_tab_label
+    assert responses_tab_label(value) == label
+
+
+def test_the_campaign_tab_shares_the_read_state_of_the_main_responses_page():
+    with campaign_page(**three_replies()) as (at, _):
+        assert at.session_state["read_response_keys"] == set() and at.session_state["pending_sync_keys"] == set()
+
+
+def _mark_buttons(at):
+    return [b for b in at.button if (b.key or "").startswith(f"tab_{FIXTURE_CAMPAIGN}_mark_read_")]
+
+
+def test_marking_a_conversation_read_lowers_the_badge_and_offers_to_sync_it_to_the_sheet():
+    with campaign_page(**three_replies()) as (at, _):
+        buttons = _mark_buttons(at)
+        assert buttons, "the campaign's Inbox should offer 'Mark as read' now that it tracks read state"
+        buttons[0].click()
+        at.run(timeout=30)
+        assert list(at.exception) == [] and tab_labels(at)[-1] == "Responses :blue-badge[2]"
+        sync = [b for b in at.button if b.key == f"sync_read_status_{FIXTURE_CAMPAIGN}"]
+        assert len(sync) == 1 and sync[0].label == "🔄 Sync read status (1 pending)"
+
+
+def test_syncing_commits_exactly_this_campaigns_pending_replies_and_starts_the_mark_read_workflow():
+    import json
+    pending = {f"{FIXTURE_CAMPAIGN}:R1", f"{FIXTURE_CAMPAIGN}:R2", "Other_Campaign:R9"}
+    with campaign_page(**three_replies(preset={"read_response_keys": set(pending), "pending_sync_keys": set(pending)})) as (at, captured):
+        next(b for b in at.button if b.key == f"sync_read_status_{FIXTURE_CAMPAIGN}").click()
+        at.run(timeout=30)
+        assert list(at.exception) == [] and list(at.error) == []
+        commit = captured["commits"][0]
+        assert commit["path"].startswith(f"mark_read/{FIXTURE_CAMPAIGN}/") and commit["path"].endswith(".json")
+        assert sorted(json.dumps(json.loads(commit["content"].decode("utf-8")), sort_keys=True).count(f'"R{i}"') for i in (1, 2, 9)) == [0, 1, 1]            # R1 and R2 only, never the other campaign's R9
+        assert captured["dispatches"] == [("mark_responses_read.yml", {"campaign": FIXTURE_CAMPAIGN, "payload_path": commit["path"]})]
+        assert at.session_state["pending_sync_keys"] == {"Other_Campaign:R9"} and any("Synced read status for 2 reply(ies)" in s.value for s in at.success)
+        at.run(timeout=30)                                                              # on the next redraw nothing of this campaign is pending, so the button is gone
+        assert not any(b.key == f"sync_read_status_{FIXTURE_CAMPAIGN}" for b in at.button) and len(captured["commits"]) == 1 and len(captured["dispatches"]) == 1
+
+
+def test_a_failed_sync_says_why_and_keeps_everything_pending_so_it_can_be_tried_again():
+    from github_client import GitHubActionsError
+    pending = {f"{FIXTURE_CAMPAIGN}:R1"}
+    with campaign_page(**three_replies(preset={"read_response_keys": set(pending), "pending_sync_keys": set(pending)}, dispatch_error=GitHubActionsError("boom"))) as (at, _):
+        next(b for b in at.button if b.key == f"sync_read_status_{FIXTURE_CAMPAIGN}").click()
+        at.run(timeout=30)
+        assert any("Couldn't sync read status: boom" in e.value for e in at.error)
+        assert at.session_state["pending_sync_keys"] == pending and any(b.key == f"sync_read_status_{FIXTURE_CAMPAIGN}" for b in at.button)
+
+
+def test_there_is_no_sync_button_when_nothing_of_this_campaign_is_pending():
+    with campaign_page(**three_replies(preset={"pending_sync_keys": {"Other_Campaign:R9"}})) as (at, _):
+        assert not any((b.key or "").startswith("sync_read_status_") for b in at.button)
