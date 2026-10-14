@@ -45,6 +45,10 @@ PERFORMANCE_CSS = """
 .pf-kpi-label { font-size: 12.5px; color: #6b7280; font-weight: 600; }
 .pf-kpi-value { font-size: 27px; font-weight: 700; margin: 5px 0 2px; letter-spacing: -.02em; color: #111827; line-height: 1.15; }
 .pf-kpi-caption { font-size: 12px; color: #6b7280; min-height: 1.2em; }
+.pf-kpi-trend { font-size: 12px; font-weight: 700; margin-top: 3px; }
+.pf-trend-up { color: #15803d; }
+.pf-trend-down { color: #b91c1c; }
+.pf-trend-flat { color: #6b7280; }
 .pf-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px 20px; min-width: 0; }
 .pf-card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .pf-card-title { margin: 0 !important; padding: 0 !important; font-size: 16px !important; line-height: 1.3 !important; font-weight: 700 !important; color: #111827; }
@@ -75,11 +79,16 @@ PERFORMANCE_CSS = """
 
 # ---------------------------------------------------------------- headline cards
 
-def kpi_html(label, value, caption="", help_text="") -> str:
-    """One headline figure. `help_text` becomes the card's tooltip."""
+def kpi_html(label, value, caption="", help_text="", trend=None) -> str:
+    """One headline figure. `help_text` becomes the card's tooltip. `trend`, when given, is (text, kind) with kind 'up', 'down' or 'flat': a small coloured
+    change line under the caption (any other kind is drawn as flat, so a bad value can never inject a class name)."""
     tip = f' title="{esc(help_text)}"' if help_text else ""
+    change = ""
+    if trend:
+        text, kind = trend
+        change = f'<div class="pf-kpi-trend pf-trend-{kind if kind in ("up", "down") else "flat"}">{esc(text)}</div>'
     return _one_line(f'<div class="pf-kpi"{tip}><div class="pf-kpi-label">{esc(label)}</div>'
-                     f'<div class="pf-kpi-value">{esc(value)}</div><div class="pf-kpi-caption">{esc(caption)}</div></div>')
+                     f'<div class="pf-kpi-value">{esc(value)}</div><div class="pf-kpi-caption">{esc(caption)}</div>{change}</div>')
 
 
 def grid_html(columns: str, cells: Iterable[str]) -> str:
