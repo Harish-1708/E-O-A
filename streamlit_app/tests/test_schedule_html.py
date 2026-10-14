@@ -216,3 +216,38 @@ def test_no_other_element_has_a_name_that_the_waits_card_rule_would_also_match()
     for card in ("sc_waits", "sc_when"):
         matching = [k for k in keys if card in k]
         assert matching == [card], (card, matching)
+
+
+
+# ================================================================ the number box is compact
+
+def test_the_number_box_is_compact_136_by_34_not_the_225_by_40_it_was():
+    assert "width: 136px !important" in _rule('[class*="st-key-wait_"] {') and "max-width: 136px !important" in _rule('[class*="st-key-wait_"] {')
+    assert "height: 34px !important" in _rule('[class*="st-key-wait_"] [data-testid="stNumberInputContainer"] {')
+
+
+def test_the_number_box_is_never_made_narrow_enough_for_streamlit_to_hide_the_plus_and_minus_buttons():
+    """Measured in a real browser: the buttons stay down to 130px and are hidden at 120px. Anything under 130 would silently remove the controls."""
+    width = int(re.search(r"width: (\d+)px", _rule('[class*="st-key-wait_"] {')).group(1))
+    assert width >= 130, "below about 125px Streamlit hides the - and + buttons"
+
+
+def test_the_field_and_the_step_buttons_are_sized_to_fit_the_compact_box_and_stay_easy_to_press():
+    field = _rule('[class*="st-key-wait_"] input {')
+    exactly = lambda prop, rule: re.search(rf"(?<![-\w]){prop} !important", rule)           # noqa: E731 - 'height' must not be satisfied by 'min-height'
+    assert exactly("height: 30px", field) and exactly("min-height: 30px", field) and "font-size: 14px !important" in field and "text-align: center" in field and "font-weight: 700" in field
+    button = _rule('[class*="st-key-wait_"] button {')
+    assert exactly("width: 28px", button) and exactly("min-width: 28px", button) and exactly("height: 32px", button)
+    assert int(re.search(r"width: (\d+)px", button).group(1)) >= 26                      # a finger or a mouse can still hit it
+
+
+def test_the_stage_name_and_description_are_centred_on_the_compact_box():
+    assert "padding-top: 7px" in _rule(".sc-stage {") and "padding-top: 7px" in _rule(".sc-wait-info {")
+
+
+def test_only_the_number_boxes_have_a_name_that_the_number_box_rules_would_match():
+    """The box rules match any element whose key contains 'wait_'. Every such key in the Schedule view must be the number box's own."""
+    source = open(os.path.join(os.path.dirname(__file__), "..", "schedule_view.py"), encoding="utf-8").read()
+    matching = [k for k in re.findall(r'f?"(wait_[^"]*)"', source)]
+    keys = [k for k in re.findall(r'key=f?"([^"]+)"', source) + re.findall(r'f"(wait_[^"]+)"', source) if "wait_" in k]
+    assert matching and set(keys) <= {"wait_{campaign_name}_{row['prefix']}"}, keys
