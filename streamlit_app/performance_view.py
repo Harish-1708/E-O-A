@@ -45,7 +45,7 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
     _show(f"<style>{H.PERFORMANCE_CSS}</style>")
 
     # ---- headline cards (the very same figures the Export file contains)
-    cards = [H.kpi_html(f["label"], f["value"], f["caption"], f["help"]) for f in headline_figures(perf)]
+    cards = [H.kpi_html(f["label"], f["value"], f["caption"], f["help"], f["trend"]) for f in headline_figures(perf)]
     _show(H.grid_html("g6", cards[:6]))
     _show(H.grid_html("g4", cards[6:]))
 
