@@ -127,7 +127,7 @@ def _render_waits(ctx: ScheduleContext) -> None:
         if not rows:
             st.markdown(H.waits_empty_html(), unsafe_allow_html=True)
             return
-        widths = [1.1, 1.2, 2.5]
+        widths = [1.1, 0.95, 2.75]                                   # the wait column only has to hold the compact number box
         for column, text in zip(st.columns(widths), ("Stage", "Wait (days)", "Sends on")):
             column.markdown(H.waits_header_html(text), unsafe_allow_html=True)
         keys = {row["prefix"]: f"wait_{campaign_name}_{row['prefix']}" for row in rows}           # per campaign: switching campaigns must never carry a value over
