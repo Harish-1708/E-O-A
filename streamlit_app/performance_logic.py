@@ -85,10 +85,43 @@ def _ints(row: List[str]) -> Dict[str, int]:
             "bounced_hard": int(row[5]), "bounced_soft": int(row[6]), "replies": int(row[7])}
 
 
+# ---------------------------------------------------------------- the 7-day trend
+
+TREND_DAYS = 7
+MIN_EMAILS_PER_PERIOD = 5      # fewer emails than this in either week and the comparison is not shown: one reply would swing it by 20 points or more
+
+
+def reply_rate_trend(sent_rows: List[Dict], answered_emails, today: Optional[date] = None, days: int = TREND_DAYS, min_emails: int = MIN_EMAILS_PER_PERIOD) -> Optional[Dict]:
+    """How the reply rate moved: emails sent in the last `days` days against the `days` before them (UTC days, the Sheet's own clock), each as the share
+    of those emails that have been answered. An email counts as answered when a lead's first reply is credited to it — the same rule the rest of the
+    page uses. Returns None when either period has fewer than `min_emails` emails: not enough to compare.
+
+    Replies take days to arrive, so the most recent period is always still filling in: its rate can rise later, and a small dip may only mean replies have
+    not come in yet."""
+    today = today or datetime.now(timezone.utc).date()
+    current_days = {(today - timedelta(days=i)) for i in range(days)}
+    previous_days = {(today - timedelta(days=days + i)) for i in range(days)}
+    counts = {"current": [0, 0], "previous": [0, 0]}                 # [sent, answered]
+    for row in sent_rows:
+        when = _dt(row.get("Timestamp"))
+        if not when:
+            continue
+        period = "current" if when.date() in current_days else "previous" if when.date() in previous_days else None
+        if period:
+            counts[period][0] += 1
+            counts[period][1] += (str(row.get("LeadID", "")), row.get("Stage", "") or "") in answered_emails
+    (sent_now, answered_now), (sent_before, answered_before) = counts["current"], counts["previous"]
+    if sent_now < min_emails or sent_before < min_emails:
+        return None
+    rate_now, rate_before = answered_now / sent_now, answered_before / sent_before
+    return {"days": days, "current_rate": rate_now, "previous_rate": rate_before, "delta_pts": round((rate_now - rate_before) * 100, 1),
+            "sent_current": sent_now, "sent_previous": sent_before, "answered_current": answered_now, "answered_previous": answered_before}
+
+
 # ---------------------------------------------------------------- one campaign
 
 def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses: List[Dict],
-                               send_log: List[Dict], error_log: Optional[List[Dict]] = None) -> Dict:
+                               send_log: List[Dict], error_log: Optional[List[Dict]] = None, today: Optional[date] = None) -> Dict:
     """`error_log=None` means the Error Log tab could not be read (as opposed
     to read and empty): the error table is then left empty and flagged
     (`error_log_read` False) rather than failing the whole report."""
@@ -128,6 +161,7 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
     reply_hours: List[float] = []
     replies_by_day: Counter = Counter()
     exact_matches = 0
+    answered_emails = set()                    # (lead, stage) of every email a first reply answered: what the 7-day trend counts as 'answered'
 
     for lead_id, rows in genuine_by_lead.items():
         ordered = sorted(rows, key=lambda r: (_dt(r.get("ReceivedAt")) is None, _dt(r.get("ReceivedAt")) or datetime.min))
@@ -158,6 +192,7 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
         if answered:
             stage, variant = answered
             if stage:
+                answered_emails.add((lead_id, stage))
                 stage_replies[stage] += 1
                 stage_positive[stage] += positive
             if variant:
@@ -243,6 +278,7 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
         "error_rows": error_rows,
         "error_log_read": error_log is not None,
         "variant_stage_rows": [{**r} for r in variant_stage_rows],
+        "reply_trend": reply_rate_trend(sent_rows, answered_emails, today),
         "dashboard_rows": dashboard_rows,
         "responders": responders,
         "reply_rate": rate(totals["replies"], totals["contacted"]),
@@ -355,6 +391,7 @@ def combine_performance(perfs: List[Dict], name: str = "All campaigns") -> Dict:
         "sender_rows": sender_rows, "error_rows": error_rows,
         "error_log_read": all(p["error_log_read"] for p in perfs),
         "variant_stage_rows": variant_stage_rows,
+        "reply_trend": None,                      # (a trend is only worked out inside one campaign)
         "dashboard_rows": None,       # raw engine rows only make sense for one campaign
         "total_leads": total("total_leads"), "contacted": contacted, "sent": sent,
         "delivered_est": total("delivered_est"), "bounced_hard": total("bounced_hard"),
