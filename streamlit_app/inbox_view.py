@@ -28,7 +28,7 @@ from conversation_logic import (  # noqa: E402
     build_conversation_thread, build_incoming_messages_for_responses, build_outgoing_messages_from_sent_mail,
 )
 from data_import_logic import payload_to_bytes  # noqa: E402
-from responses_hub_logic import all_response_keys_in_group  # noqa: E402
+from responses_hub_logic import all_response_keys_in_group, group_unread_count  # noqa: E402
 from responses_reply_logic import (  # noqa: E402
     find_lead_for_response, build_reply_defaults, parse_email_list, validate_reply, build_reply_payload,
     reply_payload_path, build_attachment_entries, total_attachment_size_bytes,
@@ -124,6 +124,42 @@ def _mark_read(ctx: InboxContext, group: Dict) -> None:
         ctx.pending_sync_keys.add(key)
 
 
+def _mark_all_read(ctx: InboxContext, view_groups: List[Dict], all_groups: List[Dict], scope_key: str) -> None:
+    """Mark every unread conversation in the chosen scope read, with every reply inside it (the same thing 'Mark as read' does for one). Runs BEFORE the page is
+    drawn again, so the counts and the Sync button already reflect it. Nothing is written to the Sheet here: like a single conversation, it is saved by
+    'Sync read status'."""
+    groups = view_groups if st.session_state.get(scope_key, "view") == "view" else all_groups
+    replies = sum(group_unread_count(group, ctx.read_keys) for group in groups)               # counted before they are marked
+    for group in groups:
+        _mark_read(ctx, group)
+    st.session_state[f"{ctx.namespace}_markall_result"] = (len(groups), replies)
+
+
+def _plural(count: int, one: str, many: str) -> str:
+    return f"{count} {one if count == 1 else many}"
+
+
+def _render_mark_all(ctx: InboxContext, view_groups: List[Dict], all_groups: List[Dict]) -> None:
+    """'Mark all read' in the list header: a small menu that says exactly what will happen before it does — which conversations (this view or everything
+    unread), how many, and how many replies that is — and only then a confirm button."""
+    ns = ctx.namespace
+    scope_key = f"{ns}_markall_scope"
+    with st.container(key=f"ux_markall_{ns}"):
+        with st.popover("✓ Mark all read", disabled=not all_groups):
+            st.markdown("**Mark conversations as read**")
+            if len(view_groups) != len(all_groups):
+                st.radio("Which conversations?", ["view", "all"], index=0 if view_groups else 1, key=scope_key,
+                         format_func=lambda choice: (f"Unread in this view ({len(view_groups)})" if choice == "view" else f"All unread ({len(all_groups)})"))
+                chosen = view_groups if st.session_state.get(scope_key, "view") == "view" else all_groups
+            else:
+                chosen = all_groups
+            replies = sum(group_unread_count(group, ctx.read_keys) for group in chosen)
+            st.caption(f"{_plural(len(chosen), 'conversation', 'conversations')} · {_plural(replies, 'unread reply', 'unread replies')}. They are marked read here at once; "
+                       "press “Sync read status” afterwards to save it to the Sheet.")
+            st.button(f"✓ Mark {_plural(len(chosen), 'conversation', 'conversations')} as read", key=f"{ns}_markall_go", type="primary", disabled=not chosen,
+                      on_click=_mark_all_read, args=(ctx, view_groups, all_groups, scope_key), use_container_width=True)
+
+
 def _send_reply(ctx: InboxContext, group: Dict, latest: Dict, lead: Optional[Dict], defaults: Dict, campaign_name: str,
                 gk: str) -> None:
     """Validates, commits the payload and starts the send-reply workflow —
@@ -183,9 +219,11 @@ def _render_rail(ctx: InboxContext, items: List, active: str, rail_key: str) -> 
 # ---------------------------------------------------------------- the list
 
 def _render_list(ctx: InboxContext, shown: List[Dict], total: int, filtered: int, by_key: Dict[str, Dict], selected: Optional[str],
-                 selected_key: str) -> None:
+                 selected_key: str, mark_all: Optional[tuple] = None) -> None:
     with st.container(key=f"ux_listpane_{ctx.namespace}"):
         st.markdown(H.list_header_html("Inbox", len(shown), total), unsafe_allow_html=True)
+        if mark_all is not None:
+            _render_mark_all(ctx, *mark_all)
         with st.container(key=f"ux_list_{ctx.namespace}", height=PANE_HEIGHT - 44, border=False):
             if not shown:
                 st.markdown(H.empty_thread_html("No conversations in this view."), unsafe_allow_html=True)
@@ -441,6 +479,10 @@ def render_inbox(groups: List[Dict], ctx: InboxContext) -> None:
     ns = ctx.namespace
     scale = H.SIZES.get(st.session_state.get(f"{ns}_size", H.DEFAULT_SIZE), H.SIZES[H.DEFAULT_SIZE])
     st.markdown(f"<style>{H.inbox_css(scale)}</style>", unsafe_allow_html=True)
+    marked = st.session_state.pop(f"{ns}_markall_result", None)
+    if marked:
+        st.success(f"Marked {_plural(marked[0], 'conversation', 'conversations')} as read ({_plural(marked[1], 'reply', 'replies')}). "
+                   "Press “Sync read status” to save it to the Sheet.")
     all_rows = build_conversation_rows(groups, ctx.read_keys, ctx.leads_for)
     by_key = {conversation_key(g): g for g in groups}
     pending_map = st.session_state.setdefault(f"{ns}_pending_status", {})
@@ -466,6 +508,7 @@ def render_inbox(groups: List[Dict], ctx: InboxContext) -> None:
         return active == "all" or (row["unread"] if active == "unread" else category[row["key"]] == active)
 
     filtered = [r for r in all_rows if kept(r)]
+    mark_all = None if ctx.read_keys is None else ([by_key[r["key"]] for r in filtered if r["unread"]], [by_key[r["key"]] for r in all_rows if r["unread"]])
     shown = filtered[:MAX_ROWS]
     selected_key = f"{ns}_selected"
     selected = resolve_selection([r["key"] for r in shown], st.session_state.get(selected_key))
@@ -476,7 +519,7 @@ def render_inbox(groups: List[Dict], ctx: InboxContext) -> None:
         with rail_col:
             _render_rail(ctx, items, active, rail_key)
         with list_col:
-            _render_list(ctx, shown, len(all_rows), len(filtered), by_key, selected, selected_key)
+            _render_list(ctx, shown, len(all_rows), len(filtered), by_key, selected, selected_key, mark_all)
         with thread_col:
             with st.container(key=f"ux_threadpane_{ns}"):
                 if selected is None:
