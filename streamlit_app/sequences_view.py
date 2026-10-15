@@ -40,6 +40,7 @@ class SequencesContext:
     fetch_structure: Callable          # (client, campaign_name) -> (stages, variants), read live from GitHub
     fetch_content: Callable            # (client, campaign_name, prefix, variant) -> {"subject", "body"}, read live from GitHub
     current_user: Callable
+    wait_days_for: Optional[Callable] = None   # (stage prefix) -> the wait in days before that stage, as the engine will use it, or None when unknown
 
 
 # ---------------------------------------------------------------- state and callbacks
@@ -120,6 +121,12 @@ def _render_stage_list(ctx, client, campaign_name, stages, variants, state) -> N
             st.button(card["title"], key=f"sq_pick_{index}", on_click=_pick_stage, args=(campaign_name, index))
 
     next_stage = next_stage_from_stages(stages, variants)
+    if state["mode"] == "add_stage" and next_stage is not None:
+        new_prefix, new_letters = next_stage
+        wait = ctx.wait_days_for(new_prefix) if ctx.wait_days_for else None
+        done = sum(_add_stage_ready(campaign_name, new_prefix, new_letters))
+        st.markdown(H.new_stage_card_html(humanize_stage(new_prefix), L.new_stage_badge(wait),
+                                          f"New · {done} of {len(new_letters)} variants ready"), unsafe_allow_html=True)
     with st.container(key="sq_add_stage"):
         st.button("＋ Add a follow-up stage" if next_stage else "＋ Add a follow-up stage (none left)", key="sq_add_stage_button", use_container_width=True,
                   disabled=next_stage is None, on_click=_set_mode, args=(campaign_name, "add_stage"))
@@ -320,8 +327,40 @@ def _render_delete_variant(ctx, campaign_name, stages, variants, variant) -> Non
 
 # ---------------------------------------------------------------- middle: adding a variant or a stage
 
-def _render_add_variant(ctx, campaign_name, stages, variants, state) -> None:
-    """Add a variant to EVERY stage at once (variants are campaign-wide)."""
+# ---------------------------------------------------------------- the add forms (a new stage, a new variant): tabs, placeholders, progress
+
+def _add_stage_ready(campaign_name: str, stage_prefix: str, letters: List[str]) -> List[bool]:
+    """Which variants of the stage being added are valid right now, read from what has been typed (the inputs keep their text in session state)."""
+    ready = []
+    for letter in letters:
+        subject = st.session_state.get(f"followup_subject_{campaign_name}_{stage_prefix}_{letter}", "")
+        body = st.session_state.get(f"followup_body_{campaign_name}_{stage_prefix}_{letter}", "")
+        ready.append(validate_variant_content(subject, body, is_first_stage=False) is None)
+    return ready
+
+
+def _add_tabs(tab_key: str, labels: List[str]) -> int:
+    """The tabs of an add form, in the same segmented look as the editor's variant tabs. Returns the chosen position."""
+    if st.session_state.get(tab_key) not in range(len(labels)):
+        st.session_state[tab_key] = 0
+    with st.container(key="sq_variantbar"):
+        return st.radio("Tab", list(range(len(labels))), key=tab_key, horizontal=True, label_visibility="collapsed", format_func=lambda i: labels[i])
+
+
+def _add_pane(ctx, index: int, subject_label: str, subject_key: str, body_key: str, tokens: List[str]):
+    """One tab's inputs: subject, body and the placeholder pills (which add to the end of the body, exactly as in the editor)."""
+    with st.container(key=f"sq_addpane_{index}_x"):
+        subject = st.text_input(subject_label, key=subject_key)
+        body = st.text_area("Body", height=168, key=body_key)
+        st.markdown(H.placeholders_html(), unsafe_allow_html=True)
+        pick_key = f"sq_addph_{body_key}"
+        st.pills("Insert a placeholder", tokens, key=pick_key, label_visibility="collapsed", on_change=_insert_placeholder, args=(body_key, pick_key))
+    return subject, body
+
+
+def _render_add_variant(ctx, campaign_name, stages, variants, state) -> Optional[Dict]:
+    """Add a variant to EVERY stage at once (variants are campaign-wide). One tab per stage, each ticked when its content is valid; the preview and the checks on the
+    right follow the tab being edited; the Add button stays off until every stage is filled in."""
     next_letter = next_available_variant_letter(variants)
     with st.container(key="sq_editor"):
         st.markdown(H.editor_title_html(f"Add variant {next_letter}" if next_letter else "Add variant"), unsafe_allow_html=True)
@@ -332,17 +371,29 @@ def _render_add_variant(ctx, campaign_name, stages, variants, state) -> None:
             return None
         st.caption(f"Variant {next_letter} needs content for EVERY existing stage — variants are "
                    "campaign-wide, not per-stage, so this adds it everywhere at once.")
+        keys = {stage["template_prefix"]: (f"newvariant_subject_{campaign_name}_{stage['template_prefix']}_{next_letter}",
+                                           f"newvariant_body_{campaign_name}_{stage['template_prefix']}_{next_letter}") for stage in stages}
+        ready = [validate_variant_content(st.session_state.get(keys[stage["template_prefix"]][0], ""), st.session_state.get(keys[stage["template_prefix"]][1], ""),
+                                          is_first_stage=(index == 0)) is None for index, stage in enumerate(stages)]
+        names = [humanize_stage(stage["template_prefix"]) for stage in stages]
+        chosen = _add_tabs(f"sq_variant_addtab_{campaign_name}_variant_{next_letter}", [L.tab_label(name, flag) for name, flag in zip(names, ready)])
+        st.markdown(f"<style>{H.add_pane_css(chosen)}</style>", unsafe_allow_html=True)
+
+        tokens = L.placeholder_tokens(ctx.leads, _system_columns())
         contents_by_stage = {}
-        for stage in stages:
+        for index, stage in enumerate(stages):
             prefix = stage["template_prefix"]
-            st.markdown(f"**{stage['name']}**")
             # Keyed by campaign AND variant letter as well as stage, so what was typed for an earlier attempt (adding B, then later C, or another
             # campaign that needs the same letter) can never carry over into this one.
-            subject = st.text_input("Subject", key=f"newvariant_subject_{campaign_name}_{prefix}_{next_letter}")
-            body = st.text_area("Body", height=120, key=f"newvariant_body_{campaign_name}_{prefix}_{next_letter}")
+            subject, body = _add_pane(ctx, index, "Subject (required — this is the first stage)" if index == 0 else "Subject (leave blank to continue the previous thread)",
+                                      keys[prefix][0], keys[prefix][1], tokens)
             contents_by_stage[prefix] = {"subject": subject, "body": body}
 
-        if st.button(f"Add Variant {next_letter}", type="primary"):
+        with st.container(key="sq_addfoot"):
+            st.markdown(H.add_progress_html(L.progress_text(ready, names, "stages", f"Variant {next_letter}")), unsafe_allow_html=True)
+            with st.container(key="sq_save_add"):
+                add_clicked = st.button(f"Add Variant {next_letter}", type="primary", key="sq_add_variant_go", disabled=not all(ready))
+        if add_clicked:
             errors = validate_new_variant_contents(stages, contents_by_stage)
             if errors:
                 for message in errors:
@@ -363,11 +414,14 @@ def _render_add_variant(ctx, campaign_name, stages, variants, state) -> None:
                     st.rerun()
                 except GitHubActionsError as exc:
                     st.error(f"Failed to add variant: {exc}")
-    return None
+    selected = contents_by_stage[stages[chosen]["template_prefix"]]
+    return {"subject": selected["subject"], "body": selected["body"], "is_first_stage": chosen == 0, "check_title": "Check before adding"}
 
 
-def _render_add_stage(ctx, campaign_name, stages, variants, state) -> None:
-    """Add the next follow-up stage (the same logic as the New Campaign 'Add Stage'), computed from the LIVE structure just read."""
+def _render_add_stage(ctx, campaign_name, stages, variants, state) -> Optional[Dict]:
+    """Add the next follow-up stage (the same logic as the New Campaign 'Add Stage'), computed from the LIVE structure just read. One tab per variant, each ticked when
+    its content is valid; placeholders under the body; the preview and the checks on the right follow the tab being edited; the Add button stays off until every
+    variant is valid."""
     next_stage = next_stage_from_stages(stages, variants)
     with st.container(key="sq_editor"):
         st.markdown(H.editor_title_html("Add a follow-up stage"), unsafe_allow_html=True)
@@ -377,16 +431,27 @@ def _render_add_stage(ctx, campaign_name, stages, variants, state) -> None:
             st.info(f"This campaign already has all {TOTAL_STAGE_COUNT} stages.")
             return None
         stage_prefix, required_variants = next_stage
-        st.write(f"**Next stage:** `{stage_prefix}` · **Required variants:** {', '.join(required_variants)}")
+        wait = ctx.wait_days_for(stage_prefix) if ctx.wait_days_for else None
+        details = L.wait_sentence(humanize_stage(stages[-1]["template_prefix"]), wait)
+        st.markdown(H.add_intro_html(humanize_stage(stage_prefix), (details + " · " if details else "") + f"required variants: {', '.join(required_variants)}"), unsafe_allow_html=True)
+
+        ready = _add_stage_ready(campaign_name, stage_prefix, required_variants)
+        chosen = _add_tabs(f"sq_variant_addtab_{campaign_name}_{stage_prefix}", [L.tab_label(f"Variant {letter}", flag) for letter, flag in zip(required_variants, ready)])
+        st.markdown(f"<style>{H.add_pane_css(chosen)}</style>", unsafe_allow_html=True)
+
+        tokens = L.placeholder_tokens(ctx.leads, _system_columns())
         variant_inputs = {}
-        for letter in required_variants:
-            st.markdown(f"**Variant {letter}**")
+        for index, letter in enumerate(required_variants):
             # Keyed by campaign AND stage as well as letter, so nothing typed for an earlier follow-up (or another campaign) carries over.
-            subject = st.text_input("Subject (leave blank to continue the previous thread)", key=f"followup_subject_{campaign_name}_{stage_prefix}_{letter}")
-            body = st.text_area("Body", height=120, key=f"followup_body_{campaign_name}_{stage_prefix}_{letter}")
+            subject, body = _add_pane(ctx, index, "Subject (leave blank to continue the previous thread)", f"followup_subject_{campaign_name}_{stage_prefix}_{letter}",
+                                      f"followup_body_{campaign_name}_{stage_prefix}_{letter}", tokens)
             variant_inputs[letter] = {"subject": subject, "body": body}
 
-        if st.button(f"Add {stage_prefix}", type="primary"):
+        with st.container(key="sq_addfoot"):
+            st.markdown(H.add_progress_html(L.progress_text(ready, list(required_variants), "variants", "this stage")), unsafe_allow_html=True)
+            with st.container(key="sq_save_add"):
+                add_clicked = st.button(f"Add {humanize_stage(stage_prefix)}", type="primary", key="sq_add_stage_go", disabled=not all(ready))
+        if add_clicked:
             errors = []
             for letter, content in variant_inputs.items():
                 content_error = validate_variant_content(content["subject"], content["body"], is_first_stage=False)
@@ -409,7 +474,8 @@ def _render_add_stage(ctx, campaign_name, stages, variants, state) -> None:
                     st.rerun()
                 except GitHubActionsError as exc:
                     st.error(f"Failed to add stage: {exc}")
-    return None
+    selected = variant_inputs[required_variants[chosen]]
+    return {"subject": selected["subject"], "body": selected["body"], "is_first_stage": False, "check_title": "Check before adding"}
 
 
 # ---------------------------------------------------------------- right: the preview and the checks
@@ -435,4 +501,4 @@ def _render_preview(ctx, current: Dict) -> None:
         st.markdown(H.section_label_html("Preview"), unsafe_allow_html=True)
         st.caption("No leads yet, so the preview shows your template as written.")
         st.markdown(H.preview_html("You", "your lead", subject or "(blank)", body), unsafe_allow_html=True)
-    st.markdown(H.checks_html(L.check_items(subject, body, lead, is_first_stage)), unsafe_allow_html=True)
+    st.markdown(H.checks_html(L.check_items(subject, body, lead, is_first_stage), current.get("check_title", "Check before saving")), unsafe_allow_html=True)
