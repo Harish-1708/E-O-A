@@ -706,7 +706,7 @@ def test_the_message_box_is_closed_until_reply_is_pressed_and_pressing_it_again_
         assert not _has(at.text_area, f"hub_body_{A1}") and not _has(at.button, f"hub_send_{A1}")
         _compose(at, A1)
         assert _has(at.text_area, f"hub_body_{A1}") and _has(at.button, f"hub_send_{A1}")
-        assert any("Sending as: sales1" in c.value for c in at.caption)
+        assert next(sb for sb in at.selectbox if sb.key == f"hub_from_{A1}").value == "sales1"                      # the From field starts as the thread's own account
         _compose(at, A1)
         assert not _has(at.text_area, f"hub_body_{A1}")
 
@@ -898,7 +898,7 @@ def test_a_reply_with_no_matching_lead_still_shows_what_was_received_and_says_wh
         assert "Who am I replying to?" in _bodies(at)
         assert any("so the emails the system sent are not shown" in c.value for c in at.caption)
         _compose(at, f"{FIXTURE_CAMPAIGN}:77")
-        assert any("Couldn't find this lead's sender account" in c.value for c in at.caption)
+        assert any("Couldn&#x27;t find this lead&#x27;s sender account" in m.value for m in at.markdown)
 
 
 def test_quoted_history_in_a_reply_is_shown_as_a_quote_without_its_markers():
@@ -1498,3 +1498,184 @@ def test_the_campaign_tab_and_the_all_campaigns_page_use_the_same_control_with_t
     with hub() as (at, _):
         hub_go = at.button(key="hub_markall_go")
         assert hub_go.label.startswith("✓ Mark ") and hub_go.label.endswith(" as read")
+
+
+# ================================================================ the reply composer: fields in order, From with a choice, docked in the pane
+
+import html as _html  # noqa: E402
+import re as _re  # noqa: E402
+
+
+def _ordered_keys(block):
+    """The keys of every widget on the page, in the order they are drawn."""
+    keys = []
+    for child in block.children.values():
+        if hasattr(child, "children") and getattr(child, "children", None):
+            keys += _ordered_keys(child)
+        else:
+            key = getattr(child, "key", None)
+            if key:
+                keys.append(key)
+    return keys
+
+
+def _markup(at):
+    return " ".join(m.value for m in at.markdown)
+
+
+def _health_ws(records):
+    ws = _two_campaign_ws()
+    ws["Email Accounts Health"] = FakeWorksheet(records)
+    return ws
+
+
+def test_the_composer_has_its_fields_in_the_order_from_to_cc_bcc_subject_then_the_message_then_send():
+    with hub() as (at, _):
+        _compose(at, A1)
+        assert _re.findall(r'ux-flabel">(.*?)<', _markup(at)) == ["From", "To", "Cc", "Bcc", "Subject"]
+        keys = [k for k in _ordered_keys(at.main) if k.startswith("hub_") and k.endswith(f"_{A1}")]
+        wanted = [f"hub_from_{A1}", f"hub_to_{A1}", f"hub_cc_{A1}", f"hub_bcc_{A1}", f"hub_subject_{A1}", f"hub_body_{A1}"]
+        assert [k for k in keys if k in wanted] == wanted and keys.index(f"hub_send_{A1}") > keys.index(f"hub_body_{A1}")
+
+
+def test_the_composer_is_closed_until_reply_is_pressed_and_the_button_says_when_it_is_open():
+    with hub() as (at, _):
+        assert at.button(key=f"ux_reply_hub_{A1}").label == "↩ Reply" and not any(sb.key == f"hub_from_{A1}" for sb in at.selectbox)
+        _compose(at, A1)
+        assert at.button(key=f"ux_reply_hub_{A1}").label == "↩ Replying…" and any(sb.key == f"hub_from_{A1}" for sb in at.selectbox)
+        _compose(at, A1)
+        assert at.button(key=f"ux_reply_hub_{A1}").label == "↩ Reply"
+
+
+def test_from_starts_as_the_account_the_thread_started_from_and_lists_the_others_with_their_addresses():
+    with hub() as (at, _):
+        _compose(at, A1)
+        sender = next(sb for sb in at.selectbox if sb.key == f"hub_from_{A1}")
+        assert sender.value == "sales1" and sender.options[0] == "fixture-sales1@example.com (sales1)" and "fixture-sales2@example.com (sales2)" in sender.options
+        assert "the account this thread started from" in _markup(at)
+
+
+def test_an_account_whose_health_check_failed_says_so_in_the_list():
+    health = [{"AccountName": "sales2", "Status": "Disconnected", "Detail": "Login failed", "CheckedAt": "x"}, {"AccountName": "sales1", "Status": "Connected", "Detail": "", "CheckedAt": "x"}]
+    with hub(_health_ws(health)) as (at, _):
+        _compose(at, A1)
+        options = next(sb for sb in at.selectbox if sb.key == f"hub_from_{A1}").options
+        assert "fixture-sales2@example.com (sales2) — disconnected: Login failed" in options and "fixture-sales1@example.com (sales1)" in options
+
+
+def test_choosing_another_account_shows_the_amber_warning_and_choosing_the_threads_own_again_clears_it():
+    with hub() as (at, _):
+        _compose(at, A1)
+        assert '<div class="ux-fnote">' not in _markup(at)
+        at.selectbox(key=f"hub_from_{A1}").set_value("sales2")
+        at.run(timeout=25)
+        assert "You are replying from sales2, not the account that started this thread (sales1)." in _html.unescape(_markup(at))
+        at.selectbox(key=f"hub_from_{A1}").set_value("sales1")
+        at.run(timeout=25)
+        assert '<div class="ux-fnote">' not in _markup(at)
+
+
+def test_a_reply_is_sent_from_the_account_chosen_in_from_not_the_threads():
+    with hub() as (at, captured):
+        _compose(at, A1)
+        at.selectbox(key=f"hub_from_{A1}").set_value("sales2")
+        at.text_area(key=f"hub_body_{A1}").set_value("Sent from the other account")
+        at.run(timeout=25)
+        _click(at, f"hub_send_{A1}")
+        assert list(at.exception) == [] and list(at.error) == [] and _committed(captured)["sender_account"] == "sales2"
+
+
+def test_left_alone_the_reply_goes_from_the_threads_own_account():
+    with hub() as (at, captured):
+        _compose(at, A1)
+        at.text_area(key=f"hub_body_{A1}").set_value("Default sender")
+        at.run(timeout=25)
+        _click(at, f"hub_send_{A1}")
+        assert _committed(captured)["sender_account"] == "sales1"
+
+
+def test_with_no_thread_account_a_choice_is_required_and_the_page_says_why():
+    orphan = _resp("rZ", "77", '"Nobody Known" <nobody@abc.com>', "Re: Who?", "Who am I?", "2026-10-12 16:00:00", FullBody="Who am I replying to?")
+    gk = f"{FIXTURE_CAMPAIGN}:77"
+    with hub(_two_campaign_ws(extra_a_responses=[orphan])) as (at, captured):
+        _compose(at, gk)
+        sender = next(sb for sb in at.selectbox if sb.key == f"hub_from_{gk}")
+        assert sender.value == "" and sender.options[0] == "Choose an account…" and "sender account" in _html.unescape(_markup(at))
+        at.text_area(key=f"hub_body_{gk}").set_value("Hello")
+        at.run(timeout=25)
+        _click(at, f"hub_send_{gk}")
+        assert captured.get("commits") is None and any("No sender account resolved" in e.value for e in at.error)
+        at.selectbox(key=f"hub_from_{gk}").set_value("sales1")
+        at.run(timeout=25)
+        _click(at, f"hub_send_{gk}")
+        assert _committed(captured)["sender_account"] == "sales1"
+
+
+def test_while_the_composer_is_open_the_thread_gives_up_exactly_the_height_it_takes():
+    """Measured in a real browser: the composer is COMPOSER_HEIGHT tall (NOTE_HEIGHT more with the amber note), and the thread's OUTER wrapper (the element Streamlit gives a fixed
+    height) shrinks by exactly that, so the pane stays the same size."""
+    from inbox_view import COMPOSER_HEIGHT, NOTE_HEIGHT, THREAD_HEIGHT
+
+    def thread_rule(at):
+        found = _re.findall(r'div:has\(> \[class\*="st-key-ux_threadbody_[^"]*"\]\) \{ height: (\d+)px !important; flex: 0 0 (\d+)px !important; \}', _markup(at))
+        return found[-1] if found else None
+    with hub() as (at, _):
+        assert thread_rule(at) is None
+        _compose(at, A1)
+        assert thread_rule(at) == (str(THREAD_HEIGHT - COMPOSER_HEIGHT),) * 2
+        at.selectbox(key=f"hub_from_{A1}").set_value("sales2")
+        at.run(timeout=25)
+        assert thread_rule(at) == (str(THREAD_HEIGHT - COMPOSER_HEIGHT - NOTE_HEIGHT),) * 2
+        _compose(at, A1)
+        assert thread_rule(at) is None
+
+
+def test_the_accounts_are_only_looked_up_when_a_composer_is_opened():
+    import inbox_senders
+    calls = []
+    real = inbox_senders.build_sender_options
+    with patch("inbox_senders.build_sender_options", lambda *a, **k: calls.append(1) or real(*a, **k)):
+        with hub() as (at, _):
+            assert calls == []
+            _compose(at, A1)
+            assert len(calls) >= 1
+
+
+def test_if_the_accounts_cannot_be_listed_the_composer_still_opens_and_sends_from_the_threads_own_account():
+    with patch("inbox_senders.build_sender_options", side_effect=RuntimeError("nothing to read")):
+        with hub() as (at, captured):
+            _compose(at, A1)
+            assert list(at.exception) == [] and not any(sb.key == f"hub_from_{A1}" for sb in at.selectbox) and "sales1" in _markup(at)
+            at.text_area(key=f"hub_body_{A1}").set_value("Fallback")
+            at.run(timeout=25)
+            _click(at, f"hub_send_{A1}")
+            assert _committed(captured)["sender_account"] == "sales1"
+
+
+def test_attachments_are_added_from_a_compact_button_and_shown_as_chips_with_a_total_against_the_limit():
+    with hub() as (at, _):
+        _compose(at, A1)
+        assert any(p.proto.popover.label == "📎 Attach" for p in at.get("popover")) and '<span class="ux-chipf">' not in _markup(at)
+        at.file_uploader(key=f"hub_attachments_{A1}_0").upload("contract.pdf", b"x" * (1200 * 1024), "application/pdf")
+        at.run(timeout=25)
+        text = _markup(at)
+        assert "📄 contract.pdf" in text and "1.2 MB of 10 MB" in text and 'class="ux-total ux-over"' not in text
+
+
+def test_attachments_over_the_limit_turn_the_total_red_and_sending_is_refused():
+    with hub() as (at, captured):
+        _compose(at, A1)
+        at.file_uploader(key=f"hub_attachments_{A1}_0").upload("huge.zip", b"x" * (11 * 1024 * 1024), "application/zip")
+        at.text_area(key=f"hub_body_{A1}").set_value("With a big file")
+        at.run(timeout=25)
+        assert 'class="ux-total ux-over"' in _markup(at) and "11.0 MB of 10 MB" in _markup(at)
+        _click(at, f"hub_send_{A1}")
+        assert captured.get("commits") is None
+
+
+def test_the_campaign_tab_has_the_same_composer_with_the_same_from_choice():
+    with _campaign_tab() as (at, captured):
+        key = f"tab_{FIXTURE_CAMPAIGN}"
+        _compose(at, A1, namespace=key)
+        assert next(sb for sb in at.selectbox if sb.key == f"{key}_from_{A1}").value == "sales1"
+        assert _re.findall(r'ux-flabel">(.*?)<', _markup(at)) == ["From", "To", "Cc", "Bcc", "Subject"]
