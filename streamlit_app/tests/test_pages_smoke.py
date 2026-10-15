@@ -2134,8 +2134,10 @@ def test_sequences_tab_successive_add_variant_never_carries_over_prior_content(t
         _open_add_variant(at)
         subject_b = next(ti for ti in at.text_input if (ti.key or "").endswith("_B"))
         subject_b.set_value("Variant B's own subject")
+        next(ta for ta in at.text_area if (ta.key or "").endswith("_B")).set_value("Variant B's own body")     # the one stage is now complete, so Add turns on
         at.run(timeout=15)
         add_b_button = next(b for b in at.button if b.label == "Add Variant B")
+        assert add_b_button.disabled is False
         add_b_button.click()
         at.run(timeout=15)
 
@@ -2199,8 +2201,11 @@ def test_sequences_tab_successive_add_stage_never_carries_over_prior_content(tmp
         subject_f5 = next(ti for ti in at.text_input if (ti.key or "").startswith("followup_subject_") and
                            "followup5" in ti.key)
         subject_f5.set_value("followup5's own subject")
+        for letter in "A":                                                          # this campaign has one variant, so one is required; the Add button stays off until it is valid
+            next(ta for ta in at.text_area if (ta.key or "").startswith("followup_body_") and ta.key.endswith(f"followup5_{letter}")).set_value(f"followup5 body {letter}")
         at.run(timeout=15)
-        add_button = next(b for b in at.button if b.label == "Add followup5")
+        add_button = next(b for b in at.button if b.label == "Add Follow-up 5")
+        assert add_button.disabled is False
         add_button.click()
         at.run(timeout=15)
 
@@ -2216,11 +2221,12 @@ def test_sequences_tab_successive_add_stage_never_carries_over_prior_content(tmp
                            "followup6" in ti.key)
         assert subject_f6.value in ("", None)
         assert subject_f6.value != "followup5's own subject"
+        assert all(ta.value in ("", None) for ta in at.text_area if (ta.key or "").startswith("followup_body_") and "followup6" in ta.key)       # and no body carried over either
 
     assert list(at.exception) == []
 
 
-
+def test_sequences_tab_add_variant_stays_off_and_commits_nothing_while_the_new_variant_is_blank(tmp_path, fixture_repo):
     """Uses a synthetic partial campaign (2 stages, 1 variant) so "Add
     Variant B" is actually available to test, unlike the real fixture
     which is already fully built out."""
@@ -2254,13 +2260,12 @@ def test_sequences_tab_successive_add_stage_never_carries_over_prior_content(tmp
         _open_add_variant(at)
         add_button = next((b for b in at.button if b.label == "Add Variant B"), None)
         assert add_button is not None, "Expected an 'Add Variant B' button for a 1-variant campaign"
-        add_button.click()  # click with everything still blank — should show validation errors, not commit
+        assert add_button.disabled is True              # everything is still blank, so it cannot even be pressed
         at.run(timeout=15)
 
     assert list(at.exception) == []
     assert captured.get("commits") is None or captured["commits"] == []
-    error_texts = " ".join(e.value for e in at.error)
-    assert "Subject is required" in error_texts or "Body is required" in error_texts
+    assert not at.error
 
 
 def _account_toggles(at):
@@ -2574,8 +2579,9 @@ def test_asana_sync_settings_save_and_dispatch(tmp_path, fixture_repo):
         at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
         at.run(timeout=15)
 
-        confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "asana_sync_enabled")
+        confirm_checkbox = next(cb for cb in at.toggle if cb.key == "asana_sync_enabled")
         confirm_checkbox.set_value(True)
+        at.run(timeout=15)                                       # the project-name box appears once the switch is on
         project_input = next(ti for ti in at.text_input if ti.key == "asana_sync_project_name")
         project_input.set_value("Creator Outreach")
         at.run(timeout=15)
@@ -2614,7 +2620,7 @@ def test_tracker_sync_settings_save_and_dispatch(tmp_path, fixture_repo):
         at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
         at.run(timeout=15)
 
-        checkbox = next(cb for cb in at.checkbox if cb.key == "tracker_sync_enabled")
+        checkbox = next(cb for cb in at.toggle if cb.key == "tracker_sync_enabled")
         checkbox.set_value(True)
         at.run(timeout=15)
 
@@ -2673,7 +2679,7 @@ def test_tracker_sync_enabling_does_not_disturb_asana_settings(tmp_path, fixture
         at.session_state["selected_campaign"] = FIXTURE_CAMPAIGN
         at.run(timeout=15)
 
-        checkbox = next(cb for cb in at.checkbox if cb.key == "tracker_sync_enabled")
+        checkbox = next(cb for cb in at.toggle if cb.key == "tracker_sync_enabled")
         checkbox.set_value(True)
         at.run(timeout=15)
 
@@ -3923,5 +3929,3 @@ def test_responses_hub_check_replies_button_triggers_every_campaign(fixture_repo
     assert list(at.exception) == []
     assert list(at.error) == []
     assert dispatched == [("check_replies.yml", FIXTURE_CAMPAIGN)]
-
-
