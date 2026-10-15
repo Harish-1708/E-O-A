@@ -309,3 +309,54 @@ def test_reply_payload_path_sanitizes_slashes_in_response_id():
     path = reply_payload_path("DudeRobe", "weird/id", timestamp="2026-08-29-143012")
     assert "/" not in path.split("/", 2)[-1].replace("-2026-08-29-143012.json", "")
     assert path == "replies/DudeRobe/weird_id-2026-08-29-143012.json"
+
+
+# ================================================================ the From field
+
+import pytest  # noqa: E402
+
+from responses_reply_logic import sender_label, sender_choices, sender_change_note  # noqa: E402
+
+_DIR = {"sales1": "harish@kelson.agency", "sales2": "outreach@kelson.agency", "sales3": "press@kelson.agency"}
+_HEALTH = {"sales1": {"status": "Connected"}, "sales2": {"status": "Unknown"}, "sales3": {"status": "Disconnected", "detail": "Login failed"}}
+
+
+@pytest.mark.parametrize("name, label", [
+    ("sales1", "harish@kelson.agency (sales1)"), ("sales2", "outreach@kelson.agency (sales2)"), ("sales3", "press@kelson.agency (sales3) — disconnected: Login failed"),
+    ("ghost", "ghost"),
+])
+def test_an_account_is_labelled_by_address_and_name_and_a_disconnected_one_says_why(name, label):
+    assert sender_label(name, _DIR, _HEALTH) == label
+
+
+@pytest.mark.parametrize("record, suffix", [({"status": " DISCONNECTED "}, " — disconnected"), ({"status": "disconnected", "detail": "  "}, " — disconnected"), ({"status": "Connected"}, ""), ({}, ""), (None, "")])
+def test_only_a_disconnected_status_adds_a_warning_to_the_label(record, suffix):
+    assert sender_label("sales1", _DIR, {"sales1": record} if record is not None else {}) == "harish@kelson.agency (sales1)" + suffix
+
+
+def test_with_no_directory_or_health_the_label_is_just_the_name():
+    assert sender_label("sales1", {}, {}) == "sales1" and sender_label("sales1", None, None) == "sales1"
+
+
+def test_the_thread_account_comes_first_and_the_rest_follow_by_name():
+    assert sender_choices(_DIR, "sales2") == ["sales2", "sales1", "sales3"]
+    assert sender_choices(_DIR, "sales1") == ["sales1", "sales2", "sales3"]
+
+
+def test_a_thread_account_that_is_not_configured_is_still_offered_first():
+    assert sender_choices(_DIR, "ghost") == ["ghost", "sales1", "sales2", "sales3"]
+
+
+def test_with_no_thread_account_the_list_starts_with_an_empty_choice_that_cannot_be_sent_from():
+    assert sender_choices(_DIR, "") == ["", "sales1", "sales2", "sales3"] and sender_choices({}, "") == [""] and sender_choices({}, "sales1") == ["sales1"]
+
+
+@pytest.mark.parametrize("chosen, default, said", [("sales1", "sales1", False), ("sales2", "sales1", True), ("", "sales1", False), ("sales2", "", False), ("", "", False)])
+def test_the_amber_note_appears_only_when_a_different_account_than_the_threads_is_chosen(chosen, default, said):
+    assert bool(sender_change_note(chosen, default)) is said
+
+
+def test_the_note_names_both_accounts_and_says_when_to_use_it():
+    note = sender_change_note("sales2", "sales1")
+    assert note == ("You are replying from sales2, not the account that started this thread (sales1). The lead will see a different sender. "
+                    "Use this only if sales1 is having problems.")
