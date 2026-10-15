@@ -277,3 +277,170 @@ def test_default_hub_behavior_is_still_strictly_sequential():
         return [_lead()], [], []
     _rows, _d, errors = build_campaigns_hub(names, lambda n: cfgs[n], fetch)  # max_workers omitted
     assert len(errors) == 2  # one-at-a-time, so neither could ever meet the other
+
+
+# ================================================================ the whole-campaign send series, totals, filters, sort and name feedback
+
+from datetime import date  # noqa: E402
+
+import pytest  # noqa: E402
+
+import campaigns_hub_logic as HL  # noqa: E402
+
+
+def _sent(day, n=1, status="sent", hour="10:00:00"):
+    return [{"Timestamp": f"{day} {hour}", "Status": status} for _ in range(n)]
+
+
+def test_a_campaign_with_no_sends_has_the_empty_series():
+    assert HL.send_series([], date(2026, 10, 15)) == HL.EMPTY_SERIES and HL.send_series(None) == HL.EMPTY_SERIES
+    assert HL.send_series(_sent("2026-10-01", 3, status="failed"), date(2026, 10, 15))["bars"] == []          # only emails that went out are counted
+
+
+def test_the_series_covers_the_whole_campaign_one_bar_per_day_from_the_first_send_to_the_last():
+    log = _sent("2026-10-01", 3) + _sent("2026-10-03", 5) + _sent("2026-10-06", 2)
+    series = HL.send_series(log, date(2026, 10, 20))
+    assert series == {"bars": [3, 0, 5, 0, 0, 2], "unit": "day", "start": "2026-10-01", "end": "2026-10-06", "total": 10}
+
+
+def test_a_running_campaign_is_drawn_up_to_today_so_quiet_days_show():
+    log = _sent("2026-10-01", 3) + _sent("2026-10-03", 5)
+    series = HL.send_series(log, date(2026, 10, 6), through_today=True)
+    assert series["bars"] == [3, 0, 5, 0, 0, 0] and series["end"] == "2026-10-06"
+    assert HL.send_series(log, date(2026, 10, 6), through_today=False)["bars"] == [3, 0, 5]                     # a finished one stops at its last send
+
+
+def test_a_today_before_the_last_send_never_shortens_the_series():
+    log = _sent("2026-10-01", 1) + _sent("2026-10-09", 1)
+    assert HL.send_series(log, date(2026, 10, 5), through_today=True)["end"] == "2026-10-09"
+
+
+def test_a_campaign_of_exactly_thirty_days_is_still_drawn_day_by_day_and_a_longer_one_by_week():
+    thirty = HL.send_series(_sent("2026-09-01") + _sent("2026-09-30"), None)
+    assert thirty["unit"] == "day" and len(thirty["bars"]) == 30
+    long = HL.send_series(_sent("2026-09-01", 2) + _sent("2026-10-01", 4), None)                                # 31 days
+    assert long["unit"] == "week" and long["bars"] == [2, 0, 0, 0, 4] and long["total"] == 6
+
+
+def test_a_very_long_campaign_keeps_only_its_last_half_year_by_week_and_every_email_is_still_in_the_total():
+    log = _sent("2025-01-01", 7) + _sent("2026-10-01", 9)
+    series = HL.send_series(log, None)
+    assert series["unit"] == "week" and len(series["bars"]) == HL.MAX_WEEKLY_BARS and series["bars"][-1] == 9 and series["total"] == 16
+    assert date.fromisoformat(series["start"]).weekday() == date(2025, 1, 1).weekday()                        # the window starts on a week boundary of the campaign
+
+
+@pytest.mark.parametrize("bad", ["", "not a date", None, "2026-13-45 10:00:00", "10/01/2026"])
+def test_a_row_with_an_unreadable_time_is_skipped_not_fatal(bad):
+    log = [{"Timestamp": bad, "Status": "sent"}] + _sent("2026-10-02", 2)
+    assert HL.send_series(log, None)["bars"] == [2]
+
+
+def test_the_series_counts_like_the_sent_number_does():
+    log = _sent("2026-10-01", 4) + _sent("2026-10-02", 2, status="failed") + _sent("2026-10-02", 1, status="bounced")
+    assert HL.send_series(log, None)["total"] == 4 == sum(1 for r in log if r["Status"] == "sent")
+
+
+def test_a_hub_row_carries_the_series_and_a_draft_or_archived_one_has_the_empty_series(tmp_path):
+    cfg = {"_campaign_name": "C", "stages": [{"name": "intro"}], "status": "draft"}
+    assert HL.build_draft_campaign_row(cfg)["series"] == HL.EMPTY_SERIES and HL.build_deleted_campaign_row({**cfg, "status": "deleted"})["series"] == HL.EMPTY_SERIES
+
+
+@pytest.mark.parametrize("series, text", [
+    ({"bars": [1], "unit": "day", "start": "2026-09-03", "end": "2026-09-17"}, "Sends per day · Sep 3 – Sep 17"),
+    ({"bars": [1], "unit": "week", "start": "2026-01-05", "end": "2026-10-01"}, "Sends per week · Jan 5 – Oct 1"),
+    ({"bars": [], "unit": "day", "start": "", "end": ""}, "No sends yet"), (None, "No sends yet"), ({}, "No sends yet"),
+])
+def test_the_chart_caption_says_what_the_bars_are_and_over_what_dates(series, text):
+    assert HL.series_caption(series) == text
+
+
+def _row(name, status, leads=0, sent=0, replies=0, last=""):
+    return {"name": name, "status": status, "total_leads": leads, "sent": sent, "replies": replies, "last_activity": last, "reply_rate": "—", "problems": [], "series": HL.EMPTY_SERIES}
+
+
+ROWS = [_row("Old", "completed", 10, 28, 3, "2026-09-01 10:00:00"), _row("Live", "running", 77, 252, 51, "2026-10-14 09:00:00"), _row("Soon", "draft"), _row("Mid", "completed", 39, 235, 20, "2026-10-12 09:00:00"),
+        _row("Stuck", "attention"), _row("Hold", "paused", 5, 3, 0, "2026-10-13 09:00:00")]
+
+
+def test_the_totals_are_added_up_from_the_rows_and_the_rate_is_overall():
+    summary = HL.summarize_campaigns(ROWS)
+    assert summary == {"count": 6, "running": 1, "attention": 1, "leads": 131, "sent": 518, "replies": 74, "reply_rate": "14.3%"}
+
+
+@pytest.mark.parametrize("replies, sent, text", [(74, 515, "14.4%"), (0, 10, "0.0%"), (5, 0, "—"), (0, 0, "—"), (1, 3, "33.3%")])
+def test_the_overall_reply_rate_has_one_decimal_and_is_a_dash_with_nothing_sent(replies, sent, text):
+    assert HL.reply_rate_text(replies, sent) == text
+
+
+def test_the_totals_of_no_campaigns_are_zero_and_a_dash():
+    assert HL.summarize_campaigns([]) == {"count": 0, "running": 0, "attention": 0, "leads": 0, "sent": 0, "replies": 0, "reply_rate": "—"}
+
+
+@pytest.mark.parametrize("summary, text", [
+    ({"count": 5, "running": 1, "attention": 1}, "5 campaigns · 1 running · 1 needs attention"), ({"count": 1, "running": 0, "attention": 0}, "1 campaign"),
+    ({"count": 4, "running": 2, "attention": 2}, "4 campaigns · 2 running · 2 need attention"), ({"count": 0, "running": 0, "attention": 0}, "0 campaigns"),
+])
+def test_the_subtitle_says_only_what_is_not_zero(summary, text):
+    assert HL.hub_subtitle(summary) == text
+
+
+def test_every_status_filter_is_offered_with_its_count_in_a_fixed_order():
+    assert HL.status_filter_options(ROWS) == [("all", "All 6"), ("running", "Running 1"), ("attention", "Attention 1"), ("paused", "Paused 1"), ("draft", "Draft 1"), ("completed", "Completed 2")]
+    assert HL.status_filter_options([])[0] == ("all", "All 0") and HL.status_filter_options([])[3] == ("paused", "Paused 0")
+
+
+@pytest.mark.parametrize("status, names", [("all", ["Old", "Live", "Soon", "Mid", "Stuck", "Hold"]), ("", ["Old", "Live", "Soon", "Mid", "Stuck", "Hold"]), ("completed", ["Old", "Mid"]), ("running", ["Live"]), ("deleted", [])])
+def test_filtering_by_status_keeps_the_order_and_all_means_everything(status, names):
+    assert [r["name"] for r in HL.filter_campaigns_by_status(ROWS, status)] == names
+
+
+@pytest.mark.parametrize("option, names", [
+    ("Active first", ["Live", "Stuck", "Hold", "Soon", "Mid", "Old"]),
+    ("Last activity", ["Live", "Hold", "Mid", "Old", "Soon", "Stuck"]),
+    ("Name", ["Hold", "Live", "Mid", "Old", "Soon", "Stuck"]),
+    ("Most replies", ["Live", "Mid", "Old", "Soon", "Stuck", "Hold"]),
+    ("anything else", ["Live", "Stuck", "Hold", "Soon", "Mid", "Old"]),
+])
+def test_the_sort_options(option, names):
+    assert [r["name"] for r in HL.sort_campaigns(ROWS, option)] == names
+
+
+def test_sorting_never_changes_the_list_it_is_given():
+    before = [r["name"] for r in ROWS]
+    HL.sort_campaigns(ROWS, "Name")
+    assert [r["name"] for r in ROWS] == before
+
+
+@pytest.mark.parametrize("name, existing, kind", [("", [], "hint"), ("   ", [], "hint"), (None, [], "hint"), ("bad name", [], "error"), ("bad-name", [], "error"), ("taken", ["taken"], "error"), ("fine_1", ["taken"], "ok")])
+def test_the_name_box_gives_live_feedback(name, existing, kind):
+    assert HL.name_feedback(name, existing)[0] == kind
+
+
+def test_the_feedback_uses_the_same_reasons_the_button_will_give():
+    from campaign_builder import validate_campaign_name
+    for name, existing in (("bad name", []), ("taken", ["taken"])):
+        assert HL.name_feedback(name, existing)[1] == validate_campaign_name(name, existing)
+
+
+from unittest.mock import patch  # noqa: E402
+
+
+def _built_row(status, send_log, today=date(2026, 10, 10)):
+    cfg = {"_campaign_name": "C", "stages": [{"name": "intro"}]}
+    base = ["C", 5, 0, 4, 0, 0, 0, 1, "25.0%"]
+    with patch.object(HL, "compute_campaign_status", lambda c, leads: (status, [])), patch.object(HL.outreach, "compute_all_campaigns_row", lambda *a, **k: base):
+        return HL.build_campaign_hub_row(cfg, [], [], send_log, today=today)
+
+
+def test_a_running_campaigns_chart_reaches_today_but_a_finished_ones_stops_at_its_last_send():
+    log = _sent("2026-10-01", 2) + _sent("2026-10-03", 2)
+    running = _built_row("running", log)
+    assert running["series"]["end"] == "2026-10-10" and len(running["series"]["bars"]) == 10 and running["series"]["bars"][-1] == 0
+    for status in ("completed", "paused", "attention"):
+        assert _built_row(status, log)["series"]["end"] == "2026-10-03"
+
+
+def test_a_built_row_carries_the_numbers_the_card_shows_and_the_series_total_matches_the_sent_log():
+    row = _built_row("running", _sent("2026-10-01", 4))
+    assert (row["total_leads"], row["sent"], row["replies"], row["reply_rate"], row["status"]) == (5, 4, 1, "25.0%", "running") and row["series"]["total"] == 4
+    assert row["last_activity"] == "2026-10-01 10:00:00"
