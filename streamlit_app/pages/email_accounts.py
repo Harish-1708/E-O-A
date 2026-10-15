@@ -37,13 +37,6 @@ _just_arrived = mark_active_page("email_accounts")
 if not login_gate():
     st.stop()
 
-st.title("📧 Email Accounts")
-st.caption(
-    "Shows which sender accounts are configured and how much each has sent today — never the actual "
-    "SMTP credentials. Add/Edit/Remove briefly passes a password through this app's memory only for the "
-    "instant it takes to encrypt and send it to GitHub — it's never stored, logged, or displayed anywhere."
-)
-
 
 @st.cache_resource(show_spinner=False)
 def _get_connector() -> ReadOnlySheetsConnector:
@@ -105,19 +98,37 @@ def _load_account_health():
     return _get_connector().get_account_health()
 
 
+import email_accounts_html as EH  # noqa: E402
+import email_accounts_view_logic as EV  # noqa: E402
+
+
+def _open_dialog(kind, name=None) -> None:
+    st.session_state["ea_dialog"] = {"kind": kind, "name": name}
+
+
+def _close_dialog() -> None:
+    st.session_state["ea_dialog"] = None
+
+
+def _show_more() -> None:
+    st.session_state["ea_shown"] = int(st.session_state.get("ea_shown") or EV.PAGE_SIZE) + EV.PAGE_SIZE
+
+
+def _clear_account_filters() -> None:
+    st.session_state["ea_search"] = ""
+    st.session_state["ea_filter"] = "all"
+
+
 # =============================================================================
-# Add Account — a real dialog, same session-state pattern (and same
-# navigation-reopen fix) as the New Campaign dialog on the Campaigns page.
+# The four dialogs. Each one stays open across the reruns its own widgets cause (the page calls it again every run while ea_dialog says so), and
+# is reset on a genuine arrival at the page: the same pattern as the New Campaign dialog.
 # =============================================================================
-@st.dialog("Add Email Account")
+@st.dialog("Add email account")
 def _add_account_dialog(current_mapping):
-    st.caption(
-        "The password is encrypted in your browser's connection to GitHub before it's ever sent — this "
-        "app never stores it. If this name matches an account currently only in EMAIL_ACCOUNTS_JSON, "
-        "adding it here takes over management of that account going forward."
-    )
-    provider = st.radio("Provider", ["Gmail", "Custom (Hostinger, etc.)"], key="add_account_provider",
-                         horizontal=True)
+    st.markdown(EH.dialog_note_html(
+        "The password is encrypted on its way to GitHub and never stored here. If this name matches an account that is only in Streamlit secrets, "
+        "adding it here takes over managing that account."), unsafe_allow_html=True)
+    provider = st.radio("Provider", ["Gmail", "Custom (Hostinger, etc.)"], key="add_account_provider", horizontal=True)
     name = st.text_input("Account name (e.g. sales1)", key="add_account_name")
     address = st.text_input("Email address", key="add_account_address")
     password = st.text_input(
@@ -133,26 +144,24 @@ def _add_account_dialog(current_mapping):
             st.markdown("**SMTP (sending)**")
             smtp_host = st.text_input("SMTP Host", key="add_account_smtp_host", placeholder="smtp.hostinger.com")
             smtp_port = st.text_input("SMTP Port", key="add_account_smtp_port", placeholder="465")
-            smtp_username = st.text_input("SMTP Username", key="add_account_smtp_username",
-                                           placeholder="defaults to email address")
+            smtp_username = st.text_input("SMTP Username", key="add_account_smtp_username", placeholder="defaults to email address")
         with col_imap:
             st.markdown("**IMAP (checking replies)**")
             imap_host = st.text_input("IMAP Host", key="add_account_imap_host", placeholder="imap.hostinger.com")
             imap_port = st.text_input("IMAP Port", key="add_account_imap_port", placeholder="993")
-            imap_username = st.text_input("IMAP Username", key="add_account_imap_username",
-                                           placeholder="defaults to email address")
-            imap_password = st.text_input("IMAP Password (only if different from SMTP password above)",
-                                           type="password", key="add_account_imap_password")
+            imap_username = st.text_input("IMAP Username", key="add_account_imap_username", placeholder="defaults to email address")
+            imap_password = st.text_input("IMAP Password (only if different from SMTP password above)", type="password", key="add_account_imap_password")
 
     confirm = st.checkbox("Add this account now", key="add_account_confirm")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        submit_clicked = st.button("Add Account", type="primary", disabled=not confirm)
-    with col2:
-        if st.button("Cancel", key="cancel_add_account"):
-            st.session_state["show_add_account_dialog"] = False
-            st.rerun()
+    _spacer, cancel_column, go_column = st.columns([2, 1, 1.5])
+    with cancel_column:
+        cancelled = st.button("Cancel", key="cancel_add_account", width="stretch")
+    with go_column:
+        submit_clicked = st.button("Add account", type="primary", disabled=not confirm, key="add_account_go", width="stretch")
+    if cancelled:
+        _close_dialog()
+        st.rerun()
 
     if submit_clicked:
         errors = []
@@ -188,7 +197,7 @@ def _add_account_dialog(current_mapping):
                     client.dispatch_workflow(WORKFLOW_CHECK_ACCOUNT_HEALTH, {})
                 except GitHubActionsError:
                     pass  # non-critical — the periodic health check will still catch it within 2 hours
-                st.session_state["show_add_account_dialog"] = False
+                _close_dialog()
                 st.success(
                     f"'{name.strip()}' added to slot {slot}. May take a minute to reflect here while the "
                     "app redeploys — a connection check was triggered too."
@@ -197,33 +206,19 @@ def _add_account_dialog(current_mapping):
                 st.error(f"Failed to add account: {exc}")
 
 
-if "show_add_account_dialog" not in st.session_state:
-    st.session_state["show_add_account_dialog"] = False
-if st.button("➕ Add Account"):
-    st.session_state["show_add_account_dialog"] = True
-# Reset on genuine navigation, not on reruns triggered by widgets inside
-# the dialog itself — same fix as the New Campaign dialog on Campaigns.
-# Uses the SAME _just_arrived computed once at the top of the script;
-# calling mark_active_page a second time here would always see "no
-# change" (the first call just set it), silently breaking this check.
-if _just_arrived:
-    st.session_state["show_add_account_dialog"] = False
-if st.session_state["show_add_account_dialog"]:
-    _add_account_dialog(slot_mapping)
-
-with st.expander("📥 Bulk Add Accounts (CSV)"):
-    st.caption(
-        "Add many accounts at once — from a plain Gmail list to a full custom-provider setup. Only "
-        "Name, Email, and Password are required; every other column is optional and only needed for a "
-        "non-Gmail provider (Hostinger, etc.)."
-    )
-    st.code(
-        "Name,Email,Password,IMAP Password,SMTP Host,SMTP Port,SMTP Username,IMAP Host,IMAP Port,IMAP Username\n"
-        "sales1,sales1@gmail.com,app-password-here,,,,,,,\n"
-        "hostinger1,sales@example.com,smtp-password-here,imap-password-if-different,"
-        "smtp.hostinger.com,465,,imap.hostinger.com,993,",
-        language="csv",
-    )
+@st.dialog("Bulk add accounts (CSV)", width="large")
+def _bulk_add_dialog(current_mapping):
+    st.markdown(EH.dialog_note_html(
+        "Add many accounts at once, from a plain Gmail list to a full custom-provider setup. Only Name, Email and Password are required; every other column is optional "
+        "and only needed for a non-Gmail provider (Hostinger, etc.)."), unsafe_allow_html=True)
+    with st.expander("Show the column layout"):
+        st.code(
+            "Name,Email,Password,IMAP Password,SMTP Host,SMTP Port,SMTP Username,IMAP Host,IMAP Port,IMAP Username\n"
+            "sales1,sales1@gmail.com,app-password-here,,,,,,,\n"
+            "hostinger1,sales@example.com,smtp-password-here,imap-password-if-different,"
+            "smtp.hostinger.com,465,,imap.hostinger.com,993,",
+            language="csv",
+        )
     bulk_file = st.file_uploader("Upload CSV", type=["csv"], key="bulk_accounts_csv_upload")
     if bulk_file is not None:
         bulk_columns, bulk_rows = parse_csv_bytes(bulk_file.getvalue())
@@ -243,11 +238,17 @@ with st.expander("📥 Bulk Add Accounts (CSV)"):
             )
             st.caption(f"This will make {len(parsed_accounts)} separate API call(s) to GitHub (one per "
                        "account's secret) — a large upload may take a little while.")
-            confirm_bulk = st.checkbox(f"Add all {len(parsed_accounts)} account(s) now",
-                                        key="confirm_bulk_add_accounts")
-            if st.button("Add All Accounts", type="primary", disabled=not confirm_bulk,
-                         key="bulk_add_accounts_button"):
-                working_mapping = dict(slot_mapping)
+            confirm_bulk = st.checkbox(f"Add all {len(parsed_accounts)} account(s) now", key="confirm_bulk_add_accounts")
+            _spacer, cancel_column, go_column = st.columns([2, 1, 1.5])
+            with cancel_column:
+                cancelled = st.button("Cancel", key="cancel_bulk_accounts", width="stretch")
+            with go_column:
+                go_clicked = st.button("Add all accounts", type="primary", disabled=not confirm_bulk, key="bulk_add_accounts_button", width="stretch")
+            if cancelled:
+                _close_dialog()
+                st.rerun()
+            if go_clicked:
+                working_mapping = dict(current_mapping)
                 added_names = []
                 skipped = []
                 client = _get_github_client()
@@ -285,18 +286,134 @@ with st.expander("📥 Bulk Add Accounts (CSV)"):
                     st.warning(f"{len(skipped)} account(s) skipped:")
                     for s in skipped:
                         st.caption(f"- {s}")
+    else:
+        if st.button("Cancel", key="cancel_bulk_accounts_empty"):
+            _close_dialog()
+            st.rerun()
 
-if not account_directory:
-    st.info(
-        "No accounts configured yet — click ➕ Add Account above, or (legacy path) add "
-        "[email_accounts_directory] to Streamlit Secrets for accounts still managed directly in "
-        "EMAIL_ACCOUNTS_JSON."
-    )
-    st.stop()
 
-if st.button("🔄 Refresh"):
+def _edit_dialog(name):
+    entry = slot_mapping.get(name)
+
+    @st.dialog(f"Edit {name}")
+    def _body():
+        if entry is None:
+            st.info("This account is set up in Streamlit secrets, so it cannot be edited here. Add it again with the same name to manage it.")
+            return
+        st.markdown(EH.dialog_note_html(f"Slot {entry['slot']} · {entry['address']}"), unsafe_allow_html=True)
+        new_address = st.text_input("Email address", value=entry["address"], key=f"manage_address_{name}")
+        new_password = st.text_input(
+            "New app password (leave blank to keep the current one)", type="password",
+            key=f"manage_password_{name}",
+        )
+        _spacer, cancel_column, save_column = st.columns([2, 1, 1.5])
+        with cancel_column:
+            cancelled = st.button("Cancel", key=f"manage_cancel_{name}", width="stretch")
+        with save_column:
+            save_clicked = st.button("💾 Save changes", type="primary", key=f"manage_save_{name}", width="stretch")
+        if cancelled:
+            _close_dialog()
+            st.rerun()
+        if save_clicked:
+            try:
+                client = _get_github_client()
+                if new_password and new_password.strip():
+                    secret_payload = json.dumps({
+                        "name": name, "address": new_address.strip(),
+                        "app_password": new_password.strip(),
+                    })
+                    client.set_secret(f"EMAIL_ACCOUNT_SLOT_{entry['slot']}", secret_payload)
+                if new_address.strip() != entry["address"]:
+                    updated_mapping = update_account_address_in_mapping(slot_mapping, name, new_address.strip())
+                    client.create_file(
+                        SLOT_MAPPING_PATH, serialize_slot_mapping(updated_mapping),
+                        message=f"Update address for '{name}' (via Streamlit, by {current_user()})",
+                    )
+                _close_dialog()
+                st.success(f"'{name}' updated. May take a minute to reflect here while the app "
+                           "redeploys.")
+            except (ValueError, GitHubActionsError) as exc:
+                st.error(f"Failed to update: {exc}")
+    _body()
+
+
+def _remove_dialog(name):
+    entry = slot_mapping.get(name)
+
+    @st.dialog(f"Remove {name}?")
+    def _body():
+        if entry is None:
+            st.info("This account is set up in Streamlit secrets, so it cannot be removed here.")
+            return
+        st.markdown(EH.dialog_note_html(entry["address"]), unsafe_allow_html=True)
+        st.markdown(EH.warn_box_html("This deletes the stored password for this account. Campaigns that still list it as a sender will no longer be able to use it."), unsafe_allow_html=True)
+        confirm_remove = st.checkbox("Confirm removal", key=f"manage_confirm_remove_{name}")
+        _spacer, cancel_column, remove_column = st.columns([1.2, 1, 2])                 # wide enough for the longer label
+        with cancel_column:
+            # NOT named manage_remove_...: the red styling of the Remove button is keyed on that text, and Cancel must never look like the destructive one.
+            cancelled = st.button("Cancel", key=f"manage_cancelremove_{name}", width="stretch")
+        with remove_column:
+            remove_clicked = st.button("🗑 Remove account", key=f"manage_remove_{name}", disabled=not confirm_remove, width="stretch")
+        if cancelled:
+            _close_dialog()
+            st.rerun()
+        if remove_clicked:
+            try:
+                client = _get_github_client()
+                client.delete_secret(f"EMAIL_ACCOUNT_SLOT_{entry['slot']}")
+                updated_mapping = remove_account_from_mapping(slot_mapping, name)
+                client.create_file(
+                    SLOT_MAPPING_PATH, serialize_slot_mapping(updated_mapping),
+                    message=f"Remove email account '{name}' (via Streamlit, by {current_user()})",
+                )
+                _close_dialog()
+                st.success(f"'{name}' removed. May take a minute to reflect here while the app "
+                           "redeploys.")
+            except GitHubActionsError as exc:
+                st.error(f"Failed to remove: {exc}")
+    _body()
+
+
+# =============================================================================
+# The page
+# =============================================================================
+st.markdown(f"<style>{EH.EA_CSS}</style>", unsafe_allow_html=True)
+if "ea_dialog" not in st.session_state:
+    st.session_state["ea_dialog"] = None
+# Reset on genuine navigation, not on reruns triggered by widgets inside a dialog itself. Uses the SAME _just_arrived computed once at the top of the script;
+# calling mark_active_page a second time here would always see "no change" (the first call just set it).
+if _just_arrived:
+    st.session_state["ea_dialog"] = None
+
+with st.container(key="ea_head"):
+    head_column, refresh_column, bulk_column, add_column = st.columns([4.2, 1.6, 1.6, 1.6], vertical_alignment="center")       # the three buttons get the same width
+    head_column.markdown(EH.page_head_html("Email Accounts", "The sender accounts your campaigns send from, and how each one is doing."), unsafe_allow_html=True)
+    with refresh_column:
+        refresh_clicked = st.button("🔄 Refresh", key="ea_refresh", width="stretch")
+    with bulk_column:
+        st.button("📥 Bulk add (CSV)", key="ea_bulk_open", width="stretch", on_click=_open_dialog, args=("bulk",))
+    with add_column:
+        st.button("＋ Add account", type="primary", key="ea_add_open", width="stretch", on_click=_open_dialog, args=("add",))
+if refresh_clicked:
     _load_send_logs.clear()
     _load_account_health.clear()
+st.markdown(EH.security_banner_html(), unsafe_allow_html=True)
+
+_dialog = st.session_state.get("ea_dialog")
+if _dialog:
+    if _dialog["kind"] == "add":
+        _add_account_dialog(slot_mapping)
+    elif _dialog["kind"] == "bulk":
+        _bulk_add_dialog(slot_mapping)
+    elif _dialog["kind"] == "edit":
+        _edit_dialog(_dialog["name"])
+    elif _dialog["kind"] == "remove":
+        _remove_dialog(_dialog["name"])
+
+if not account_directory:
+    st.markdown(EH.empty_state_html("No accounts configured yet", "Campaigns send from these accounts. Add one at a time, or many at once with a CSV."), unsafe_allow_html=True)
+    st.caption("Older setup: add [email_accounts_directory] to Streamlit Secrets for accounts still managed directly in EMAIL_ACCOUNTS_JSON.")
+    st.stop()
 
 send_logs_by_campaign, unavailable_campaigns = _load_send_logs(tuple(campaigns))
 sent_today_by_account = aggregate_sent_today_by_account(send_logs_by_campaign)
@@ -304,22 +421,47 @@ sent_today_by_account = aggregate_sent_today_by_account(send_logs_by_campaign)
 health_records = _load_account_health()
 health_lookup = build_health_lookup(health_records)
 rows = build_account_rows(account_directory, sent_today_by_account, default_account, health_lookup=health_lookup)
+cards = EV.account_cards(rows, slot_mapping)
 
-_STATUS_ICONS = {"Connected": "🟢", "Disconnected": "🔴", "Unknown": "⚪"}
+st.markdown(EH.stats_html(EV.summarize_accounts(cards)), unsafe_allow_html=True)
 
-st.dataframe(
-    {
-        "Account": [r["name"] + (" ⭐" if r["is_default"] else "") for r in rows],
-        "Address": [r["address"] for r in rows],
-        "Status": [f"{_STATUS_ICONS.get(r['status'], '⚪')} {r['status']}" for r in rows],
-        "Detail": [r["status_detail"] if r["status"] == "Disconnected" else "" for r in rows],
-        "Last Checked": [r["checked_at"] or "—" for r in rows],
-        "Sent Today (all campaigns)": [r["sent_today"] for r in rows],
-        "Default": ["Yes" if r["is_default"] else "" for r in rows],
-    },
-    width="stretch",
-    hide_index=True,
-)
+with st.container(key="ea_toolbar"):
+    filter_column, search_column = st.columns([4, 1.8])
+    options = EV.status_filter_options(cards)
+    labels = dict(options)
+    if st.session_state.get("ea_filter") not in labels:
+        st.session_state["ea_filter"] = "all"
+    with filter_column:
+        chosen = st.pills("Status", [key for key, _ in options], format_func=lambda key: labels[key], selection_mode="single", key="ea_filter", label_visibility="collapsed")
+    search = ""
+    if EV.show_search(len(cards)):
+        with search_column:
+            search = st.text_input("Search accounts", key="ea_search", label_visibility="collapsed", placeholder="🔍 Search accounts…")
+
+visible = EV.filter_accounts(cards, chosen, search)
+if not visible:
+    st.markdown(EH.empty_state_html("No accounts match", "Check the spelling, or clear the search and the status filter."), unsafe_allow_html=True)
+    st.button("Clear search", key="ea_clear_filters", on_click=_clear_account_filters)
+else:
+    drawn, hidden = EV.visible_count(len(visible), st.session_state.get("ea_shown"))
+    for index, card in enumerate(visible[:drawn]):
+        with st.container(key=f"ea_card_{card['kind']}_{index}"):
+            body_column, action_column = st.columns([5.3, 2.3], vertical_alignment="center")
+            body_column.markdown(EH.account_card_html(card), unsafe_allow_html=True)
+            with action_column:
+                if card["managed"]:
+                    first_column, second_column = st.columns(2)
+                    with first_column:
+                        if card["kind"] == "bad":
+                            st.button("🔑 Update password", key=f"ea_fix_{card['name']}", width="stretch", on_click=_open_dialog, args=("edit", card["name"]))
+                        else:
+                            st.button("✎ Edit", key=f"ea_edit_{card['name']}", width="stretch", on_click=_open_dialog, args=("edit", card["name"]))
+                    with second_column:
+                        st.button("Remove", key=f"ea_remove_{card['name']}", width="stretch", on_click=_open_dialog, args=("remove", card["name"]))
+                else:
+                    st.markdown(EH.legacy_note_html(), unsafe_allow_html=True)
+    if hidden:
+        st.button(EV.show_more_label(hidden), key="ea_show_more", on_click=_show_more)
 
 if not health_records:
     st.caption(
@@ -328,73 +470,4 @@ if not health_records:
     )
 
 if unavailable_campaigns:
-    st.caption(
-        f"{len(unavailable_campaigns)} campaign(s) not counted yet (no Send Log tab exists — "
-        f"nothing sent for them yet): {', '.join(unavailable_campaigns)}"
-    )
-
-# =============================================================================
-# Manage — Edit/Remove, only for accounts tracked in the slot mapping file.
-# An account that only exists in the legacy EMAIL_ACCOUNTS_JSON / Streamlit
-# secret isn't manageable here — its slot isn't known (GitHub Secrets can't
-# be read back to find out). Use Add Account with the same name to bring
-# it under this app's management first.
-# =============================================================================
-manageable_names = sorted(slot_mapping.keys())
-if manageable_names:
-    st.divider()
-    st.subheader("Manage accounts")
-    st.caption(
-        f"{len(manageable_names)} account(s) added or migrated through this app can be edited or "
-        "removed here. Pick one from the dropdown — this scales the same whether you have 5 accounts "
-        "or 500."
-    )
-
-    selected_name = st.selectbox("Account", manageable_names, key="manage_account_select")
-    entry = slot_mapping[selected_name]
-    st.caption(f"Slot {entry['slot']}")
-
-    new_address = st.text_input("Email address", value=entry["address"], key=f"manage_address_{selected_name}")
-    new_password = st.text_input(
-        "New app password (leave blank to keep the current one)", type="password",
-        key=f"manage_password_{selected_name}",
-    )
-
-    edit_col, remove_col = st.columns(2)
-    with edit_col:
-        if st.button("💾 Save Changes", key=f"manage_save_{selected_name}"):
-            try:
-                client = _get_github_client()
-                if new_password and new_password.strip():
-                    secret_payload = json.dumps({
-                        "name": selected_name, "address": new_address.strip(),
-                        "app_password": new_password.strip(),
-                    })
-                    client.set_secret(f"EMAIL_ACCOUNT_SLOT_{entry['slot']}", secret_payload)
-                if new_address.strip() != entry["address"]:
-                    updated_mapping = update_account_address_in_mapping(slot_mapping, selected_name,
-                                                                         new_address.strip())
-                    client.create_file(
-                        SLOT_MAPPING_PATH, serialize_slot_mapping(updated_mapping),
-                        message=f"Update address for '{selected_name}' (via Streamlit, by {current_user()})",
-                    )
-                st.success(f"'{selected_name}' updated. May take a minute to reflect here while the app "
-                           "redeploys.")
-            except (ValueError, GitHubActionsError) as exc:
-                st.error(f"Failed to update: {exc}")
-
-    with remove_col:
-        confirm_remove = st.checkbox("Confirm removal", key=f"manage_confirm_remove_{selected_name}")
-        if st.button("🗑️ Remove", key=f"manage_remove_{selected_name}", disabled=not confirm_remove):
-            try:
-                client = _get_github_client()
-                client.delete_secret(f"EMAIL_ACCOUNT_SLOT_{entry['slot']}")
-                updated_mapping = remove_account_from_mapping(slot_mapping, selected_name)
-                client.create_file(
-                    SLOT_MAPPING_PATH, serialize_slot_mapping(updated_mapping),
-                    message=f"Remove email account '{selected_name}' (via Streamlit, by {current_user()})",
-                )
-                st.success(f"'{selected_name}' removed. May take a minute to reflect here while the app "
-                           "redeploys.")
-            except GitHubActionsError as exc:
-                st.error(f"Failed to remove: {exc}")
+    st.caption(EV.not_counted_note(unavailable_campaigns))
