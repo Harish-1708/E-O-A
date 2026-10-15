@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from page_state import mark_active_page  # noqa: E402
 from auth import login_gate, current_user  # noqa: E402
-from config import REPO_ROOT, WORKFLOW_CHECK_REPLIES, WORKFLOW_MARK_RESPONSES_READ  # noqa: E402
+from config import REPO_ROOT, WORKFLOW_CHECK_REPLIES, WORKFLOW_MARK_RESPONSES_READ, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH  # noqa: E402
 from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
@@ -24,6 +24,8 @@ from responses_hub_logic import (  # noqa: E402
 from conversation_logic import filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from data_import_logic import payload_to_bytes  # noqa: E402
 from inbox_view import InboxContext, render_inbox  # noqa: E402
+from inbox_senders import build_sender_options  # noqa: E402
+from accounts_logic import build_health_lookup  # noqa: E402
 
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -60,6 +62,16 @@ def _safe_github_client():
         return _get_github_client()
     except Exception:  # noqa: BLE001 - missing/invalid token, etc.
         return None
+
+
+@st.cache_resource(ttl=300, show_spinner=False)
+def _load_account_health():
+    """{account name: {status, detail, checked_at}} from the Email Accounts Health tab, held for five minutes; an empty answer on any failure (the reply composer then
+    simply shows no health beside the accounts)."""
+    try:
+        return build_health_lookup(_get_connector().get_account_health())
+    except Exception:  # noqa: BLE001 - no health data just means none is shown
+        return {}
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -229,6 +241,7 @@ if groups:
         pending_sync_keys=pending_sync_keys,
         show_campaign=True,
         sent_for=lambda name, lead_id: filter_sent_mail_for_lead(_load_sent_mail_cached(name), lead_id),
+        sender_options=lambda: build_sender_options(dict(st.secrets.get("email_accounts_directory", {})), _safe_github_client(), EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, _load_account_health),
     ))
 else:
     st.info("No responses match these filters.")
