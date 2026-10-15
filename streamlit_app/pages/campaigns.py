@@ -21,6 +21,8 @@ from accounts_logic import build_health_lookup, merge_account_directories  # noq
 from github_client import GitHubClient, GitHubActionsError  # noqa: E402
 from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
+import campaigns_hub_html as HH  # noqa: E402
+import campaigns_hub_logic as HL  # noqa: E402
 from campaigns_hub_logic import build_campaigns_hub, filter_campaigns_by_search  # noqa: E402
 from performance_logic import build_campaign_performance, build_best_performers  # noqa: E402
 from performance_view import render_performance  # noqa: E402
@@ -204,26 +206,6 @@ def _load_hub_rows():
     return build_campaigns_hub(campaign_names, _get_campaign_cfg_live, _fetch_for_hub, max_workers=6)
 
 
-def _relative_time(timestamp_str: str) -> str:
-    if not timestamp_str:
-        return "—"
-    try:
-        dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
-        return timestamp_str
-    delta = datetime.now() - dt
-    seconds = delta.total_seconds()
-    if seconds < 0:
-        return timestamp_str
-    if seconds < 60:
-        return "just now"
-    if seconds < 3600:
-        return f"{int(seconds // 60)} min ago"
-    if seconds < 86400:
-        return f"{int(seconds // 3600)} hr ago"
-    return f"{int(seconds // 86400)} day(s) ago"
-
-
 # =============================================================================
 # New Campaign — inline modal, no separate page. Minimal by design: just a
 # name and one Intro variant. Everything else (more variants, follow-ups,
@@ -256,26 +238,26 @@ PLACEHOLDER_INTRO_BODY = (
 )
 
 
-@st.dialog("Duplicate Campaign")
+@st.dialog("Duplicate campaign")
 def _duplicate_campaign_dialog(source_campaign_name, existing_campaigns):
-    st.caption(
-        f"Copies every template (every stage x every variant) from '{source_campaign_name}' under a "
-        "brand new name — completely independent files from the moment this runs, so editing or "
-        "deleting a template on the duplicate later can never affect the original. Settings (sending "
-        "limits, schedule, Asana sync) carry over too, except status, which always starts as Draft. "
-        "Leads, sends, and replies are never copied — the duplicate starts with none."
-    )
-    new_name = st.text_input("New campaign name (letters, numbers, underscores only)",
-                              key="duplicate_campaign_new_name")
+    st.markdown(HH.source_chip_html(source_campaign_name), unsafe_allow_html=True)
+    st.markdown(HH.copy_list_html([
+        (True, "Every template: each stage and each variant, as brand new independent files. Editing or deleting one on the duplicate can never affect the original."),
+        (True, "Settings: sending limits, schedule and Asana sync carry over. The status always starts as Draft."),
+        (False, "Leads, sends and replies are never copied. The duplicate starts with none."),
+    ]), unsafe_allow_html=True)
+    new_name = st.text_input("New campaign name", key="duplicate_campaign_new_name", placeholder="e.g. Spring_Launch_2")
+    st.markdown(HH.name_feedback_html(*HL.name_feedback(new_name, existing_campaigns)), unsafe_allow_html=True)
     confirm = st.checkbox("Duplicate now", key="duplicate_campaign_confirm")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        duplicate_clicked = st.button("Duplicate Campaign", type="primary", disabled=not confirm)
-    with col2:
-        if st.button("Cancel", key="cancel_duplicate_campaign"):
-            st.session_state["duplicating_campaign"] = None
-            st.rerun()
+    _spacer, cancel_column, go_column = st.columns([1.2, 1, 2])                    # wide enough for the longer label
+    with cancel_column:
+        cancelled = st.button("Cancel", key="cancel_duplicate_campaign", width="stretch")
+    with go_column:
+        duplicate_clicked = st.button("Duplicate campaign", type="primary", disabled=not confirm, key="duplicate_campaign_go", width="stretch")
+    if cancelled:
+        st.session_state["duplicating_campaign"] = None
+        st.rerun()
 
     if duplicate_clicked:
         name_error = validate_campaign_name(new_name, existing_campaigns)
@@ -320,22 +302,22 @@ def _duplicate_campaign_dialog(source_campaign_name, existing_campaigns):
                 st.error(f"Failed to duplicate: {exc}")
 
 
-@st.dialog("New Campaign")
+@st.dialog("New campaign")
 def _new_campaign_dialog(existing_campaigns):
-    st.caption(
-        "Just the name — you'll write the actual email in the Sequences tab once the campaign exists "
-        "(a placeholder Intro is created for you to edit there)."
-    )
-    campaign_name = st.text_input("Campaign name (letters, numbers, underscores only)")
-    confirm = st.checkbox("Create now — it's live immediately, no approval step")
+    st.markdown(HH.dialog_intro_html("Just the name. You write the actual email in the Sequences tab once the campaign exists (a placeholder Intro is created for you to edit there)."),
+                unsafe_allow_html=True)
+    campaign_name = st.text_input("Campaign name", key="new_campaign_name", placeholder="e.g. Spring_Launch")
+    st.markdown(HH.name_feedback_html(*HL.name_feedback(campaign_name, existing_campaigns)), unsafe_allow_html=True)
+    confirm = st.checkbox("Create now — it's live immediately, no approval step", key="new_campaign_confirm")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        create_clicked = st.button("Create Campaign", type="primary", disabled=not confirm)
-    with col2:
-        if st.button("Cancel"):
-            st.session_state["show_new_campaign_dialog"] = False
-            st.rerun()
+    _spacer, cancel_column, go_column = st.columns([2, 1, 1.5])
+    with cancel_column:
+        cancelled = st.button("Cancel", key="new_campaign_cancel", width="stretch")
+    with go_column:
+        create_clicked = st.button("Create campaign", type="primary", disabled=not confirm, key="new_campaign_go", width="stretch")
+    if cancelled:
+        st.session_state["show_new_campaign_dialog"] = False
+        st.rerun()
 
     if create_clicked:
         name_error = validate_campaign_name(campaign_name, existing_campaigns)
@@ -377,24 +359,38 @@ def _new_campaign_dialog(existing_campaigns):
 # =============================================================================
 # Hub view — list, search, click into a campaign
 # =============================================================================
-def _render_hub(just_arrived: bool):
-    st.title("Campaigns")
+def _clear_hub_filters() -> None:
+    st.session_state["hub_search"] = ""
+    st.session_state["hub_filter"] = "all"
 
-    col1, col2, col3 = st.columns([3, 1, 1])
-    with col1:
-        search = st.text_input("🔍 Search campaigns...", label_visibility="collapsed",
-                                placeholder="🔍 Search campaigns...")
-    with col2:
-        if st.button("🔄 Refresh", width="stretch", key="refresh_hub_button"):
-            _load_hub_rows.clear()
-            _fetch_full_campaign_data_cached.clear()
-            _get_master_header_cached.clear()
-            st.rerun()
-    with col3:
-        if "show_new_campaign_dialog" not in st.session_state:
-            st.session_state["show_new_campaign_dialog"] = False
-        if st.button("＋ New Campaign", width="stretch"):
-            st.session_state["show_new_campaign_dialog"] = True
+
+def _open_new_campaign_dialog() -> None:
+    st.session_state["show_new_campaign_dialog"] = True
+
+
+def _render_hub(just_arrived: bool):
+    st.markdown(f"<style>{HH.HUB_CSS}</style>", unsafe_allow_html=True)
+    if "show_new_campaign_dialog" not in st.session_state:
+        st.session_state["show_new_campaign_dialog"] = False
+
+    # The list is read first so the header can say what is in it; a failure is reported below the header, which (and its buttons) still works.
+    try:
+        rows, deleted_rows, errors = _load_hub_rows()
+        load_error = None
+    except Exception as exc:  # noqa: BLE001
+        rows, deleted_rows, errors, load_error = [], [], [], exc
+
+    with st.container(key="hub_head"):
+        head_column, refresh_column, new_column = st.columns([6, 1.5, 1.5], vertical_alignment="center")        # the two buttons get the same width
+        head_column.markdown(HH.page_head_html("Campaigns", HL.hub_subtitle(HL.summarize_campaigns(rows)) if load_error is None else ""), unsafe_allow_html=True)
+        with refresh_column:
+            if st.button("🔄 Refresh", width="stretch", key="refresh_hub_button"):
+                _load_hub_rows.clear()
+                _fetch_full_campaign_data_cached.clear()
+                _get_master_header_cached.clear()
+                st.rerun()
+        with new_column:
+            st.button("＋ New campaign", type="primary", width="stretch", key="hub_new_campaign", on_click=_open_new_campaign_dialog)
         # Re-checked on EVERY rerun, not just the click that opened it —
         # st.dialog only stays visually open across a rerun triggered by a
         # widget INSIDE it if the code path that calls the dialog function
@@ -428,57 +424,73 @@ def _render_hub(just_arrived: bool):
             existing_campaigns = []
         _duplicate_campaign_dialog(st.session_state["duplicating_campaign"], existing_campaigns)
 
-    try:
-        rows, deleted_rows, errors = _load_hub_rows()
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Couldn't load campaigns: {exc}")
+    if load_error is not None:
+        st.error(f"Couldn't load campaigns: {load_error}")
         st.stop()
 
-    rows = filter_campaigns_by_search(rows, search)
+    st.markdown(HH.stats_html(HL.summarize_campaigns(rows)), unsafe_allow_html=True)
+
+    with st.container(key="hub_toolbar"):
+        filter_column, search_column, sort_column = st.columns([4.4, 1.9, 1.5])
+        options = HL.status_filter_options(rows)
+        labels = dict(options)
+        if st.session_state.get("hub_filter") not in labels:
+            st.session_state["hub_filter"] = "all"
+        with filter_column:
+            chosen = st.pills("Status", [key for key, _ in options], format_func=lambda key: labels[key], selection_mode="single", key="hub_filter", label_visibility="collapsed")
+        with search_column:
+            search = st.text_input("Search campaigns", key="hub_search", label_visibility="collapsed", placeholder="🔍 Search campaigns…")
+        with sort_column:
+            sort = st.selectbox("Sort", HL.SORT_OPTIONS, key="hub_sort", label_visibility="collapsed", format_func=lambda option: f"Sort: {option}")
+
+    visible = HL.sort_campaigns(HL.filter_campaigns_by_status(filter_campaigns_by_search(rows, search), chosen or "all"), sort)
 
     if not rows:
-        st.info("No campaigns match yet." if search else "No campaigns yet — create one to get started.")
+        st.markdown(HH.empty_state_html("📣", "Create your first campaign", "It only needs a name. You write the emails in the Sequences tab afterwards."), unsafe_allow_html=True)
+        if st.button("＋ New campaign", type="primary", key="hub_empty_new", on_click=_open_new_campaign_dialog):
+            pass
+    elif not visible:
+        what = f"“{search.strip()}”" if search and search.strip() else "this filter"
+        st.markdown(HH.empty_state_html("🔍", f"No campaigns match {what}", "Check the spelling, or clear the search and the status filter."), unsafe_allow_html=True)
+        st.button("Clear search", key="hub_clear_filters", on_click=_clear_hub_filters)
     else:
-        for row in rows:
-            with st.container(border=True):
-                c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 1, 1, 1, 2])
-                c1.markdown(f"**{row['name']}**")
-                c2.write(row["status_label"])
-                c3.write(f"{row['total_leads']} leads")
-                c4.write(f"{row['sent']} sent")
-                c5.write(f"{row['replies']} replies")
-                c6.write(f"Last activity: {_relative_time(row['last_activity'])}")
-                if row["problems"]:
-                    c2.caption(", ".join(row["problems"]))
-                button_col1, button_col2 = st.columns(2)
-                with button_col1:
-                    if st.button("Open", key=f"open_{row['name']}", width="stretch"):
-                        st.session_state["selected_campaign"] = row["name"]
-                        st.rerun()
-                with button_col2:
-                    if st.button("⧉ Duplicate", key=f"duplicate_{row['name']}", width="stretch"):
-                        st.session_state["duplicating_campaign"] = row["name"]
-                        st.rerun()
+        for index, row in enumerate(visible):
+            with st.container(key=f"hub_card_{row['status']}_{index}"):
+                body_column, action_column = st.columns([5.4, 2.1], vertical_alignment="center")
+                body_column.markdown(HH.campaign_card_html(row), unsafe_allow_html=True)
+                with action_column:
+                    open_column, duplicate_column = st.columns(2)
+                    with open_column:
+                        if st.button("Open →", key=f"open_{row['name']}", width="stretch"):
+                            st.session_state["selected_campaign"] = row["name"]
+                            st.rerun()
+                    with duplicate_column:
+                        if st.button("⧉ Duplicate", key=f"duplicate_{row['name']}", width="stretch"):
+                            st.session_state["duplicating_campaign"] = row["name"]
+                            st.rerun()
 
     if errors:
-        with st.expander(f"{len(errors)} campaign(s) couldn't be loaded"):
+        st.markdown(HH.load_error_html(len(errors)), unsafe_allow_html=True)
+        with st.expander("Show details"):
             for name, message in errors:
                 st.write(f"**{name}** — {message}")
 
     if deleted_rows:
-        with st.expander(f"🗑️ Deleted Campaigns ({len(deleted_rows)})"):
+        with st.expander(f"🗑 Archived campaigns ({len(deleted_rows)})"):
             st.caption(
                 "Temporarily removed — hidden from the list above, but nothing about them changed. "
                 "Restore brings a campaign back exactly as it was, including whether it was Running, "
                 "Paused, or still a Draft."
             )
-            for row in deleted_rows:
-                col1, col2 = st.columns([4, 1])
-                col1.write(f"**{row['name']}**")
-                if col2.button("↩️ Restore", key=f"restore_{row['name']}"):
-                    if _restore_campaign(row["name"]):
-                        st.success(f"'{row['name']}' restored.")
-                        st.rerun()
+            for index, row in enumerate(deleted_rows):
+                with st.container(key=f"hub_arch_{index}"):
+                    name_column, restore_column = st.columns([4, 1], vertical_alignment="center")
+                    name_column.markdown(f'<div class="hb-archname">{HH.esc(row["name"])}</div>', unsafe_allow_html=True)
+                    with restore_column:
+                        if st.button("↩ Restore", key=f"restore_{row['name']}", width="stretch"):
+                            if _restore_campaign(row["name"]):
+                                st.success(f"'{row['name']}' restored.")
+                                st.rerun()
 
 
 # =============================================================================
