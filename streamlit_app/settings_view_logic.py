@@ -36,17 +36,35 @@ def pool_names(picked: List[str], rotation_on: bool, all_names: List[str], defau
     return [default_account] if default_account and default_account in all_names else []
 
 
-def rotation_summary(picked: List[str], rotation_on: bool, default_account: str = "") -> str:
-    """One sentence saying what the account choices will actually do."""
+def account_label(name: str, directory: Optional[Dict[str, str]] = None) -> str:
+    """An account as people know it: its address with the internal name beside it, 'harish@kelson.agency (sales1)'. The name alone when the address is not known."""
+    address = (directory or {}).get(name)
+    return f"{address} ({name})" if address else str(name)
+
+
+def rotation_summary(picked: List[str], rotation_on: bool, default_account: str = "", directory: Optional[Dict[str, str]] = None) -> str:
+    """One sentence saying what the account choices will actually do, naming each account by its address (the rows above show addresses, so the sentence must too)."""
     if picked:
         if len(picked) == 1:
-            return f"All emails go out from {picked[0]}."
-        return f"Emails go out from {len(picked)} accounts, taking turns: {', '.join(picked)}."
+            return f"All emails go out from {account_label(picked[0], directory)}."
+        return f"Emails go out from {len(picked)} accounts, taking turns: {', '.join(account_label(name, directory) for name in picked)}."
     if rotation_on:
         return "No accounts picked, so every configured account takes turns."
     if default_account:
-        return f"No accounts picked and rotation is off, so the default sender ({default_account}) is used."
+        return f"No accounts picked and rotation is off, so the default sender, {account_label(default_account, directory)}, is used."
     return "No accounts picked and rotation is off, so the campaign's default sender is used."
+
+
+SEARCH_MIN_ACCOUNTS = 4          # a search box is only useful once there are several accounts to look through (the design shows it with four)
+SELECT_ALL_MIN_ACCOUNTS = 2      # 'Select all' means nothing with a single account
+
+
+def show_search(account_count: int) -> bool:
+    return account_count >= SEARCH_MIN_ACCOUNTS
+
+
+def show_select_all(account_count: int) -> bool:
+    return account_count >= SELECT_ALL_MIN_ACCOUNTS
 
 
 def select_all_text(on: int, total: int) -> str:
