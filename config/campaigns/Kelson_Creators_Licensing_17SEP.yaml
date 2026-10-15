@@ -13,6 +13,7 @@ sending:
   sender_rotation: true
   rotation_accounts:
   - sales1
+  per_account_daily_limit: 200
 asana:
   enabled: true
   project_name: Creator Outreach
