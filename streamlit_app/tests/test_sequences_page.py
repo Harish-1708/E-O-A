@@ -1,6 +1,7 @@
 """The Sequences tab through the real page: the stage list, the one-variant-at-a-time editor with its safeguards, the preview and its checks, adding and
 deleting. A small fake GitHub remembers what is committed and deleted, so 'save, then read it back' behaves like the real thing."""
 import contextlib
+import html
 import os
 import re
 import sys
@@ -499,13 +500,20 @@ def test_add_variant_opens_a_form_with_every_stage_and_cancel_goes_back_without_
         assert any(b.key == "sq_save_button" for b in at.button) and world.commits == []
 
 
-def test_a_new_variant_needs_content_for_every_stage_before_anything_is_committed():
+def test_a_new_variant_needs_content_for_every_stage_and_the_add_button_stays_off_until_it_has_it():
     with seq_page(world=_letters_world("AB")) as (at, world):
         next(b for b in at.button if b.key == "sq_add_variant_button").click()
         go(at)
-        next(b for b in at.button if b.label == "Add Variant C").click()
+        add = lambda: next(b for b in at.button if b.key == "sq_add_variant_go")                  # noqa: E731
+        assert add().disabled is True and world.commits == [] and "0 of 5 stages ready · fill Intro, Follow-up 1, Follow-up 2, Follow-up 3 and Follow-up 4 to add Variant C" in markup(at)
+        next(t for t in at.text_input if t.key == f"newvariant_subject_{FIXTURE_CAMPAIGN}_intro_C").set_value("Intro subject")
+        next(t for t in at.text_area if t.key == f"newvariant_body_{FIXTURE_CAMPAIGN}_intro_C").set_value("Intro body")
         go(at)
-        assert at.error and world.commits == []
+        assert add().disabled is True and "1 of 5 stages ready" in markup(at)                      # only one stage is filled in
+        for stage in STAGES[1:]:
+            next(t for t in at.text_area if t.key == f"newvariant_body_{FIXTURE_CAMPAIGN}_{stage}_C").set_value(f"Body C {stage}")
+        go(at)
+        assert add().disabled is False and "All 5 stages ready" in markup(at)
 
 
 def test_adding_a_variant_commits_one_file_per_stage_shows_a_confirmation_and_selects_the_new_variant():
@@ -537,8 +545,10 @@ def test_add_stage_opens_a_form_for_the_next_stage_with_every_variant_and_cancel
     with seq_page() as (at, world):
         next(b for b in at.button if b.key == "sq_add_stage_button").click()
         go(at)
-        assert any("followup5" in m.value and "Required variants" in m.value for m in at.markdown)
+        assert any("Next stage: <b>Follow-up 5</b>" in m.value and "required variants: A, B, C, D" in m.value for m in at.markdown)
         assert [t.key for t in at.text_input if (t.key or "").startswith("followup_subject_")] == [f"followup_subject_{FIXTURE_CAMPAIGN}_followup5_{v}" for v in LETTERS]
+        tabs = next(r for r in at.radio if (r.key or "").startswith("sq_variant_addtab_"))
+        assert tabs.options == ["Variant A ○", "Variant B ○", "Variant C ○", "Variant D ○"]
         next(b for b in at.button if b.key == "sq_cancel_stage_button").click()
         go(at)
         assert any(b.key == "sq_save_button" for b in at.button) and world.commits == []
@@ -551,7 +561,7 @@ def test_adding_a_stage_commits_one_file_per_variant_shows_a_confirmation_and_op
         for v in LETTERS:
             next(t for t in at.text_area if t.key == f"followup_body_{FIXTURE_CAMPAIGN}_followup5_{v}").set_value(f"Body of followup5 {v}")
         go(at)
-        next(b for b in at.button if b.label == "Add followup5").click()
+        next(b for b in at.button if b.label == "Add Follow-up 5").click()
         go(at)
         assert list(at.exception) == [] and len(world.commits) == 1
         assert sorted(f["path"].rsplit("/", 1)[-1] for f in world.commits[0]["files"]) == [f"followup5_{v}.txt" for v in LETTERS]
@@ -674,24 +684,25 @@ def test_choosing_a_stage_while_a_form_is_open_closes_the_form_and_shows_that_st
         assert not any(b.label == "Add Variant C" for b in at.button) and subject_input(at).key == "subject_followup3_A"
         next(b for b in at.button if b.key == "sq_add_stage_button").click()
         go(at)
-        assert any("followup5" in m.value and "Required variants" in m.value for m in at.markdown)
+        assert any("Next stage: <b>Follow-up 5</b>" in m.value for m in at.markdown)
         pick_stage(at, 1)
-        assert not any(b.label == "Add followup5" for b in at.button) and subject_input(at).key == "subject_followup1_A"
+        assert not any(b.label == "Add Follow-up 5" for b in at.button) and subject_input(at).key == "subject_followup1_A"
 
 
-def test_a_new_stage_needs_a_body_for_every_variant_before_anything_is_committed():
+def test_a_new_stage_needs_a_body_for_every_variant_and_the_add_button_stays_off_until_it_has_them():
     with seq_page() as (at, world):
         next(b for b in at.button if b.key == "sq_add_stage_button").click()
         go(at)
-        next(b for b in at.button if b.label == "Add followup5").click()                  # everything still blank
-        go(at)
-        assert any("Variant A" in e.value for e in at.error) and world.commits == []
-        for v in "AB":                                                                      # filling in only some variants is still refused
+        add = lambda: next(b for b in at.button if b.key == "sq_add_stage_go")                    # noqa: E731
+        assert add().disabled is True and "0 of 4 variants ready · fill A, B, C and D to add this stage" in markup(at)         # everything still blank
+        for v in "AB":                                                                              # filling in only some variants is still not enough
             next(t for t in at.text_area if t.key == f"followup_body_{FIXTURE_CAMPAIGN}_followup5_{v}").set_value("Some body")
         go(at)
-        next(b for b in at.button if b.label == "Add followup5").click()
+        assert add().disabled is True and "2 of 4 variants ready · fill C and D to add this stage" in markup(at) and world.commits == []
+        next(t for t in at.text_area if t.key == f"followup_body_{FIXTURE_CAMPAIGN}_followup5_C").set_value("Some body")
+        next(t for t in at.text_area if t.key == f"followup_body_{FIXTURE_CAMPAIGN}_followup5_D").set_value("Some body")
         go(at)
-        assert any("Variant C" in e.value for e in at.error) and world.commits == []
+        assert add().disabled is False and "All 4 variants ready" in markup(at)
 
 
 # ================================================================ when GitHub says no, the message appears and nothing typed is lost
@@ -726,9 +737,9 @@ def test_a_failed_add_stage_says_why_and_keeps_the_form_and_what_was_typed():
         for v in LETTERS:
             next(t for t in at.text_area if t.key == f"followup_body_{FIXTURE_CAMPAIGN}_followup5_{v}").set_value(f"Body {v}")
         go(at)
-        next(b for b in at.button if b.label == "Add followup5").click()
+        next(b for b in at.button if b.label == "Add Follow-up 5").click()
         go(at)
-        assert any("Failed to add stage: boom" in e.value for e in at.error) and any(b.label == "Add followup5" for b in at.button)
+        assert any("Failed to add stage: boom" in e.value for e in at.error) and any(b.label == "Add Follow-up 5" for b in at.button)
         assert next(t for t in at.text_area if t.key == f"followup_body_{FIXTURE_CAMPAIGN}_followup5_B").value == "Body B"
 
 
@@ -812,3 +823,145 @@ def test_every_stage_and_variant_shows_its_own_results_and_says_which_they_are()
                 title = "Intro" if prefix == "intro" else "Follow-up 1"
                 assert f'<span class="sq-scope">{title} · Variant {letter}</span>' in text
         assert seen == {("intro", "A"): ("4", "2", "50.0%"), ("intro", "B"): ("3", "0", "0.0%"), ("followup1", "A"): ("2", "1", "50.0%"), ("followup1", "B"): ("5", "1", "20.0%")}
+
+
+# ================================================================ the add forms: tabs, placeholders, preview, progress
+
+def open_add_stage(at):
+    next(b for b in at.button if b.key == "sq_add_stage_button").click()
+    go(at)
+
+
+def open_add_variant(at):
+    next(b for b in at.button if b.key == "sq_add_variant_button").click()
+    go(at)
+
+
+def fu_body(at, letter):
+    return next(t for t in at.text_area if t.key == f"followup_body_{FIXTURE_CAMPAIGN}_followup5_{letter}")
+
+
+def stage_tabs(at):
+    return next(r for r in at.radio if (r.key or "").startswith("sq_variant_addtab_"))
+
+
+def test_each_variant_tab_gets_a_tick_as_its_content_becomes_valid():
+    with seq_page() as (at, _):
+        open_add_stage(at)
+        fu_body(at, "B").set_value("Some body")
+        go(at)
+        assert stage_tabs(at).options == ["Variant A ○", "Variant B ✓", "Variant C ○", "Variant D ○"]
+        fu_body(at, "B").set_value("")
+        go(at)
+        assert stage_tabs(at).options[1] == "Variant B ○"
+
+
+def test_only_the_chosen_tab_is_shown_but_every_tab_keeps_what_was_typed():
+    """Streamlit forgets an input that is not drawn, so the others stay on the page (hidden) rather than being removed."""
+    with seq_page() as (at, _):
+        open_add_stage(at)
+        fu_body(at, "A").set_value("Body for A")
+        fu_body(at, "C").set_value("Body for C")
+        go(at)
+        assert 'sq_addpane_0_x"] { display: flex' in markup(at)
+        stage_tabs(at).set_value(2)
+        go(at)
+        assert 'sq_addpane_2_x"] { display: flex' in markup(at) and 'sq_addpane_0_x"] { display: flex' not in markup(at)
+        assert (fu_body(at, "A").value, fu_body(at, "C").value) == ("Body for A", "Body for C")                       # nothing was lost by switching
+        stage_tabs(at).set_value(0)
+        go(at)
+        assert fu_body(at, "A").value == "Body for A" and stage_tabs(at).options[2] == "Variant C ✓"
+
+
+def test_every_variant_has_its_own_placeholder_pills_that_add_to_the_end_of_its_own_body():
+    with seq_page() as (at, _):
+        open_add_stage(at)
+        fu_body(at, "B").set_value("Hello")
+        go(at)
+        groups = [g for g in at.get("button_group") if (g.key or "").startswith("sq_addph_followup_body_")]
+        assert len(groups) == 4
+        next(g for g in groups if g.key.endswith("_followup5_B")).set_value("{{FirstName}}")
+        go(at)
+        assert fu_body(at, "B").value == "Hello{{FirstName}}" and fu_body(at, "A").value == ""
+
+
+def test_the_preview_and_the_checks_follow_the_variant_being_edited_and_say_check_before_adding():
+    with seq_page(leads=[lead(1, FirstName="Maya")]) as (at, _):
+        open_add_stage(at)
+        fu_body(at, "A").set_value("Hi {{FirstName}}, A speaking")
+        fu_body(at, "C").set_value("Hi {{FirstName}}, C speaking")
+        go(at)
+        assert "Hi Maya, A speaking" in html.unescape(markup(at)) and "C speaking" not in markup(at)
+        stage_tabs(at).set_value(2)
+        go(at)
+        text = html.unescape(markup(at))
+        assert "Hi Maya, C speaking" in text and "A speaking</div>" not in text and 'sq-checks-title">Check before adding<' in text
+
+
+def test_a_placeholder_that_matches_no_column_is_caught_by_the_check_before_adding():
+    with seq_page(leads=[lead(1)]) as (at, _):
+        open_add_stage(at)
+        fu_body(at, "A").set_value("Hi {{Typo}}")
+        go(at)
+        assert "⚠" in markup(at) and "Typo" in markup(at)
+
+
+def test_the_new_stage_appears_in_the_list_as_a_dashed_card_that_counts_the_variants_ready():
+    with seq_page() as (at, _):
+        assert "sq-stage-new" not in markup(at).replace(".sq-stage-new", "")
+        open_add_stage(at)
+        text = markup(at)
+        assert '<div class="sq-stage sq-stage-new">' in text and 'sq-stage-name">Follow-up 5<' in text and "New · 0 of 4 variants ready" in text
+        fu_body(at, "A").set_value("Body")
+        fu_body(at, "D").set_value("Body")
+        go(at)
+        assert "New · 2 of 4 variants ready" in markup(at)
+        next(b for b in at.button if b.key == "sq_cancel_stage_button").click()
+        go(at)
+        assert '<div class="sq-stage sq-stage-new">' not in markup(at)
+
+
+def test_a_wait_that_is_not_known_for_the_new_stage_is_left_out_rather_than_guessed():
+    with seq_page() as (at, _):
+        open_add_stage(at)
+        text = html.unescape(markup(at))
+        assert "Next stage: <b>Follow-up 5</b>" in text and "sends " not in text.split("Next stage:")[1].split("</div>")[0]
+
+
+def test_the_add_variant_form_has_a_tab_per_stage_a_preview_and_the_same_progress_line():
+    with seq_page(world=_letters_world("AB"), leads=[lead(1, FirstName="Maya")]) as (at, _):
+        open_add_variant(at)
+        tabs = next(r for r in at.radio if (r.key or "").startswith("sq_variant_addtab_"))
+        assert tabs.options == ["Intro ○", "Follow-up 1 ○", "Follow-up 2 ○", "Follow-up 3 ○", "Follow-up 4 ○"]
+        next(t for t in at.text_input if t.key == f"newvariant_subject_{FIXTURE_CAMPAIGN}_intro_C").set_value("Subject for Maya")
+        next(t for t in at.text_area if t.key == f"newvariant_body_{FIXTURE_CAMPAIGN}_intro_C").set_value("Hi {{FirstName}}")
+        go(at)
+        tabs = next(r for r in at.radio if (r.key or "").startswith("sq_variant_addtab_"))
+        assert tabs.options[0] == "Intro ✓" and "1 of 5 stages ready" in markup(at)
+        assert "Hi Maya" in html.unescape(markup(at)) and 'sq-checks-title">Check before adding<' in html.unescape(markup(at))
+        tabs.set_value(3)
+        go(at)
+        assert "Hi Maya" not in html.unescape(markup(at)) and 'sq_addpane_3_x"] { display: flex' in markup(at)
+
+
+def test_the_first_stage_tab_of_a_new_variant_needs_a_subject_but_the_others_do_not():
+    with seq_page(world=_letters_world("AB")) as (at, _):
+        open_add_variant(at)
+        next(t for t in at.text_area if t.key == f"newvariant_body_{FIXTURE_CAMPAIGN}_intro_C").set_value("Body without a subject")
+        next(t for t in at.text_area if t.key == f"newvariant_body_{FIXTURE_CAMPAIGN}_followup1_C").set_value("A follow-up needs no subject")
+        go(at)
+        tabs = next(r for r in at.radio if (r.key or "").startswith("sq_variant_addtab_"))
+        assert tabs.options[0] == "Intro ○" and tabs.options[1] == "Follow-up 1 ✓"
+
+
+def test_adding_a_variant_commits_all_its_files_once_every_stage_is_filled_in():
+    with seq_page(world=_letters_world("AB")) as (at, world):
+        open_add_variant(at)
+        next(t for t in at.text_input if t.key == f"newvariant_subject_{FIXTURE_CAMPAIGN}_intro_C").set_value("Subject")
+        for stage in STAGES:
+            next(t for t in at.text_area if t.key == f"newvariant_body_{FIXTURE_CAMPAIGN}_{stage}_C").set_value(f"Body C {stage}")
+        go(at)
+        next(b for b in at.button if b.key == "sq_add_variant_go").click()
+        go(at)
+        assert list(at.exception) == [] and len(world.commits) == 1
+        assert sorted(f["path"].rsplit("/", 1)[-1] for f in world.commits[0]["files"]) == sorted(f"{stage}_C.txt" for stage in STAGES)
