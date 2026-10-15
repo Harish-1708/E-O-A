@@ -123,18 +123,18 @@ def test_new_campaign_dialog_disabled_until_confirmation_checked(fixture_repo):
             at.session_state[k] = v
         at.run(timeout=15)
 
-        new_campaign_button = next(b for b in at.button if "New Campaign" in b.label)
+        new_campaign_button = next(b for b in at.button if "New campaign" in b.label)
         new_campaign_button.click()
         at.run(timeout=15)
 
         assert list(at.exception) == []
-        create_button = next(b for b in at.button if b.label == "Create Campaign")
+        create_button = next(b for b in at.button if b.label == "Create campaign")
         assert create_button.disabled is True
 
         confirm_checkbox = at.checkbox[0]
         confirm_checkbox.set_value(True)
         at.run(timeout=15)
-        create_button = next(b for b in at.button if b.label == "Create Campaign")
+        create_button = next(b for b in at.button if b.label == "Create campaign")
         assert create_button.disabled is False
 
 
@@ -161,16 +161,16 @@ def test_new_campaign_dialog_creates_campaign_and_stays_on_hub(fixture_repo):
             at.session_state[k] = v
         at.run(timeout=15)
 
-        new_campaign_button = next(b for b in at.button if "New Campaign" in b.label)
+        new_campaign_button = next(b for b in at.button if "New campaign" in b.label)
         new_campaign_button.click()
         at.run(timeout=15)
 
         text_inputs = {ti.label: ti for ti in at.text_input}
-        text_inputs["Campaign name (letters, numbers, underscores only)"].set_value("BrandNewCampaign")
+        text_inputs["Campaign name"].set_value("BrandNewCampaign")
         at.checkbox[0].set_value(True)
         at.run(timeout=15)
 
-        create_button = next(b for b in at.button if b.label == "Create Campaign")
+        create_button = next(b for b in at.button if b.label == "Create campaign")
         create_button.click()
         at.run(timeout=15)
 
@@ -182,8 +182,7 @@ def test_new_campaign_dialog_creates_campaign_and_stays_on_hub(fixture_repo):
     assert b"Write your subject here" in captured["commits"][0]["content"]
     assert captured["dispatched"] == "dashboard.yml"  # auto tab-init was triggered
     assert "selected_campaign" not in at.session_state  # stayed on the hub, didn't auto-navigate
-    titles = [t.value for t in at.title]
-    assert "Campaigns" in titles  # still the hub, not a campaign detail page
+    assert 'class="hb-title">Campaigns<' in " ".join(m.value for m in at.markdown)  # still the hub, not a campaign detail page
 
 
 def test_new_campaign_dialog_only_asks_for_name_no_template_fields(fixture_repo):
@@ -197,7 +196,7 @@ def test_new_campaign_dialog_only_asks_for_name_no_template_fields(fixture_repo)
             at.session_state[k] = v
         at.run(timeout=15)
 
-        new_campaign_button = next(b for b in at.button if "New Campaign" in b.label)
+        new_campaign_button = next(b for b in at.button if "New campaign" in b.label)
         new_campaign_button.click()
         at.run(timeout=15)
 
@@ -225,7 +224,7 @@ def test_new_campaign_dialog_does_not_reopen_after_navigating_away_and_back(fixt
             at.session_state[k] = v
         at.run(timeout=15)
 
-        new_campaign_button = next(b for b in at.button if "New Campaign" in b.label)
+        new_campaign_button = next(b for b in at.button if "New campaign" in b.label)
         new_campaign_button.click()
         at.run(timeout=15)
         assert at.session_state["show_new_campaign_dialog"] is True
@@ -258,7 +257,7 @@ def test_new_campaign_dialog_stays_open_across_its_own_widget_interactions(fixtu
             at.session_state[k] = v
         at.run(timeout=15)
 
-        new_campaign_button = next(b for b in at.button if "New Campaign" in b.label)
+        new_campaign_button = next(b for b in at.button if "New campaign" in b.label)
         new_campaign_button.click()
         at.run(timeout=15)
 
@@ -282,7 +281,7 @@ def test_new_campaign_dialog_cancel_button_closes_it(fixture_repo):
             at.session_state[k] = v
         at.run(timeout=15)
 
-        new_campaign_button = next(b for b in at.button if "New Campaign" in b.label)
+        new_campaign_button = next(b for b in at.button if "New campaign" in b.label)
         new_campaign_button.click()
         at.run(timeout=15)
 
@@ -307,16 +306,16 @@ def test_new_campaign_dialog_rejects_duplicate_name(fixture_repo):
             at.session_state[k] = v
         at.run(timeout=15)
 
-        new_campaign_button = next(b for b in at.button if "New Campaign" in b.label)
+        new_campaign_button = next(b for b in at.button if "New campaign" in b.label)
         new_campaign_button.click()
         at.run(timeout=15)
 
         text_inputs = {ti.label: ti for ti in at.text_input}
-        text_inputs["Campaign name (letters, numbers, underscores only)"].set_value(FIXTURE_CAMPAIGN)
+        text_inputs["Campaign name"].set_value(FIXTURE_CAMPAIGN)
         at.checkbox[0].set_value(True)
         at.run(timeout=15)
 
-        create_button = next(b for b in at.button if b.label == "Create Campaign")
+        create_button = next(b for b in at.button if b.label == "Create campaign")
         create_button.click()
         at.run(timeout=15)
 
@@ -342,15 +341,12 @@ def test_email_accounts_page_renders_without_exceptions(fixture_repo):
         at.secrets.update(secrets)
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == [], f"Email Accounts page raised: {list(at.exception)}"
     assert list(at.error) == [], f"Email Accounts page showed an error: {[e.value for e in at.error]}"
-    assert len(at.dataframe) >= 1
-    df = at.dataframe[0].value
-    account_col = " ".join(str(v) for v in df["Account"])
-    assert "sales1" in account_col
-    assert "sales2" in account_col
+    text = " ".join(str(m.value) for m in at.markdown)
+    assert "sales1@example.com" in text and "sales2@example.com" in text and text.count('class="ea-addr"') == 2
 
 
 def test_email_accounts_page_shows_info_when_no_accounts_configured_at_all(fixture_repo_without_accounts):
@@ -360,12 +356,11 @@ def test_email_accounts_page_shows_info_when_no_accounts_configured_at_all(fixtu
     at.secrets.update(_dashboard_secrets())  # no email_accounts_directory key, no slot mapping file
     for k, v in _authed_session().items():
         at.session_state[k] = v
-    at.run()
+    at.run(timeout=15)
 
     assert list(at.exception) == []
-    info_texts = " ".join(i.value for i in at.info)
-    assert "No accounts configured yet" in info_texts
-    assert any(b.label == "➕ Add Account" for b in at.button)
+    assert "No accounts configured yet" in " ".join(str(m.value) for m in at.markdown)
+    assert any(b.key == "ea_add_open" for b in at.button)
 
 
 def test_email_accounts_page_shows_connection_status_when_health_data_exists(fixture_repo):
@@ -388,16 +383,13 @@ def test_email_accounts_page_shows_connection_status_when_health_data_exists(fix
         at.secrets.update(secrets)
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == [], f"Email Accounts page raised: {list(at.exception)}"
     assert list(at.error) == []
-    df = at.dataframe[0].value
-    status_col = " ".join(str(v) for v in df["Status"])
-    assert "🟢 Connected" in status_col
-    assert "🔴 Disconnected" in status_col
-    detail_col = " ".join(str(v) for v in df["Detail"])
-    assert "AUTHENTICATIONFAILED" in detail_col  # the disconnection reason shown, plainly
+    text = " ".join(str(m.value) for m in at.markdown)
+    assert "● Connected" in text and "● Disconnected" in text
+    assert '<div class="ea-why">AUTHENTICATIONFAILED</div>' in text  # the disconnection reason shown, plainly
 
 
 def test_email_accounts_page_shows_unknown_status_when_no_health_tab_yet(fixture_repo):
@@ -414,13 +406,11 @@ def test_email_accounts_page_shows_unknown_status_when_no_health_tab_yet(fixture
         at.secrets.update(secrets)
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == []
     assert list(at.error) == []
-    df = at.dataframe[0].value
-    status_col = " ".join(str(v) for v in df["Status"])
-    assert "⚪ Unknown" in status_col
+    assert "○ Unknown" in " ".join(str(m.value) for m in at.markdown)
     caption_texts = " ".join(c.value for c in at.caption)
     assert "runs automatically every 2 hours" in caption_texts
 
@@ -443,12 +433,12 @@ def test_email_accounts_page_refresh_button_busts_caches_and_refetches(fixture_r
         at.secrets.update(secrets)
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
         assert list(at.exception) == []
         refresh_button = next(b for b in at.button if "Refresh" in b.label)
         refresh_button.click()
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == [], f"Refresh raised: {list(at.exception)}"
     assert list(at.error) == []
@@ -479,20 +469,20 @@ def test_add_account_dialog_disabled_until_confirmed(tmp_path, fixture_repo):
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
-        add_button = next(b for b in at.button if b.label == "➕ Add Account")
+        add_button = next(b for b in at.button if b.key == "ea_add_open")
         add_button.click()
-        at.run()
+        at.run(timeout=15)
 
         assert list(at.exception) == []
-        submit_button = next(b for b in at.button if b.label == "Add Account")
+        submit_button = next(b for b in at.button if b.key == "add_account_go")
         assert submit_button.disabled is True
 
         confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "add_account_confirm")
         confirm_checkbox.set_value(True)
-        at.run()
-        submit_button = next(b for b in at.button if b.label == "Add Account")
+        at.run(timeout=15)
+        submit_button = next(b for b in at.button if b.key == "add_account_go")
         assert submit_button.disabled is False
 
 
@@ -514,11 +504,11 @@ def test_add_account_happy_path_writes_secret_and_mapping_and_triggers_health_ch
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
-        add_button = next(b for b in at.button if b.label == "➕ Add Account")
+        add_button = next(b for b in at.button if b.key == "ea_add_open")
         add_button.click()
-        at.run()
+        at.run(timeout=15)
 
         name_input = next(ti for ti in at.text_input if ti.key == "add_account_name")
         name_input.set_value("sales1")
@@ -528,11 +518,11 @@ def test_add_account_happy_path_writes_secret_and_mapping_and_triggers_health_ch
         password_input.set_value("aaaabbbbccccdddd")
         confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "add_account_confirm")
         confirm_checkbox.set_value(True)
-        at.run()
+        at.run(timeout=15)
 
-        submit_button = next(b for b in at.button if b.label == "Add Account")
+        submit_button = next(b for b in at.button if b.key == "add_account_go")
         submit_button.click()
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == [], f"Add Account raised: {list(at.exception)}"
     assert list(at.error) == []
@@ -562,15 +552,15 @@ def test_add_account_custom_provider_fields_reach_the_secret(tmp_path, fixture_r
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
-        add_button = next(b for b in at.button if b.label == "➕ Add Account")
+        add_button = next(b for b in at.button if b.key == "ea_add_open")
         add_button.click()
-        at.run()
+        at.run(timeout=15)
 
         provider_radio = next(r for r in at.radio if r.key == "add_account_provider")
         provider_radio.set_value("Custom (Hostinger, etc.)")
-        at.run()
+        at.run(timeout=15)
 
         next(ti for ti in at.text_input if ti.key == "add_account_name").set_value("hostinger1")
         next(ti for ti in at.text_input if ti.key == "add_account_address").set_value("sales@example.com")
@@ -580,11 +570,11 @@ def test_add_account_custom_provider_fields_reach_the_secret(tmp_path, fixture_r
         next(ti for ti in at.text_input if ti.key == "add_account_imap_host").set_value("imap.hostinger.com")
         next(ti for ti in at.text_input if ti.key == "add_account_imap_port").set_value("993")
         next(cb for cb in at.checkbox if cb.key == "add_account_confirm").set_value(True)
-        at.run()
+        at.run(timeout=15)
 
-        submit_button = next(b for b in at.button if b.label == "Add Account")
+        submit_button = next(b for b in at.button if b.key == "add_account_go")
         submit_button.click()
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == [], f"Add Account (custom provider) raised: {list(at.exception)}"
     assert list(at.error) == []
@@ -615,20 +605,22 @@ def test_bulk_add_accounts_csv_adds_every_valid_row(tmp_path, fixture_repo):
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
+        next(b for b in at.button if b.key == "ea_bulk_open").click()                 # the bulk form is a dialog now
+        at.run(timeout=15)
         uploader = next(fu for fu in at.file_uploader if fu.key == "bulk_accounts_csv_upload")
         uploader.upload("accounts.csv", csv_content, "text/csv")
-        at.run()
+        at.run(timeout=15)
 
         assert list(at.exception) == []
         confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "confirm_bulk_add_accounts")
         confirm_checkbox.set_value(True)
-        at.run()
+        at.run(timeout=15)
 
         add_all_button = next(b for b in at.button if b.key == "bulk_add_accounts_button")
         add_all_button.click()
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == [], f"Bulk add raised: {list(at.exception)}"
     assert list(at.error) == []
@@ -664,11 +656,13 @@ def test_bulk_add_accounts_csv_reports_invalid_rows_without_blocking_valid_ones(
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
+        next(b for b in at.button if b.key == "ea_bulk_open").click()                 # the bulk form is a dialog now
+        at.run(timeout=15)
         uploader = next(fu for fu in at.file_uploader if fu.key == "bulk_accounts_csv_upload")
         uploader.upload("accounts.csv", csv_content, "text/csv")
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == []
     warning_texts = " ".join(w.value for w in at.warning)
@@ -688,19 +682,19 @@ def test_add_account_rejects_blank_fields_without_writing_anything(tmp_path, fix
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
-        add_button = next(b for b in at.button if b.label == "➕ Add Account")
+        add_button = next(b for b in at.button if b.key == "ea_add_open")
         add_button.click()
-        at.run()
+        at.run(timeout=15)
 
         confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "add_account_confirm")
         confirm_checkbox.set_value(True)
-        at.run()
+        at.run(timeout=15)
 
-        submit_button = next(b for b in at.button if b.label == "Add Account")
+        submit_button = next(b for b in at.button if b.key == "add_account_go")
         submit_button.click()
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == []
     assert captured["set_secret_calls"] == []
@@ -715,18 +709,18 @@ def test_add_account_dialog_does_not_reopen_after_navigating_away(tmp_path, fixt
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
-        add_button = next(b for b in at.button if b.label == "➕ Add Account")
+        add_button = next(b for b in at.button if b.key == "ea_add_open")
         add_button.click()
-        at.run()
-        assert at.session_state["show_add_account_dialog"] is True
+        at.run(timeout=15)
+        assert at.session_state["ea_dialog"] == {"kind": "add", "name": None}
 
         at.session_state["_active_page"] = "dashboard"  # simulate visiting another page
-        at.run()  # return, without clicking Add Account or Cancel
+        at.run(timeout=15)  # return, without clicking Add Account or Cancel
 
     assert list(at.exception) == []
-    assert at.session_state["show_add_account_dialog"] is False
+    assert at.session_state["ea_dialog"] is None
 
 
 def _write_slot_mapping_fixture(tmp_path, mapping_yaml):
@@ -747,12 +741,12 @@ def test_manage_section_shows_only_accounts_tracked_in_slot_mapping(tmp_path, fi
         at.secrets.update(secrets)
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == []
-    manage_selector = next(sb for sb in at.selectbox if sb.key == "manage_account_select")
-    assert "sales1" in manage_selector.options
-    assert "legacy_only" not in manage_selector.options  # not manageable via this app
+    assert any(b.key == "ea_edit_sales1" for b in at.button) and any(b.key == "ea_remove_sales1" for b in at.button)
+    assert not any(b.key in ("ea_edit_legacy_only", "ea_remove_legacy_only", "ea_fix_legacy_only") for b in at.button)  # not manageable via this app
+    assert "Set up in Streamlit secrets" in " ".join(str(m.value) for m in at.markdown)
 
 
 def test_manage_section_edit_address_commits_updated_mapping_no_secret_write(tmp_path, fixture_repo):
@@ -769,15 +763,17 @@ def test_manage_section_edit_address_commits_updated_mapping_no_secret_write(tmp
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
+        next(b for b in at.button if b.key == "ea_edit_sales1").click()                 # open this account's dialog
+        at.run(timeout=15)
         address_input = next(ti for ti in at.text_input if ti.key == "manage_address_sales1")
         address_input.set_value("new@gmail.com")
-        at.run()
+        at.run(timeout=15)
 
         save_button = next(b for b in at.button if b.key == "manage_save_sales1")
         save_button.click()
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == [], f"Edit raised: {list(at.exception)}"
     assert list(at.error) == []
@@ -802,15 +798,17 @@ def test_manage_section_edit_with_new_password_writes_secret(tmp_path, fixture_r
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
+        next(b for b in at.button if b.key == "ea_edit_sales1").click()                 # open this account's dialog
+        at.run(timeout=15)
         password_input = next(ti for ti in at.text_input if ti.key == "manage_password_sales1")
         password_input.set_value("newpassword1234")
-        at.run()
+        at.run(timeout=15)
 
         save_button = next(b for b in at.button if b.key == "manage_save_sales1")
         save_button.click()
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == []
     assert list(at.error) == []
@@ -831,8 +829,10 @@ def test_manage_section_remove_requires_confirmation_checkbox(tmp_path, fixture_
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
+        next(b for b in at.button if b.key == "ea_remove_sales1").click()                 # open this account's dialog
+        at.run(timeout=15)
         remove_button = next(b for b in at.button if b.key == "manage_remove_sales1")
         assert remove_button.disabled is True  # confirm checkbox not checked yet
 
@@ -851,15 +851,17 @@ def test_manage_section_remove_deletes_secret_and_updates_mapping(tmp_path, fixt
         at.secrets.update(_dashboard_secrets())
         for k, v in _authed_session().items():
             at.session_state[k] = v
-        at.run()
+        at.run(timeout=15)
 
+        next(b for b in at.button if b.key == "ea_remove_sales1").click()                 # open this account's dialog
+        at.run(timeout=15)
         confirm_checkbox = next(cb for cb in at.checkbox if cb.key == "manage_confirm_remove_sales1")
         confirm_checkbox.set_value(True)
-        at.run()
+        at.run(timeout=15)
 
         remove_button = next(b for b in at.button if b.key == "manage_remove_sales1")
         remove_button.click()
-        at.run()
+        at.run(timeout=15)
 
     assert list(at.exception) == [], f"Remove raised: {list(at.exception)}"
     assert list(at.error) == []
@@ -899,8 +901,7 @@ def test_campaigns_hub_page_renders_without_exceptions(fixture_repo):
 
     assert list(at.exception) == [], f"Campaigns hub raised: {list(at.exception)}"
     assert list(at.error) == [], f"Campaigns hub showed an error: {[e.value for e in at.error]}"
-    titles = [t.value for t in at.title]
-    assert "Campaigns" in titles
+    assert 'class="hb-title">Campaigns<' in " ".join(m.value for m in at.markdown)
     markdown_text = " ".join(m.value for m in at.markdown)
     assert FIXTURE_CAMPAIGN in markdown_text
 
@@ -947,7 +948,7 @@ def test_campaigns_hub_list_reflects_live_status_not_stale_disk(fixture_repo):
 
     assert list(at.exception) == []
     hub_body = " ".join(str(m.value) for m in at.markdown)
-    assert "🟢 Running" in hub_body
+    assert "● Running" in hub_body
     assert "⏸ Paused" not in hub_body
 
 
@@ -1015,7 +1016,7 @@ def test_duplicate_campaign_copies_templates_under_new_name_with_draft_status(fi
         confirm_checkbox.set_value(True)
         at.run(timeout=15)
 
-        duplicate_confirm_button = next(b for b in at.button if b.label == "Duplicate Campaign")
+        duplicate_confirm_button = next(b for b in at.button if b.label == "Duplicate campaign")
         duplicate_confirm_button.click()
         at.run(timeout=15)
 
@@ -1071,7 +1072,7 @@ def test_duplicate_campaign_refuses_when_source_has_no_templates(fixture_repo):
         confirm_checkbox.set_value(True)
         at.run(timeout=15)
 
-        duplicate_confirm_button = next(b for b in at.button if b.label == "Duplicate Campaign")
+        duplicate_confirm_button = next(b for b in at.button if b.label == "Duplicate campaign")
         duplicate_confirm_button.click()
         at.run(timeout=15)
 
@@ -1111,7 +1112,7 @@ def test_duplicate_campaign_rejects_a_name_that_already_exists(tmp_path, fixture
         confirm_checkbox.set_value(True)
         at.run(timeout=15)
 
-        duplicate_confirm_button = next(b for b in at.button if b.label == "Duplicate Campaign")
+        duplicate_confirm_button = next(b for b in at.button if b.label == "Duplicate campaign")
         duplicate_confirm_button.click()
         at.run(timeout=15)
 
@@ -1200,8 +1201,7 @@ def test_campaigns_back_button_clears_selected_campaign(fixture_repo):
 
     assert list(at.exception) == []
     assert "selected_campaign" not in at.session_state
-    titles = [t.value for t in at.title]
-    assert "Campaigns" in titles
+    assert 'class="hb-title">Campaigns<' in " ".join(m.value for m in at.markdown)
 
 
 def test_campaign_detail_reruns_do_not_re_fetch_sheets_data(fixture_repo):
