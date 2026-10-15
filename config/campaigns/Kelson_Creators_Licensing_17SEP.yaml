@@ -10,7 +10,7 @@ schedule:
   - fri
 sending:
   daily_limit: 200
-  sender_rotation: false
+  sender_rotation: true
   rotation_accounts:
   - sales1
 asana:
