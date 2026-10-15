@@ -211,3 +211,51 @@ def test_no_element_name_is_matched_by_two_different_style_groups_by_accident():
     for key in keys:
         matched = [g for g in groups if g in key]
         assert len(matched) <= 1, (key, matched)
+
+
+
+# ================================================================ the integration and maintenance cards
+
+def test_a_section_label_is_small_grey_capitals_text():
+    assert H.section_label_html("Integrations") == '<div class="se-section">Integrations</div>'
+    _clean(H.section_label_html(HOSTILE))
+
+
+@pytest.mark.parametrize("kind, css", [("on", "se-chip-on"), ("unsaved", "se-chip-unsaved"), ("off", "se-chip-off"), ("weird", "se-chip-off"), ("", "se-chip-off"), ('x" onclick="y', "se-chip-off")])
+def test_a_state_pill_is_green_amber_or_grey_and_an_unknown_kind_can_never_inject_a_class(kind, css):
+    markup = H.chip_html(kind, "● On")
+    assert markup == f'<span class="se-chip {css}">● On</span>' and "onclick" not in markup
+
+
+def test_the_head_of_an_integration_card_has_an_icon_the_title_a_state_pill_and_a_purpose():
+    markup = H.tool_heading_html("🔗", "Asana sync", "One Asana task per lead — never a duplicate.", "on", "● On")
+    assert '<div class="se-ico">🔗</div>' in markup and '<span class="se-title">Asana sync</span><span class="se-chip se-chip-on">● On</span>' in markup
+    assert "One Asana task per lead — never a duplicate." in markup and "\n" not in markup
+    _clean(markup)
+
+
+def test_hostile_text_in_an_integration_card_is_escaped():
+    _clean(H.tool_heading_html(HOSTILE, HOSTILE, HOSTILE, "on", HOSTILE))
+    _clean(H.tool_note_html(HOSTILE))
+
+
+def test_the_note_inside_a_card_is_plain_escaped_text():
+    assert H.tool_note_html("Turn this on & save.") == '<div class="se-tool-note">Turn this on &amp; save.</div>'
+
+
+def test_the_state_pills_use_the_headers_green_and_the_amber_of_a_warning():
+    assert "color: #15803d" in _rule(".se-chip-on {") and "background: #f0fbf4" in _rule(".se-chip-on {")
+    assert "color: #b45309" in _rule(".se-chip-unsaved {") and "background: #fffaf0" in _rule(".se-chip-unsaved {")
+    assert "border-radius: 99px" in _rule(".se-chip {")
+
+
+def test_the_icon_is_a_small_rounded_tile_and_the_section_label_small_grey_capitals():
+    assert "width: 34px" in _rule(".se-ico {") and "border-radius: 10px" in _rule(".se-ico {") and "background: #eef2ff" in _rule(".se-ico {")
+    assert "text-transform: uppercase" in _rule(".se-section {") and "color: #6b7280" in _rule(".se-section {")
+
+
+def test_the_expanders_inside_the_cards_have_no_box_of_their_own_and_how_it_works_is_a_blue_link_line():
+    rule = _rule('[class*="st-key-se_card_maint"] details, [class*="st-key-se_card_asana"] details, [class*="st-key-se_card_tracker"] details,')
+    assert "border: 0 !important" in rule and "background: transparent !important" in rule and rule.count("stExpander") == 3          # the wrapper AND the inner element, in all three cards
+    assert "padding-left: 0 !important" in _rule('[class*="st-key-se_card_maint"] summary, [class*="st-key-se_card_asana"] summary, [class*="st-key-se_card_tracker"] summary {')
+    assert "color: #1d4ed8" in _rule('\n[class*="st-key-se_card_asana"] summary, [class*="st-key-se_card_tracker"] summary {')       # (anchored on the line start: the three-card rule above ends with the same text)
