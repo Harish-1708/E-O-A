@@ -470,3 +470,108 @@ def test_the_mark_all_read_button_is_a_small_outlined_button_that_dims_when_off(
     button = _inbox_rule('[class*="st-key-ux_markall_"] button {')
     assert "min-height: 28px" in button and "border: 1px solid #d1d5db" in button and "border-radius: 8px" in button
     assert "opacity: .5" in _inbox_rule('[class*="st-key-ux_markall_"] button:disabled {') and "color: #1d4ed8" in _inbox_rule('[class*="st-key-ux_markall_"] button:hover:not(:disabled) {')
+
+
+# ================================================================ the composer: markup and styling
+
+class _ComposerScan(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.tags, self.attrs = set(), set()
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.add(tag)
+        self.attrs |= {name for name, _ in attrs}
+
+
+def _composer_safe(markup):
+    scan = _ComposerScan()
+    scan.feed(markup)
+    assert scan.tags <= {"div", "span"} and scan.attrs <= {"class", "style"}, (scan.tags, scan.attrs)
+    assert "<script" not in markup and "<img" not in markup and "\u202e" not in markup and "\x00" not in markup
+
+
+def test_the_composer_pieces_are_small_escaped_blocks_with_their_own_classes():
+    assert H.composer_label_html("From") == '<div class="ux-flabel">From</div>'
+    assert H.sender_hint_html("the account this thread started from") == '<div class="ux-fhint">the account this thread started from</div>'
+    assert H.sender_note_html("You are replying from sales2.") == '<div class="ux-fnote">⚠ You are replying from sales2.</div>'
+
+
+@pytest.mark.parametrize("hostile", HOSTILE)
+def test_hostile_text_in_any_composer_piece_is_escaped(hostile):
+    for markup in (H.composer_label_html(hostile), H.sender_hint_html(hostile), H.sender_note_html(hostile), H.attachment_chips_html([(hostile, 1234)], 10 * 1024 * 1024)):
+        _composer_safe(markup)
+
+
+def test_attachments_show_a_chip_for_each_file_with_its_size_and_a_total_against_the_limit():
+    markup = H.attachment_chips_html([("contract.pdf", int(1.2 * 1024 * 1024)), ("logo.png", 340 * 1024)], 10 * 1024 * 1024)
+    assert markup.count('<span class="ux-chipf">') == 2 and "📄 contract.pdf" in markup and '<span class="ux-fhint">1.2 MB</span>' in markup and '<span class="ux-fhint">340 KB</span>' in markup
+    assert '<span class="ux-total">1.5 MB of 10 MB</span>' in markup and "\n" not in markup
+
+
+@pytest.mark.parametrize("sizes, over", [([10 * 1024 * 1024], False), ([10 * 1024 * 1024 + 1], True), ([6 * 1024 * 1024, 5 * 1024 * 1024], True), ([1024], False)])
+def test_the_total_turns_red_exactly_when_it_passes_the_limit(sizes, over):
+    markup = H.attachment_chips_html([(f"f{i}.bin", size) for i, size in enumerate(sizes)], 10 * 1024 * 1024)
+    assert ('class="ux-total ux-over"' in markup) is over
+
+
+@pytest.mark.parametrize("files", [None, [], ()])
+def test_with_no_files_there_is_nothing_to_show(files):
+    assert H.attachment_chips_html(files, 100) == ""
+
+
+@pytest.mark.parametrize("size, text", [(0, "0 KB"), (1, "1 KB"), (1024, "1 KB"), (1536, "2 KB"), (340 * 1024, "340 KB"), (1024 * 1024, "1.0 MB"), (int(2.5 * 1024 * 1024), "2.5 MB"), (None, "0 KB"), ("x", "0 KB"), (-5, "0 KB")])
+def test_file_sizes_read_naturally_and_a_bad_size_is_zero(size, text):
+    assert H._size_text(size) == text
+
+
+def test_the_thread_height_rule_resizes_the_outer_wrapper_not_just_the_inner_element():
+    """REGRESSION: Streamlit gives the thread an OUTER wrapper with a fixed flex-basis; sizing only the inner element changed nothing, and the pane grew instead."""
+    css = H.composer_open_css("tab_Camp", 271)
+    assert 'div:has(> [class*="st-key-ux_threadbody_tab_Camp"]) { height: 271px !important; flex: 0 0 271px !important; }' in css
+    assert '[class*="st-key-ux_reply_"] button { background: #eaf1ff !important;' in css
+
+
+@pytest.mark.parametrize("asked, used", [(271, 271), (120, 120), (119, 120), (0, 120), (-50, 120), ("300", 300)])
+def test_the_thread_never_shrinks_below_a_readable_height(asked, used):
+    assert f"height: {used}px !important" in H.composer_open_css("ns", asked)
+
+
+def test_the_composer_is_docked_with_a_top_edge_and_the_field_rows_are_a_fixed_34_pixels():
+    assert "border-top: 1px solid #e5e7eb" in _inbox_rule('[class*="st-key-ux_composer_"] {')
+    row = _inbox_rule('[class*="st-key-ux_frm_"] {')
+    assert "height: 34px !important" in row and "flex: 0 0 34px !important" in row and "overflow: hidden !important" in row
+
+
+def test_each_row_is_a_grid_of_label_field_and_hint_so_the_field_gets_the_room():
+    """REGRESSION: with Streamlit's own column widths the first column was a fixed 218px and the From address was cut off."""
+    grid = _inbox_rule('[class*="st-key-ux_frm_"] [data-testid="stHorizontalBlock"] { grid-template-columns')
+    assert "72px minmax(0, 1fr) auto" in grid
+    assert "flex: unset !important" in _inbox_rule('[class*="st-key-ux_frm_"] [data-testid="stColumn"], [class*="st-key-ux_foot_"] [data-testid="stColumn"] {')
+
+
+def test_the_fields_have_no_boxes_of_their_own_because_the_row_is_the_field():
+    for selector in ('[class*="st-key-ux_frm_"] [data-testid="stTextInputRootElement"] {', '[class*="st-key-ux_composer_"] [data-testid="stTextAreaRootElement"] {',
+                     '[class*="st-key-ux_frm_"] [data-testid="stSelectbox"] > div > div {'):
+        rule = _inbox_rule(selector)
+        assert "border: 0 !important" in rule and "background: transparent !important" in rule, selector
+
+
+def test_the_footer_gives_the_note_its_full_width_so_send_never_covers_it():
+    foot = _inbox_rule('[class*="st-key-ux_foot_"] [data-testid="stHorizontalBlock"] { grid-template-columns')
+    assert "112px minmax(0, 1fr) max-content 118px" in foot and "column-gap: 14px" in foot
+    assert "white-space: nowrap" in _inbox_rule('[class*="st-key-ux_foot_"] .ux-fhint {')
+
+
+def test_the_amber_note_and_the_red_total_use_the_apps_warning_colours():
+    assert "background: #fffaf0" in _inbox_rule(".ux-fnote {") and "color: #92400e" in _inbox_rule(".ux-fnote {")
+    assert "color: #b91c1c" in _inbox_rule(".ux-over {")
+
+
+def test_the_composer_rules_are_scoped_to_the_composer_not_the_whole_page():
+    css = H.inbox_css(1.0)
+    start = css.index("/* ---- the composer")
+    block = css[start:css.index("/* ---- small screens")]
+    for selector, _body in re.findall(r"([^{}]+)\{([^{}]*)\}", re.sub(r"/\*.*?\*/", "", block, flags=re.S)):
+        for part in selector.split(","):
+            assert "ux" in part, f"an unscoped composer rule: {part.strip()}"
