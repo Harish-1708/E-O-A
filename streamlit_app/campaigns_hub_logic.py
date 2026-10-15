@@ -4,14 +4,18 @@ outreach.compute_all_campaigns_row math the Overview page already uses.
 """
 import os
 import sys
-from typing import Callable, Dict, List, Tuple
+from datetime import date, datetime, timedelta
+from typing import Callable, Dict, List, Optional, Tuple
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import outreach  # noqa: E402
-from campaign_status_logic import compute_campaign_status, status_label  # noqa: E402
+from campaign_builder import validate_campaign_name  # noqa: E402
+from campaign_status_logic import (  # noqa: E402
+    STATUS_ATTENTION, STATUS_COMPLETED, STATUS_DRAFT, STATUS_PAUSED, STATUS_RUNNING, compute_campaign_status, status_label,
+)
 from parallel_logic import run_in_parallel  # noqa: E402
 
 
@@ -24,6 +28,48 @@ def compute_last_activity_timestamp(send_log: List[Dict]) -> str:
     return max(timestamps) if timestamps else ""
 
 
+EMPTY_SERIES = {"bars": [], "unit": "day", "start": "", "end": "", "total": 0}
+MAX_DAILY_BARS = 30            # a campaign up to a month long is drawn day by day; a longer one by week
+MAX_WEEKLY_BARS = 26           # and only its last half year, so the chart stays readable
+
+
+def send_series(send_log: List[Dict], today: Optional[date] = None, through_today: bool = False) -> Dict:
+    """How many emails went out in each day (or each week, for a very long campaign) of the WHOLE campaign: from its first send to its last, or to today while it is
+    still running (so a running campaign that has gone quiet shows the quiet days). Counted the same way as the Sent number: send-log rows whose Status is 'sent'.
+    Returns {'bars': [counts], 'unit': 'day'|'week', 'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD', 'total': n}; no sends gives the empty series."""
+    per_day: Dict[date, int] = {}
+    for row in send_log or []:
+        if row.get("Status") != "sent":
+            continue
+        try:
+            when = datetime.strptime(str(row.get("Timestamp") or "")[:19], "%Y-%m-%d %H:%M:%S").date()
+        except ValueError:
+            continue
+        per_day[when] = per_day.get(when, 0) + 1
+    if not per_day:
+        return dict(EMPTY_SERIES)
+    first, last = min(per_day), max(per_day)
+    end = max(last, today) if (through_today and today) else last
+    span = (end - first).days + 1
+    total = sum(per_day.values())
+    if span <= MAX_DAILY_BARS:
+        return {"bars": [per_day.get(first + timedelta(days=offset), 0) for offset in range(span)], "unit": "day", "start": first.isoformat(), "end": end.isoformat(), "total": total}
+    weeks = -(-span // 7)
+    bars = [0] * weeks
+    for when, count in per_day.items():
+        bars[(when - first).days // 7] += count
+    skipped = max(0, weeks - MAX_WEEKLY_BARS)
+    return {"bars": bars[skipped:], "unit": "week", "start": (first + timedelta(days=7 * skipped)).isoformat(), "end": end.isoformat(), "total": total}
+
+
+def series_caption(series: Dict) -> str:
+    """'Sends per day · Sep 3 – Sep 17' (or 'per week'); 'No sends yet' when there are none."""
+    if not series or not series.get("bars"):
+        return "No sends yet"
+    start, end = date.fromisoformat(series["start"]), date.fromisoformat(series["end"])
+    return f"Sends per {series['unit']} · {start.strftime('%b')} {start.day} – {end.strftime('%b')} {end.day}"
+
+
 def build_draft_campaign_row(campaign_cfg: Dict) -> Dict:
     """A brand new Draft campaign may not have any Sheet tabs yet (they're
     created on first real activity) — its status is fully knowable from
@@ -32,7 +78,7 @@ def build_draft_campaign_row(campaign_cfg: Dict) -> Dict:
         "name": campaign_cfg["_campaign_name"], "status": "draft",
         "status_label": status_label("draft"), "problems": [],
         "total_leads": 0, "sent": 0, "replies": 0, "reply_rate": "—",
-        "last_activity": "",
+        "last_activity": "", "series": dict(EMPTY_SERIES),
     }
 
 
@@ -45,12 +91,12 @@ def build_deleted_campaign_row(campaign_cfg: Dict) -> Dict:
         "name": campaign_cfg["_campaign_name"], "status": "deleted",
         "status_label": status_label("deleted"), "problems": [],
         "total_leads": 0, "sent": 0, "replies": 0, "reply_rate": "—",
-        "last_activity": "",
+        "last_activity": "", "series": dict(EMPTY_SERIES),
     }
 
 
 def build_campaign_hub_row(campaign_cfg: Dict, leads: List[Dict], responses: List[Dict],
-                            send_log: List[Dict]) -> Dict:
+                            send_log: List[Dict], today: Optional[date] = None) -> Dict:
     stages = campaign_cfg["stages"]
     base_row = outreach.compute_all_campaigns_row(campaign_cfg["_campaign_name"], leads, responses,
                                                     send_log, stages)
@@ -61,6 +107,7 @@ def build_campaign_hub_row(campaign_cfg: Dict, leads: List[Dict], responses: Lis
         "total_leads": int(base_row[1]), "sent": int(base_row[3]),
         "replies": int(base_row[7]), "reply_rate": base_row[8],
         "last_activity": compute_last_activity_timestamp(send_log),
+        "series": send_series(send_log, today or date.today(), through_today=(status == STATUS_RUNNING)),
     }
 
 
@@ -142,3 +189,70 @@ def filter_campaigns_by_search(rows: List[Dict], query: str) -> List[Dict]:
         return rows
     q = query.strip().lower()
     return [r for r in rows if q in r["name"].lower()]
+
+
+# ---------------------------------------------------------------- the list's summary, filters and order
+
+STATUS_FILTERS = [("all", "All"), (STATUS_RUNNING, "Running"), (STATUS_ATTENTION, "Attention"), (STATUS_PAUSED, "Paused"), (STATUS_DRAFT, "Draft"), (STATUS_COMPLETED, "Completed")]
+SORT_OPTIONS = ["Active first", "Last activity", "Name", "Most replies"]
+_ACTIVE_ORDER = [STATUS_RUNNING, STATUS_ATTENTION, STATUS_PAUSED, STATUS_DRAFT, STATUS_COMPLETED]
+
+
+def reply_rate_text(replies: int, sent: int) -> str:
+    """The overall reply rate, one decimal ('14.4%'); '—' when nothing has been sent."""
+    return f"{replies / sent * 100:.1f}%" if sent else "—"
+
+
+def summarize_campaigns(rows: List[Dict]) -> Dict:
+    """The totals above the list, added up from the rows (archived campaigns are never in `rows`)."""
+    sent = sum(int(r.get("sent") or 0) for r in rows)
+    replies = sum(int(r.get("replies") or 0) for r in rows)
+    return {"count": len(rows), "running": sum(1 for r in rows if r.get("status") == STATUS_RUNNING), "attention": sum(1 for r in rows if r.get("status") == STATUS_ATTENTION),
+            "leads": sum(int(r.get("total_leads") or 0) for r in rows), "sent": sent, "replies": replies, "reply_rate": reply_rate_text(replies, sent)}
+
+
+def hub_subtitle(summary: Dict) -> str:
+    """'5 campaigns · 1 running · 1 needs attention'; the parts that are zero are left out."""
+    count = summary["count"]
+    parts = [f"{count} campaign{'' if count == 1 else 's'}"]
+    if summary["running"]:
+        parts.append(f"{summary['running']} running")
+    if summary["attention"]:
+        parts.append(f"{summary['attention']} needs attention" if summary["attention"] == 1 else f"{summary['attention']} need attention")
+    return " · ".join(parts)
+
+
+def status_filter_options(rows: List[Dict]) -> List[Tuple[str, str]]:
+    """[(filter key, 'Running 1'), ...] for every filter, in a fixed order, the first being All with the total."""
+    options = []
+    for key, label in STATUS_FILTERS:
+        count = len(rows) if key == "all" else sum(1 for r in rows if r.get("status") == key)
+        options.append((key, f"{label} {count}"))
+    return options
+
+
+def filter_campaigns_by_status(rows: List[Dict], status: str) -> List[Dict]:
+    return list(rows) if status in ("", "all", None) else [r for r in rows if r.get("status") == status]
+
+
+def sort_campaigns(rows: List[Dict], option: str) -> List[Dict]:
+    """'Active first' (running, attention, paused, draft, completed; the most recent activity first within each), 'Last activity', 'Name' or 'Most replies'. Ties keep the
+    order they came in."""
+    rows = list(rows)
+    if option == "Name":
+        return sorted(rows, key=lambda r: r["name"].lower())
+    if option == "Most replies":
+        return sorted(rows, key=lambda r: -int(r.get("replies") or 0))
+    by_recent = sorted(rows, key=lambda r: r.get("last_activity") or "", reverse=True)
+    if option == "Last activity":
+        return by_recent
+    return sorted(by_recent, key=lambda r: _ACTIVE_ORDER.index(r.get("status")) if r.get("status") in _ACTIVE_ORDER else len(_ACTIVE_ORDER))
+
+
+def name_feedback(name: str, existing_campaigns: List[str]) -> Tuple[str, str]:
+    """What to tell someone typing a campaign name, as they type: ('hint', ...) while the box is empty, ('error', the reason) while it cannot be used, ('ok', ...) when it can.
+    The same rules as validate_campaign_name, which still has the last word when the button is pressed."""
+    if not name or not name.strip():
+        return "hint", "Letters, numbers and underscores only. This becomes the campaign's folder name."
+    error = validate_campaign_name(name, existing_campaigns)
+    return ("error", error) if error else ("ok", "Looks good — this name is free.")
