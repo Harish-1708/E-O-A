@@ -93,3 +93,37 @@ def not_counted_note(unavailable: List[str]) -> str:
         return ""
     count = len(unavailable)
     return f"{count} campaign{'' if count == 1 else 's'} {'isn’t' if count == 1 else 'aren’t'} counted in “sent today” yet (nothing sent for {'it' if count == 1 else 'them'}): {', '.join(unavailable)}"
+
+
+# ---------------------------------------------------------------- the Add account dialog: live hints and when it may be submitted
+
+def account_name_feedback(name: str, managed: Dict[str, Dict], legacy_names) -> Tuple[str, str]:
+    """What to tell someone typing an account name, as they type: ('hint', ...) while the box is empty, ('error', ...) for a name an account here already has, ('info', ...) for a
+    name that only exists in the old Streamlit secrets (adding it takes that account over), ('ok', ...) otherwise. The same rules the Add button enforces."""
+    name = str(name or "").strip()
+    if not name:
+        return "hint", "A short label you will see in campaigns, for example sales1."
+    if name in (managed or {}):
+        return "error", f"“{name}” already exists (slot {managed[name].get('slot')}). Use Edit on its card to change it."
+    if name in set(legacy_names or ()):
+        return "info", f"“{name}” is set up in Streamlit secrets. Adding it here takes over managing it."
+    return "ok", "Free to use. This is the short label you will see in campaigns."
+
+
+def address_feedback(address: str) -> Tuple[str, str]:
+    """('error', ...) for something typed that cannot be an address (no @ with text on both sides), otherwise ('ok', '') (nothing to say) for a good one and ('hint', '') for an
+    empty box. The Add button's own rule is only that the address contains an @; this is that rule, made a little clearer to read."""
+    address = str(address or "").strip()
+    if not address:
+        return "hint", ""
+    local, _, domain = address.partition("@")
+    if "@" not in address or not local or not domain:
+        return "error", "That is not a valid email address."
+    return "ok", ""
+
+
+def add_form_ready(name: str, address: str, managed: Dict[str, Dict]) -> bool:
+    """Whether the Add account button may be pressed: a free name and an address with an @ (the confirmation is a separate, deliberate step). The PASSWORD is deliberately not part
+    of this: a browser only hands a typed value to the app when the field loses focus, and pressing Tab in a password field moves focus to its show/hide eye, which does not count,
+    so waiting for the password here would leave the button stuck for anyone who tabs through. A missing password is reported when Add is pressed instead."""
+    return account_name_feedback(name, managed, ())[0] == "ok" and address_feedback(address)[0] == "ok"
