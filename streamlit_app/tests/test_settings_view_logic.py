@@ -47,7 +47,7 @@ def test_the_pool_is_a_copy_so_it_can_never_change_the_callers_list():
     (["sales1", "sales2"], True, "", "Emails go out from 2 accounts, taking turns: sales1, sales2."),
     (["sales1", "sales2", "sales3"], False, "", "Emails go out from 3 accounts, taking turns: sales1, sales2, sales3."),       # the engine rotates a picked list even with rotation off
     ([], True, "", "No accounts picked, so every configured account takes turns."),
-    ([], False, "sales1", "No accounts picked and rotation is off, so the default sender (sales1) is used."),
+    ([], False, "sales1", "No accounts picked and rotation is off, so the default sender, sales1, is used."),
     ([], False, "", "No accounts picked and rotation is off, so the campaign's default sender is used."),
 ])
 def test_one_sentence_says_what_the_account_choices_will_really_do(picked, rotation, default, sentence):
@@ -223,3 +223,30 @@ def test_building_the_checklist_never_changes_the_leads_or_the_config():
     before = copy.deepcopy((cfg, leads))
     S.readiness_items(cfg, leads, ["Hi {{Typo}}"], {}, [])
     assert (cfg, leads) == before
+
+
+
+# ================================================================ accounts named by their address, and when the search and select-all are worth showing
+
+DIR = {"sales1": "harish@kelson.agency", "sales2": "outreach@kelson.agency"}
+
+
+@pytest.mark.parametrize("name, directory, label", [("sales1", DIR, "harish@kelson.agency (sales1)"), ("sales9", DIR, "sales9"), ("sales1", None, "sales1"), ("sales1", {}, "sales1"), ("sales1", {"sales1": ""}, "sales1")])
+def test_an_account_is_named_by_its_address_with_the_internal_name_beside_it(name, directory, label):
+    assert S.account_label(name, directory) == label
+
+
+@pytest.mark.parametrize("picked, rotation, default, sentence", [
+    (["sales1"], False, "", "All emails go out from harish@kelson.agency (sales1)."),
+    (["sales1", "sales2"], True, "", "Emails go out from 2 accounts, taking turns: harish@kelson.agency (sales1), outreach@kelson.agency (sales2)."),
+    ([], False, "sales1", "No accounts picked and rotation is off, so the default sender, harish@kelson.agency (sales1), is used."),
+    ([], True, "sales1", "No accounts picked, so every configured account takes turns."),
+])
+def test_the_sentence_names_accounts_by_the_addresses_the_rows_show(picked, rotation, default, sentence):
+    """REGRESSION: the rows showed harish@kelson.agency while the sentence under them said 'sales1'."""
+    assert S.rotation_summary(picked, rotation, default, DIR) == sentence
+
+
+@pytest.mark.parametrize("count, search, select_all", [(0, False, False), (1, False, False), (2, False, True), (3, False, True), (4, True, True), (5, True, True), (40, True, True)])
+def test_the_search_needs_four_or_more_accounts_and_select_all_at_least_two(count, search, select_all):
+    assert (S.show_search(count), S.show_select_all(count)) == (search, select_all)
