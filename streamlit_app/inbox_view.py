@@ -29,6 +29,7 @@ from conversation_logic import (  # noqa: E402
 )
 from data_import_logic import payload_to_bytes  # noqa: E402
 from responses_hub_logic import all_response_keys_in_group, group_unread_count  # noqa: E402
+from responses_reply_logic import sender_choices, sender_change_note, sender_label  # noqa: E402
 from responses_reply_logic import (  # noqa: E402
     find_lead_for_response, build_reply_defaults, parse_email_list, validate_reply, build_reply_payload,
     reply_payload_path, build_attachment_entries, total_attachment_size_bytes,
@@ -36,6 +37,9 @@ from responses_reply_logic import (  # noqa: E402
 
 PANE_HEIGHT = 700                                   # the three panes share one height; the lists scroll inside it
 HEADER_HEIGHT, BAR_HEIGHT = 52, 62
+THREAD_HEIGHT = PANE_HEIGHT - HEADER_HEIGHT - BAR_HEIGHT   # the thread's height with no composer open (what the page really gives it)
+COMPOSER_HEIGHT = 315                              # measured in a real browser: what the composer takes from the pane while it is open (the thread gives up exactly this much)
+NOTE_HEIGHT = 56                                   # measured: what the amber 'different sender' note adds to the composer, when it is showing
 WORKFLOW_SET_RESPONSE_STATUS = "set_response_status.yml"
 COLLAPSE_THRESHOLD, KEEP_NEWEST = 8, 5      # a conversation of more than 8 emails shows only the newest 5 until asked for the rest
 EMPTY_EMAIL_NOTE = "This email has no readable text — it may be only an image or an attachment. Open it in the mailbox to see it."
@@ -54,6 +58,7 @@ class InboxContext:
     show_campaign: bool = True
     pause_before_dispatch: float = 0.0                     # a campaign's own tab waits a second between commit and dispatch, as it always has
     sent_for: Optional[Callable[[str, str], List[Dict]]] = None   # (campaign, lead_id) -> emails the team sent by hand / from the panel
+    sender_options: Optional[Callable[[], Dict]] = None           # () -> {'directory': {name: address}, 'health': {...}}; read only when a composer is opened
 
 
 # ---------------------------------------------------------------- widget keys
@@ -63,7 +68,7 @@ def _keys(ns: str, gk: str) -> Dict[str, str]:
         "to": f"{ns}_to_{gk}", "subject": f"{ns}_subject_{gk}", "cc": f"{ns}_cc_{gk}", "bcc": f"{ns}_bcc_{gk}",
         "body": f"{ns}_body_{gk}", "send": f"{ns}_send_{gk}", "result": f"{ns}_result_{gk}",
         "att_n": f"{ns}_attn_{gk}", "mark_read": f"{ns}_mark_read_{gk}", "composer": f"{ns}_composer_{gk}",
-        "draft": f"{ns}_draft_{gk}",
+        "draft": f"{ns}_draft_{gk}", "from": f"{ns}_from_{gk}",
         "reply": f"ux_reply_{ns}_{gk}",
     }
 
@@ -175,13 +180,14 @@ def _send_reply(ctx: InboxContext, group: Dict, latest: Dict, lead: Optional[Dic
     uploaded = st.session_state.get(_uploader_key(ctx.namespace, gk)) or []
     attachment_bytes = total_attachment_size_bytes(uploaded) if uploaded else 0
 
-    errors = validate_reply(to_email, body, defaults["sender_account"], cc, bcc, attachment_total_bytes=attachment_bytes)
+    sender_account = (st.session_state.get(k["from"]) if ctx.sender_options is not None else None) or defaults["sender_account"]       # the From field, else the thread's own
+    errors = validate_reply(to_email, body, sender_account, cc, bcc, attachment_total_bytes=attachment_bytes)
     if errors:
         st.session_state[k["result"]] = {"ok": False, "messages": list(errors)}
         return
     try:
         attachments = build_attachment_entries(uploaded) if uploaded else None
-        payload = build_reply_payload(latest, lead, defaults["sender_account"], to_email, subject, body, cc, bcc,
+        payload = build_reply_payload(latest, lead, sender_account, to_email, subject, body, cc, bcc,
                                       attachments=attachments)
         path = reply_payload_path(campaign_name, latest.get("ResponseID", "unknown"))
         client = ctx.github_client()
@@ -395,36 +401,86 @@ def _show_result(ns: str, gk: str) -> None:
             (st.success if result["ok"] else st.error)(message)
 
 
+def _sender_data(ctx: InboxContext) -> Optional[Dict]:
+    """The accounts a reply could be sent from, or None when this place cannot say (then the reply simply goes from the thread's own account, as it always has)."""
+    if ctx.sender_options is None:
+        return None
+    try:
+        data = ctx.sender_options()
+    except Exception:  # noqa: BLE001 - the composer must still open; it falls back to the thread's own account
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("directory"), dict) else None
+
+
+def _note_extra(ctx: InboxContext, k: Dict[str, str], defaults: Dict) -> int:
+    """The height the amber note adds to the composer, so the thread can give up that much more: only while a different account than the thread's is chosen."""
+    if ctx.sender_options is None:
+        return 0
+    return NOTE_HEIGHT if (sender_change_note(st.session_state.get(k["from"], ""), defaults["sender_account"]) or not defaults["sender_account"]) else 0
+
+
+def _field_row(ns: str, field: str, label: str):
+    """One labelled row of the composer: the grey name at the left, the field filling the rest. Returns (the field's column, the hint column)."""
+    with st.container(key=f"ux_frm_{ns}_{field}"):
+        label_column, field_column, hint_column = st.columns(3)                  # their widths come from the stylesheet's grid, not from these ratios
+        label_column.markdown(H.composer_label_html(label), unsafe_allow_html=True)
+    return field_column, hint_column
+
+
 def _render_composer(ctx: InboxContext, group: Dict, latest: Dict, lead: Optional[Dict], campaign_name: str,
                      gk: str) -> None:
+    """The reply composer, docked at the bottom of the conversation pane (the thread above gives up the height it takes): From, To, Cc, Bcc, Subject, then the message,
+    then attachments and Send. From starts as the account the thread began with and can be changed; changing it shows an amber warning."""
     ns = ctx.namespace
     k = _keys(ns, gk)
     defaults = build_reply_defaults(latest, lead)
+    senders = _sender_data(ctx)
     if k["body"] not in st.session_state:
         st.session_state[k["body"]] = st.session_state.get(k["draft"], "")
-    st.text_area("Write a message…", key=k["body"], height=110, label_visibility="collapsed",
-                 placeholder="Write a message…", on_change=_remember_draft, args=(k["body"], k["draft"]))
-    with st.expander("To, Cc, Bcc, subject and attachments"):
-        st.text_input("To", value=defaults["to"], key=k["to"])
-        st.text_input("Subject", value=defaults["subject"], key=k["subject"])
-        st.text_input("Cc (comma-separated)", key=k["cc"])
-        st.text_input("Bcc (comma-separated)", key=k["bcc"])
-        uploaded = st.file_uploader("Attach images or files (optional)", accept_multiple_files=True,
-                                    key=_uploader_key(ns, gk))
-        if uploaded:
-            total_bytes = total_attachment_size_bytes(uploaded)
-            st.caption(f"{len(uploaded)} file(s), {total_bytes / (1024 * 1024):.1f} MB total "
-                       f"(limit: {outreach.MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024):.0f} MB)")
+    with st.container(key=f"ux_composer_{ns}"):
+        st.markdown(f"<style>{H.composer_open_css(ns, THREAD_HEIGHT - COMPOSER_HEIGHT - _note_extra(ctx, k, defaults))}</style>", unsafe_allow_html=True)
 
-    info_col, send_col = st.columns([4, 1])
-    with info_col:
-        if defaults["sender_account"]:
-            st.caption(f"Sending as: {md_escape(defaults['sender_account'])}")
+        field, hint = _field_row(ns, "from", "From")
+        if senders is not None:
+            directory, health = senders["directory"], senders.get("health") or {}
+            with field:
+                chosen = st.selectbox("From", sender_choices(directory, defaults["sender_account"]), key=k["from"], label_visibility="collapsed",
+                                      format_func=lambda name: sender_label(name, directory, health) if name else "Choose an account…")
+            if defaults["sender_account"] and chosen == defaults["sender_account"]:
+                hint.markdown(H.sender_hint_html("the account this thread started from"), unsafe_allow_html=True)
+            note = sender_change_note(chosen, defaults["sender_account"])
+            if note:
+                st.markdown(H.sender_note_html(note), unsafe_allow_html=True)
+            elif not defaults["sender_account"]:
+                st.markdown(H.sender_note_html("Couldn't find this lead's sender account — choose one above, or check the Master Sheet."), unsafe_allow_html=True)
+        elif defaults["sender_account"]:
+            field.markdown(f"**{md_escape(defaults['sender_account'])}**")
+            hint.markdown(H.sender_hint_html("the account this thread started from"), unsafe_allow_html=True)
         else:
-            st.caption("⚠️ Couldn't find this lead's sender account — check the Master Sheet.")
-    with send_col:
-        st.button("Send ➤", type="primary", key=k["send"], on_click=_send_reply,
-                  args=(ctx, group, latest, lead, defaults, campaign_name, gk), use_container_width=True)
+            field.markdown("⚠️ Couldn't find this lead's sender account — check the Master Sheet.")
+
+        field, _ = _field_row(ns, "to", "To")
+        field.text_input("To", value=defaults["to"], key=k["to"], label_visibility="collapsed")
+        field, _ = _field_row(ns, "cc", "Cc")
+        field.text_input("Cc (comma-separated)", key=k["cc"], label_visibility="collapsed", placeholder="Optional · separate several with commas")
+        field, _ = _field_row(ns, "bcc", "Bcc")
+        field.text_input("Bcc (comma-separated)", key=k["bcc"], label_visibility="collapsed", placeholder="Optional · separate several with commas")
+        field, _ = _field_row(ns, "subject", "Subject")
+        field.text_input("Subject", value=defaults["subject"], key=k["subject"], label_visibility="collapsed")
+
+        st.text_area("Write a message…", key=k["body"], height=92, label_visibility="collapsed",
+                     placeholder="Write a message…", on_change=_remember_draft, args=(k["body"], k["draft"]))
+
+        with st.container(key=f"ux_foot_{ns}"):
+            attach_column, files_column, note_column, send_column = st.columns(4)
+            with attach_column:
+                with st.popover("📎 Attach"):
+                    uploaded = st.file_uploader("Attach images or files (optional)", accept_multiple_files=True, key=_uploader_key(ns, gk))
+            files_column.markdown(H.attachment_chips_html([(f.name, f.size) for f in (uploaded or [])], outreach.MAX_TOTAL_ATTACHMENT_BYTES), unsafe_allow_html=True)
+            note_column.markdown(H.sender_hint_html("Goes out within a minute or two"), unsafe_allow_html=True)
+            with send_column:
+                st.button("Send ➤", type="primary", key=k["send"], on_click=_send_reply,
+                          args=(ctx, group, latest, lead, defaults, campaign_name, gk), use_container_width=True)
 
 
 def _render_conversation(group: Dict, row: Dict, ctx: InboxContext) -> None:
@@ -457,7 +513,7 @@ def _render_conversation(group: Dict, row: Dict, ctx: InboxContext) -> None:
 
     _show_result(ns, gk)
     with st.container(key=f"ux_bar_{ns}"):
-        st.button("↩ Reply", key=k["reply"], on_click=_toggle_composer, args=(k["composer"],))
+        st.button("↩ Replying…" if st.session_state.get(k["composer"], False) else "↩ Reply", key=k["reply"], on_click=_toggle_composer, args=(k["composer"],))
         if ctx.read_keys is not None and row["unread"]:
             st.button(f"✓ Mark as read ({row['unread_count']})", key=k["mark_read"], on_click=_mark_read, args=(ctx, group))
         with st.popover("Status"):
