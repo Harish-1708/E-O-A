@@ -17,13 +17,16 @@ from config import (  # noqa: E402
     TEMPLATES_ROOT, CAMPAIGNS_DIR, EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, SETTINGS_PATH,
 )
 from email_account_slots_logic import read_slot_mapping_live  # noqa: E402
-from accounts_logic import build_health_lookup, merge_account_directories  # noqa: E402
-from github_client import GitHubClient, GitHubActionsError  # noqa: E402
+from accounts_logic import merge_account_directories  # noqa: E402
+from github_client import GitHubActionsError  # noqa: E402
 from preview_logic import list_campaigns_live, get_campaign_cfg  # noqa: E402
-from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
+from shell_data import (  # noqa: E402
+    get_github_client as _get_github_client, safe_github_client as _safe_github_client, get_connector as _get_connector,
+    load_hub_bundle, load_account_health as _load_account_health,
+)
 import campaigns_hub_html as HH  # noqa: E402
 import campaigns_hub_logic as HL  # noqa: E402
-from campaigns_hub_logic import build_campaigns_hub, filter_campaigns_by_search  # noqa: E402
+from campaigns_hub_logic import filter_campaigns_by_search  # noqa: E402
 from performance_logic import build_campaign_performance, build_best_performers  # noqa: E402
 from performance_view import render_performance  # noqa: E402
 from data_import_logic import (  # noqa: E402
@@ -57,7 +60,7 @@ from leads_logic import filter_counts, apply_extra_filters, any_extra_filter, st
 from leads_actions import render_lead_actions  # noqa: E402
 from sequences_view import SequencesContext, render_sequences_tab  # noqa: E402
 from campaign_html import CAMPAIGN_SKIN_CSS, UI_BUILD, build_html, chips_html, crumb_html, subline_html  # noqa: E402
-from campaign_header_logic import read_cron_minute, next_automatic_send, next_send_line, schedule_summary, sender_summary, subline, responses_tab_label  # noqa: E402
+from campaign_header_logic import read_cron_minute, next_automatic_send, next_send_line, schedule_summary, sender_summary, subline, RESPONSES_TAB_LABEL, responses_badge_css  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
 from conversation_logic import filter_responses_for_lead, filter_sent_mail_for_lead  # noqa: E402
 from campaign_status_logic import (  # noqa: E402
@@ -77,40 +80,11 @@ if not login_gate():
     st.stop()
 
 
-@st.cache_resource(show_spinner=False)
-def _get_github_client() -> GitHubClient:
-    gh = st.secrets["github"]
-    return GitHubClient(token=gh["token"], owner=gh["owner"], repo=gh["repo"], cache_reads=True)
+def _load_hub_rows():
+    """The Campaigns list (rows, archived rows, errors) from the shared, cached load that Home and the sidebar also use."""
+    rows, deleted_rows, errors, _details = load_hub_bundle()
+    return rows, deleted_rows, errors
 
-
-def _safe_github_client():
-    """The GitHub client, or None if it can't be built (no token, bad
-    config). Returning None rather than raising lets every live read
-    degrade to the local checkout instead of breaking the whole page —
-    a read must never be harder to do than it was before going live."""
-    try:
-        return _get_github_client()
-    except Exception:  # noqa: BLE001 - missing/invalid token, etc.
-        return None
-
-
-@st.cache_resource(show_spinner=False)
-def _get_connector() -> ReadOnlySheetsConnector:
-    sa_info = dict(st.secrets["google_sheets_readonly"]["service_account_json"])
-    sheet_id = st.secrets.get("shared_sheet_id", "")
-    return ReadOnlySheetsConnector(service_account_info=sa_info, sheet_id=sheet_id)
-
-
-def _fetch_sheet_data(campaign_cfg, connector=None):
-    # connector is passed in by callers that run this on a worker thread
-    # (see _load_hub_rows): the cached connector is resolved once on the
-    # normal script thread and handed over, so no worker thread ever
-    # calls into Streamlit's cache itself.
-    connector = connector or _get_connector()
-    leads = connector.get_all_leads(campaign_cfg["master_tab"])
-    responses = connector.get_all_responses(campaign_cfg["responses_tab"])
-    send_log = connector.get_all_send_log(campaign_cfg["send_log_tab"])
-    return leads, responses, send_log
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -167,43 +141,6 @@ def _get_master_header_cached(campaign_name: str):
     highest-interaction-density moment on this whole page."""
     campaign_cfg = get_campaign_cfg(campaign_name)
     return _get_connector().get_header(campaign_cfg["master_tab"])
-
-
-def _get_campaign_cfg_live(campaign_name: str):
-    """get_campaign_cfg, with the live GitHub override overlaid — the
-    same single-point pattern used on the campaign detail page.
-
-    Without this, the campaigns hub list built each row's status
-    straight from get_campaign_cfg, which is LOCAL-DISK ONLY — it never
-    consults GitHub at all, unlike the detail page. Resuming a campaign
-    commits correctly every time; the hub row for it would otherwise
-    never look, and would show "Paused" indefinitely regardless of how
-    long you waited, because nothing about waiting re-reads the
-    repository — only a genuinely fresh live read does."""
-    campaign_cfg = get_campaign_cfg(campaign_name)
-    return merge_live_override_into_cfg(
-        campaign_cfg, load_raw_override_live(campaign_name, _safe_github_client(), CAMPAIGNS_DIR))
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def _load_hub_rows():
-    campaign_names = list_campaigns_live(_safe_github_client())
-    # Resolved here, on the script thread, then handed to the worker
-    # threads that fetch each campaign's Sheets in parallel. If it can't
-    # be built, every active campaign reports that error individually —
-    # exactly what happened before, when each fetch built it itself.
-    try:
-        connector = _get_connector()
-        connector_error = None
-    except Exception as exc:  # noqa: BLE001
-        connector, connector_error = None, exc
-
-    def _fetch_for_hub(campaign_cfg):
-        if connector_error is not None:
-            raise connector_error
-        return _fetch_sheet_data(campaign_cfg, connector=connector)
-
-    return build_campaigns_hub(campaign_names, _get_campaign_cfg_live, _fetch_for_hub, max_workers=6)
 
 
 # =============================================================================
@@ -290,7 +227,7 @@ def _duplicate_campaign_dialog(source_campaign_name, existing_campaigns):
                     commit_message=f"Duplicate '{source_campaign_name}' as '{new_name}' "
                                     f"(via Streamlit, by {current_user()})",
                 )
-                _load_hub_rows.clear()
+                load_hub_bundle.clear()
                 st.session_state["duplicating_campaign"] = None
                 st.success(
                     f"'{new_name}' created as a Draft copy of '{source_campaign_name}' with "
@@ -335,7 +272,7 @@ def _new_campaign_dialog(existing_campaigns):
                     commit_message=commit_message_for_campaign(campaign_name, "intro", 1, current_user(),
                                                                  is_new_campaign=True),
                 )
-                _load_hub_rows.clear()
+                load_hub_bundle.clear()
                 with st.spinner("Initializing Sheet tabs..."):
                     time.sleep(1)
                     _initialize_campaign_tabs(campaign_name)
@@ -385,7 +322,7 @@ def _render_hub(just_arrived: bool):
         head_column.markdown(HH.page_head_html("Campaigns", HL.hub_subtitle(HL.summarize_campaigns(rows)) if load_error is None else ""), unsafe_allow_html=True)
         with refresh_column:
             if st.button("🔄 Refresh", width="stretch", key="refresh_hub_button"):
-                _load_hub_rows.clear()
+                load_hub_bundle.clear()
                 _fetch_full_campaign_data_cached.clear()
                 _get_master_header_cached.clear()
                 st.rerun()
@@ -408,6 +345,8 @@ def _render_hub(just_arrived: bool):
         # a widget inside the dialog itself.
         if just_arrived:
             st.session_state["show_new_campaign_dialog"] = False
+        if st.session_state.pop("hub_open_new_on_arrival", False):                 # Home's "New campaign" button: arrive with the dialog already open
+            st.session_state["show_new_campaign_dialog"] = True
         if st.session_state["show_new_campaign_dialog"]:
             try:
                 existing_campaigns = list_campaigns_live(_safe_github_client())
@@ -814,17 +753,6 @@ def _render_sequences_tab(campaign_cfg, leads, responses=None, send_log=None, er
     ))
 
 
-@st.cache_resource(ttl=300, show_spinner=False)
-def _load_account_health():
-    """{account name: {status, detail, checked_at}} from the Email Accounts Health tab (written by the health check). Held for five minutes in a resource cache,
-    which a refresh of the page's own data (the 30-second data cache) does not clear: a deployment whose health tab does not exist yet cannot cache a failed lookup,
-    so a data refresh must not repeat it. An empty answer on any failure: the Settings tab must never break because a health lookup did."""
-    try:
-        return build_health_lookup(_get_connector().get_account_health())
-    except Exception:  # noqa: BLE001 - no health data just means 'Not checked yet' on each account
-        return {}
-
-
 def _read_intro_texts(campaign_cfg):
     """The intro template (subject and body) of every variant, for the Readiness check of its placeholders. None when they cannot be read right now (no GitHub
     access, a missing file): the checklist then says it could not check, rather than guessing."""
@@ -963,7 +891,7 @@ def _update_campaign_status(campaign_name: str, new_status: str) -> bool:
             override_file_path(campaign_name), override_to_yaml_bytes(updated),
             message=f"Set status={new_status} for {campaign_name} (via Streamlit, by {current_user()})",
         )
-        _load_hub_rows.clear()
+        load_hub_bundle.clear()
         return True
     except GitHubActionsError as exc:
         st.error(f"Failed to update status: {exc}")
@@ -982,7 +910,7 @@ def _temporarily_remove_campaign(campaign_name: str, current_status: str) -> boo
             override_file_path(campaign_name), override_to_yaml_bytes(updated),
             message=f"Temporarily remove {campaign_name} (via Streamlit, by {current_user()})",
         )
-        _load_hub_rows.clear()
+        load_hub_bundle.clear()
         return True
     except GitHubActionsError as exc:
         st.error(f"Failed to remove: {exc}")
@@ -1000,7 +928,7 @@ def _restore_campaign(campaign_name: str) -> bool:
             override_file_path(campaign_name), override_to_yaml_bytes(updated),
             message=f"Restore {campaign_name} (via Streamlit, by {current_user()})",
         )
-        _load_hub_rows.clear()
+        load_hub_bundle.clear()
         return True
     except GitHubActionsError as exc:
         st.error(f"Failed to restore: {exc}")
@@ -1465,7 +1393,9 @@ def _render_campaign_detail(campaign_name: str, just_arrived: bool):
 
     read_keys, _pending = _read_state()
     unread = count_unread_conversations(tag_responses_with_campaign(responses, campaign_name), read_keys)         # leads with something unread, not emails
-    tabs = st.tabs(["Performance", "Data", "Sequences", "Schedule", "Settings", responses_tab_label(unread)])
+    st.markdown(f"<style>{responses_badge_css(unread)}</style>", unsafe_allow_html=True)
+    with st.container(key="camp_tabs"):
+        tabs = st.tabs(["Performance", "Data", "Sequences", "Schedule", "Settings", RESPONSES_TAB_LABEL])
     with tabs[0]:
         _render_performance_tab(campaign_cfg, leads, responses, send_log, error_log)
     with tabs[1]:
