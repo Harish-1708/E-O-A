@@ -72,6 +72,46 @@ def empty_state_html(title: str, text: str) -> str:
     return _one_line(f'<div class="ea-empty"><div class="ea-empty-icon">📧</div><div class="ea-empty-title">{esc(title)}</div><div class="ea-empty-text">{esc(text)}</div></div>')
 
 
+_ICON = {"mail": '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>', "lock": '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+         "check": '<path d="M5 13l4 4L19 7"/>'}
+
+
+def _svg(name: str, size: int, color: str = "currentColor", stroke: float = 1.8) -> str:
+    return (f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="{stroke}" stroke-linecap="round" stroke-linejoin="round" '
+            f'style="flex:none">{_ICON[name]}</svg>')
+
+
+def dialog_header_html(subtitle: str) -> str:
+    """The icon and one line under the dialog's own title (repeating the title here would show it twice)."""
+    return _one_line(f'<div class="ea-dh"><div class="ea-dh-tile">{_svg("mail", 20)}</div><div class="ea-dh-s">{esc(subtitle)}</div></div>')
+
+
+def field_feedback_html(kind: str, text: str) -> str:
+    """The line under a field as you type: red for a problem, green for good, blue for a note, grey for a hint. Nothing at all when there is nothing to say."""
+    if not text:
+        return ""
+    css = kind if kind in ("ok", "error", "info", "hint") else "hint"
+    mark = {"ok": "✓ ", "error": "✗ ", "info": "ℹ "}.get(css, "")
+    return f'<div class="ea-fl ea-fl-{css}">{mark}{esc(text)}</div>'
+
+
+def group_title_html(text: str) -> str:
+    return f'<div class="ea-grp-t">{esc(text)}</div>'
+
+
+def secure_note_html() -> str:
+    return _one_line(f'<div class="ea-secure">{_svg("lock", 16, "#1e3a8a")}<span>Encrypted on its way to GitHub. The password is never stored here.</span></div>')
+
+
+def result_panel_html(name: str, address: str, slot) -> str:
+    """What the dialog shows once an account has been added: what was done, and where."""
+    steps = "".join(f'<div class="ea-step"><i>{_svg("check", 12, "#15803d", 3)}</i>{esc(text)}</div>' for text in
+                    ("Password encrypted and sent to GitHub", f"Slot {slot} assigned to the account", "Connection check started"))
+    return _one_line(f'<div class="ea-done"><div class="ea-done-ico">{_svg("check", 28, "#15803d", 2.6)}</div><div class="ea-done-t">{esc(name)} was added</div>'
+                     f'<div class="ea-done-s">{esc(address)} · slot {esc(slot)}</div><div class="ea-steps">{steps}</div>'
+                     f'<div class="ea-done-n">It can take a minute to appear in the list while the app redeploys.</div></div>')
+
+
 def dialog_note_html(text: str) -> str:
     return f'<div class="ea-dialog-note">{esc(text)}</div>'
 
@@ -127,5 +167,24 @@ EA_CSS = """
 /* ---- the dialogs (add, bulk add, edit, remove) */
 .ea-dialog-note { color: #6b7280; font-size: 13.5px; line-height: 1.55; margin-bottom: 12px; }
 [class*="st-key-manage_remove_"] button:not(:disabled) { background: #dc2626; border-color: #dc2626; color: #fff; }
+.ea-dh { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; }
+.ea-dh-tile { width: 40px; height: 40px; border-radius: 12px; background: #eef2ff; color: #1d4ed8; display: flex; align-items: center; justify-content: center; flex: none; }
+.ea-dh-s { font-size: 14px; color: #4b5563; }
+.ea-fl { font-size: 12.5px; margin: -6px 0 10px; line-height: 1.45; }
+.ea-fl-ok { color: #15803d; } .ea-fl-error { color: #b91c1c; } .ea-fl-info { color: #1d4ed8; } .ea-fl-hint { color: #6b7280; }
+.ea-grp-t { font-size: 13px; font-weight: 700; color: #111827; margin-bottom: 6px; }
+[class*="st-key-ea_grp_"] { border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px 14px; background: #fafbfc; }
+.ea-secure { display: flex; gap: 9px; align-items: center; background: #f3f7ff; border: 1px solid #c7d7fb; color: #1e3a8a; border-radius: 10px; padding: 9px 12px; font-size: 12.5px; margin: 10px 0; }
+[class*="st-key-add_account_provider"], [class*="st-key-add_account_provider"] [data-testid="stRadio"], [class*="st-key-add_account_provider"] [data-testid="stRadio"] > div { width: 100% !important; }
+[class*="st-key-add_account_provider"] [role="radiogroup"] { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
+[class*="st-key-add_account_provider"] label[data-testid="stRadioOption"] { border: 1.5px solid #d1d5db; border-radius: 12px; padding: 12px 14px; background: #fff; margin: 0; align-items: flex-start; }
+[class*="st-key-add_account_provider"] label[data-testid="stRadioOption"]:has(input:checked) { border-color: #2563eb; background: #f3f7ff; box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }
+.ea-done { text-align: center; padding: 6px 0 2px; }
+.ea-done-ico { width: 56px; height: 56px; border-radius: 50%; background: #dcfce7; display: inline-flex; align-items: center; justify-content: center; }
+.ea-done-t { font-size: 20px; font-weight: 800; color: #111827; margin: 10px 0 2px; } .ea-done-s { font-size: 13px; color: #6b7280; margin-bottom: 12px; }
+.ea-steps { display: inline-flex; flex-direction: column; gap: 8px; text-align: left; }
+.ea-step { display: flex; gap: 10px; align-items: center; font-size: 13.5px; color: #374151; }
+.ea-step i { width: 20px; height: 20px; border-radius: 50%; background: #dcfce7; display: flex; align-items: center; justify-content: center; flex: none; }
+.ea-done-n { font-size: 12px; color: #6b7280; margin: 14px 0 4px; }
 .ea-warnbox { background: #fffaf0; border: 1px solid #f3d9a8; color: #92400e; border-radius: 10px; padding: 10px 14px; font-size: 13px; line-height: 1.5; margin: 6px 0 10px; }
 """
