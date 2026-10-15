@@ -138,13 +138,13 @@ def test_a_new_commit_shows_up_on_the_page_without_waiting_for_any_long_cache_ex
     with patches[0], patches[1], patches[2], patches[3]:
         at.run(timeout=30)
         _open_add_stage_form(at)
-        assert "followup6" in _next_stage_shown(at)
+        assert "Follow-up 6" in _next_stage_shown(at)
 
         repo.push_new_stage("followup6", "d" * 40)
         clock["t"] += github_client._HEAD_SHA_TTL_SECONDS + 0.5
         repo.reset_counts()
         at.run(timeout=30)
-        assert "followup7" in _next_stage_shown(at)   # the new commit is visible immediately
+        assert "Follow-up 7" in _next_stage_shown(at)   # the new commit is visible immediately
         assert repo.counts["contents"] > 0            # it genuinely re-read, rather than guessing
 
         repo.reset_counts()
