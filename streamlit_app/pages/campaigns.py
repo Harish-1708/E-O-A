@@ -42,12 +42,14 @@ from settings_logic import (  # noqa: E402
 )
 from schedule_view import ScheduleContext, render_schedule_tab  # noqa: E402
 from settings_view import SettingsContext, render_settings_tab  # noqa: E402
+from settings_html import chip_html, section_label_html, tool_heading_html, tool_note_html  # noqa: E402
 from launch_logic import build_status_override, build_delete_override, build_restore_override  # noqa: E402
 from responses_hub_logic import (  # noqa: E402
     group_responses_by_lead, sort_conversation_groups_newest_first, tag_responses_with_campaign, search_responses,
     count_unread_conversations, split_keys_by_campaign, build_mark_read_payload,
 )
 from inbox_view import InboxContext, render_inbox  # noqa: E402
+from inbox_senders import build_sender_options  # noqa: E402
 from leads_view import render_lead_browser, render_extra_filters, render_clear_filters  # noqa: E402
 from leads_logic import filter_counts, apply_extra_filters, any_extra_filter, stage_count, stage_labels  # noqa: E402
 from leads_actions import render_lead_actions  # noqa: E402
@@ -796,6 +798,7 @@ def _render_sequences_tab(campaign_cfg, leads, responses=None, send_log=None, er
     render_sequences_tab(SequencesContext(
         campaign_cfg=campaign_cfg, leads=leads, perf=perf, just_arrived=just_arrived, get_client=_get_github_client,
         fetch_structure=_fetch_live_stages_and_variants, fetch_content=_fetch_live_template_content, current_user=current_user,
+        wait_days_for=lambda prefix: _live_stage_wait_days(campaign_cfg).get(prefix),          # the wait the engine will use before a stage, this campaign's own where it has one
     ))
 
 
@@ -839,10 +842,10 @@ def _render_settings_tab(campaign_cfg, leads, send_log=None):
     status, _problems = compute_campaign_status(campaign_cfg, leads)
 
     def extras():
-        # Not in the design, kept exactly as they were: collapsed tools for this campaign.
-        _render_maintenance_section_in_settings(campaign_cfg)
+        # The integrations first, then the rarely needed maintenance tools last, as in the design.
         _render_asana_sync_section_in_settings(campaign_cfg)
         _render_tracker_sync_section_in_settings(campaign_cfg)
+        _render_maintenance_section_in_settings(campaign_cfg)
 
     render_settings_tab(SettingsContext(
         campaign_cfg=campaign_cfg, leads=leads or [], send_log=list(send_log or []), status=status, status_label=status_label(status), account_directory=account_directory,
@@ -923,6 +926,7 @@ def _render_inbox_for_campaign(campaign_cfg, leads, responses):
         show_campaign=False,
         pause_before_dispatch=1.0,
         sent_for=lambda name, lead_id: filter_sent_mail_for_lead(_load_sent_mail_cached(name), lead_id),
+        sender_options=lambda: build_sender_options(dict(st.secrets.get("email_accounts_directory", {})), _safe_github_client(), EMAIL_ACCOUNT_SLOT_MAPPING_ABS_PATH, _load_account_health),
     ))
 
 
@@ -1065,104 +1069,127 @@ def _render_status_controls(campaign_cfg, leads, just_arrived: bool, send_log=()
 
 
 def _render_asana_sync_section_in_settings(campaign_cfg):
-    """Enable/configure syncing this campaign's leads to an Asana
-    project, and trigger an on-demand sync. The actual sync (create/
-    update tasks, decide which stage a task belongs in, never create a
-    duplicate) all happens in sync_asana.yml / outreach.py — this is
-    only ever the settings + trigger, matching every other "does real
-    work elsewhere" action in this app."""
+    """Syncing this campaign's leads to an Asana project, and an on-demand sync. The sync itself (create or update tasks, decide a task's stage, never a duplicate)
+    happens in sync_asana.yml / outreach.py; this is only the settings and the trigger. 'Saved' is what is in the settings file (or what was just saved, until
+    the page catches up); the switch and the box are a draft until Save is pressed, and Sync now only runs on saved settings."""
     campaign_name = campaign_cfg["_campaign_name"]
     asana_settings = campaign_cfg.get("asana") or {}
-    with st.expander("🔗 Asana Sync", expanded=bool(asana_settings.get("enabled"))):
-        st.caption(
-            "Creates or updates one Asana task per lead — never a duplicate, since each lead's task is "
-            "tracked once it's first created. A lead's stage (Sourced / Outreach Sent / Follow-up / "
-            "Negotiating) is set automatically from its send/reply history; Rights Secured and "
-            "Declined / Dead are only ever set by hand in Asana and are never overwritten by a sync."
-        )
-        enabled = st.checkbox("Enable Asana sync for this campaign", value=bool(asana_settings.get("enabled")),
-                               key="asana_sync_enabled")
-        project_name = st.text_input("Asana project name (exact match)",
-                                      value=asana_settings.get("project_name", ""), key="asana_sync_project_name")
+    snapshot_key = f"asana_saved_{campaign_name}"
+    saved = st.session_state.get(snapshot_key) or {"enabled": bool(asana_settings.get("enabled")), "project_name": str(asana_settings.get("project_name", "")).strip()}
+    st.markdown(section_label_html("Integrations"), unsafe_allow_html=True)
+    with st.container(key="se_card_asana"):
+        head_column, switch_column = st.columns([4.2, 1.1])
+        head_column.markdown(tool_heading_html("🔗", "Asana sync", "One Asana task per lead — never a duplicate.", "on" if saved["enabled"] else "off",
+                                               "● On" if saved["enabled"] else "○ Off"), unsafe_allow_html=True)
+        with switch_column:
+            enabled = st.toggle("Enabled", value=saved["enabled"], key="asana_sync_enabled")
+        project_name = saved["project_name"]
+        if enabled:
+            project_name = st.text_input("Asana project name (exact match)", value=saved["project_name"], key="asana_sync_project_name").strip()
+            st.markdown(tool_note_html("A lead's stage (Sourced, Outreach Sent, Follow-up, Negotiating) follows its send and reply history. Rights Secured and Declined / Dead "
+                                       "are only ever set by hand in Asana and are never overwritten by a sync."), unsafe_allow_html=True)
+        else:
+            st.markdown(tool_note_html("Turn this on and save to start syncing."), unsafe_allow_html=True)
+        draft = {"enabled": bool(enabled), "project_name": project_name}
+        changed = draft != saved
+        save_column, sync_column, state_column = st.columns([1, 1.7, 2.3])
+        with save_column:
+            save_clicked = st.button("💾 Save", key="asana_sync_save", type="primary", disabled=not changed)
+        with sync_column:
+            sync_clicked = st.button("🔄 Sync to Asana now", key="asana_sync_now", disabled=not (saved["enabled"] and not changed))
+        with state_column:
+            if changed:
+                st.markdown(chip_html("unsaved", "● Unsaved change"), unsafe_allow_html=True)
+            elif not saved["enabled"]:
+                st.caption("Turn it on and save to enable syncing.")
+        with st.expander("How it works"):
+            st.caption(
+                "Creates or updates one Asana task per lead — never a duplicate, since each lead's task is tracked once it's first created. A lead's stage "
+                "(Sourced / Outreach Sent / Follow-up / Negotiating) is set automatically from its send/reply history; Rights Secured and Declined / Dead are only "
+                "ever set by hand in Asana and are never overwritten by a sync."
+            )
 
-        if st.button("💾 Save Asana Settings", key="asana_sync_save"):
-            if enabled and not project_name.strip():
-                st.error("Enter the Asana project name, or uncheck Enable.")
+        if save_clicked:
+            if draft["enabled"] and not draft["project_name"]:
+                st.error("Enter the Asana project name, or switch Enabled off.")
             else:
                 try:
                     client = _get_github_client()
                     raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)             # the LIVE file, not a possibly stale local copy
-                    updated = build_asana_settings_override(raw_override, enabled, project_name.strip())
+                    updated = build_asana_settings_override(raw_override, draft["enabled"], draft["project_name"])
                     client.create_file(
                         override_file_path(campaign_name), override_to_yaml_bytes(updated),
-                        message=f"Update Asana sync settings for {campaign_name} (via Streamlit, "
-                                f"by {current_user()})",
+                        message=f"Update Asana sync settings for {campaign_name} (via Streamlit, by {current_user()})",
                     )
+                    st.session_state[snapshot_key] = draft
                     st.success("Asana settings saved. May take a minute to reflect here while the app redeploys.")
                 except GitHubActionsError as exc:
                     st.error(f"Failed to save: {exc}")
-
-        if asana_settings.get("enabled"):
-            if st.button("🔄 Sync to Asana Now", key="asana_sync_now"):
-                try:
-                    client = _get_github_client()
-                    client.dispatch_workflow(WORKFLOW_SYNC_ASANA, {"campaign": campaign_name})
-                    st.success(f"Asana sync triggered for '{campaign_name}'. Check the Actions tab for progress.")
-                except GitHubActionsError as exc:
-                    st.error(f"Failed to trigger sync: {exc}")
-        else:
-            st.caption("Enable and save first to sync.")
+        if sync_clicked:
+            try:
+                client = _get_github_client()
+                client.dispatch_workflow(WORKFLOW_SYNC_ASANA, {"campaign": campaign_name})
+                st.success(f"Asana sync triggered for '{campaign_name}'. Check the Actions tab for progress.")
+            except GitHubActionsError as exc:
+                st.error(f"Failed to trigger sync: {exc}")
 
 
 def _render_tracker_sync_section_in_settings(campaign_cfg):
-    """Enable/configure syncing this campaign's leads to the Creator
-    Tracker sheet, and trigger an on-demand sync — a fully separate
-    section from Asana Sync, with its own expander, its own enable
-    toggle, and its own trigger, since a campaign may want either
-    without the other. The actual sync happens in the same
-    sync_asana.yml / outreach.py entry point (which runs Asana sync and
-    Creator Tracker sync independently of each other), matching every
-    other "does real work elsewhere" action in this app."""
+    """Syncing this campaign's leads to the shared Creator Tracker sheet, and an on-demand sync — a card of its own, with its own switch and trigger, since a campaign
+    may want either this or Asana without the other. The sync happens in the same sync_asana.yml / outreach.py entry point (which runs the Asana and tracker syncs
+    independently of each other). Same rules as Asana: the switch is a draft until Save, and Sync now only runs on saved settings."""
     campaign_name = campaign_cfg["_campaign_name"]
     tracker_settings = campaign_cfg.get("tracker_sync") or {}
-    with st.expander("📊 Creator Tracker Sync", expanded=bool(tracker_settings.get("enabled"))):
-        st.caption(
-            "A separate, shared spreadsheet (its ID and worksheet name are set once as GitHub "
-            "secrets, not configured per campaign) that keeps its own 'Contact Status' and 'Last "
-            "Contacted Date' columns in sync — nothing else in that sheet is ever touched. Matches "
-            "by Creator (the @handle) first, falling back to full name — a match against more than "
-            "one row in that sheet is reported for review rather than guessed at. Rights Secured and "
-            "Declined / Dead freeze the whole row here too, same as Asana."
-        )
-        tracker_enabled = st.checkbox("Enable Creator Tracker sync for this campaign",
-                                       value=bool(tracker_settings.get("enabled")),
-                                       key="tracker_sync_enabled")
-        if st.button("💾 Save Creator Tracker Settings", key="tracker_sync_save"):
+    snapshot_key = f"tracker_saved_{campaign_name}"
+    saved = st.session_state.get(snapshot_key) or {"enabled": bool(tracker_settings.get("enabled"))}
+    with st.container(key="se_card_tracker"):
+        head_column, switch_column = st.columns([4.2, 1.1])
+        head_column.markdown(tool_heading_html("📊", "Creator Tracker sync", "Keeps Contact Status and Last Contacted Date up to date in the shared tracker sheet.",
+                                               "on" if saved["enabled"] else "off", "● On" if saved["enabled"] else "○ Off"), unsafe_allow_html=True)
+        with switch_column:
+            enabled = st.toggle("Enabled", value=saved["enabled"], key="tracker_sync_enabled")
+        st.markdown(tool_note_html("Nothing else in the tracker sheet is ever touched, and a creator matching more than one row is reported for review rather than guessed at. "
+                                   "Rights Secured and Declined / Dead freeze the whole row, same as Asana." if enabled else "Turn this on and save to start syncing."), unsafe_allow_html=True)
+        draft = {"enabled": bool(enabled)}
+        changed = draft != saved
+        save_column, sync_column, state_column = st.columns([1, 1.7, 2.3])
+        with save_column:
+            save_clicked = st.button("💾 Save", key="tracker_sync_save", type="primary", disabled=not changed)
+        with sync_column:
+            sync_clicked = st.button("🔄 Sync tracker now", key="tracker_sync_now", disabled=not (saved["enabled"] and not changed))
+        with state_column:
+            if changed:
+                st.markdown(chip_html("unsaved", "● Unsaved change"), unsafe_allow_html=True)
+            elif not saved["enabled"]:
+                st.caption("Turn it on and save to enable syncing.")
+        with st.expander("How it works"):
+            st.caption(
+                "A separate, shared spreadsheet (its ID and worksheet name are set once as GitHub secrets, not configured per campaign) that keeps its own 'Contact Status' "
+                "and 'Last Contacted Date' columns in sync — nothing else in that sheet is ever touched. Matches by Creator (the @handle) first, falling back to full name — "
+                "a match against more than one row in that sheet is reported for review rather than guessed at. Rights Secured and Declined / Dead freeze the whole row here "
+                "too, same as Asana."
+            )
+
+        if save_clicked:
             try:
                 client = _get_github_client()
                 raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)             # the LIVE file, not a possibly stale local copy
-                updated = build_tracker_sync_settings_override(raw_override, tracker_enabled)
+                updated = build_tracker_sync_settings_override(raw_override, draft["enabled"])
                 client.create_file(
                     override_file_path(campaign_name), override_to_yaml_bytes(updated),
-                    message=f"Update Creator Tracker sync settings for {campaign_name} (via Streamlit, "
-                            f"by {current_user()})",
+                    message=f"Update Creator Tracker sync settings for {campaign_name} (via Streamlit, by {current_user()})",
                 )
-                st.success("Creator Tracker settings saved. May take a minute to reflect here while "
-                           "the app redeploys.")
+                st.session_state[snapshot_key] = draft
+                st.success("Creator Tracker settings saved. May take a minute to reflect here while the app redeploys.")
             except GitHubActionsError as exc:
                 st.error(f"Failed to save: {exc}")
-
-        if tracker_settings.get("enabled"):
-            if st.button("🔄 Sync Creator Tracker Sheet Now", key="tracker_sync_now"):
-                try:
-                    client = _get_github_client()
-                    client.dispatch_workflow(WORKFLOW_SYNC_ASANA, {"campaign": campaign_name})
-                    st.success(f"Creator Tracker sync triggered for '{campaign_name}'. Check the "
-                               "Actions tab for progress.")
-                except GitHubActionsError as exc:
-                    st.error(f"Failed to trigger sync: {exc}")
-        else:
-            st.caption("Enable and save first to sync.")
+        if sync_clicked:
+            try:
+                client = _get_github_client()
+                client.dispatch_workflow(WORKFLOW_SYNC_ASANA, {"campaign": campaign_name})
+                st.success(f"Creator Tracker sync triggered for '{campaign_name}'. Check the Actions tab for progress.")
+            except GitHubActionsError as exc:
+                st.error(f"Failed to trigger sync: {exc}")
 
 
 def _render_send_section_in_settings(campaign_cfg, leads):
@@ -1304,50 +1331,45 @@ def _render_more_menu(campaign_cfg, leads):
 
 
 def _render_maintenance_section_in_settings(campaign_cfg):
-    """Called from _render_settings_tab — moved out of Sequences since it
-    was a template-editing tab and this isn't a template edit, it's a
-    rare, likely one-time repair tool (new sends populate ThreadSubject
-    automatically; this only fixes leads that were already mid-sequence
-    before that existed). Collapsed by default so it doesn't compete for
-    attention with everyday settings."""
+    """Rarely needed repair tools for this campaign, in a quiet collapsed card. Today there is one: backfilling ThreadSubject for leads that were already mid-sequence
+    before it existed (new sends fill it in automatically). Kept out of the way of the everyday settings."""
     campaign_name = campaign_cfg["_campaign_name"]
-    with st.expander("🔧 Maintenance: Backfill ThreadSubject"):
-        st.caption(
-            "For leads already mid-sequence before ThreadSubject existed. Never overwrites an "
-            "already-set ThreadSubject — safe to run more than once, it only fills gaps. New sends "
-            "populate this automatically — you likely only ever need this once, if at all."
-        )
-        dry_run = st.checkbox("Dry run (preview only, don't write anything)", value=True,
-                               key="campaigns_backfill_dry_run")
+    st.markdown(section_label_html("Maintenance"), unsafe_allow_html=True)
+    with st.container(key="se_card_maint"):
+        with st.expander("🔧 Maintenance · rarely needed repair tools"):
+            st.markdown("**Backfill ThreadSubject**")
+            st.markdown(tool_note_html("For leads that were already mid-sequence before ThreadSubject existed. It only fills gaps and never overwrites, so it is safe to run more "
+                                       "than once. New sends fill it in automatically, so you likely only ever need this once, if at all."), unsafe_allow_html=True)
+            dry_run = st.toggle("Dry run — preview only, nothing is written", value=True, key="campaigns_backfill_dry_run")
 
-        if st.button("Run Backfill", key="campaigns_run_backfill"):
-            try:
-                client = _get_github_client()
-                inputs = build_backfill_thread_subject_inputs(campaign_name, dry_run=dry_run)
-                run_details = client.dispatch_workflow(WORKFLOW_BACKFILL_THREAD_SUBJECT, inputs)
-                if run_details is None:
-                    time.sleep(2)
-                    run_details = client.find_recent_run(WORKFLOW_BACKFILL_THREAD_SUBJECT)
-                if run_details:
-                    st.session_state["last_backfill_run_id"] = run_details.get("id") or run_details.get("run_id")
-                    st.session_state["last_backfill_run_url"] = run_details.get("html_url", "")
-                st.success(f"Triggered backfill for '{campaign_name}'" + (" (dry run)" if dry_run else "") + ".")
-            except GitHubActionsError as exc:
-                st.error(f"Failed to trigger backfill: {exc}")
-
-        backfill_run_id = st.session_state.get("last_backfill_run_id")
-        if backfill_run_id:
-            st.write(f"**Last triggered run:** "
-                     f"[{backfill_run_id}]({st.session_state.get('last_backfill_run_url', '')})")
-            if st.button("🔄 Refresh run status", key="campaigns_backfill_refresh_status"):
+            if st.button("▶ Run backfill", key="campaigns_run_backfill"):
                 try:
-                    run = _get_github_client().get_run(backfill_run_id)
-                    status = run.get("status", "unknown")
-                    conclusion = run.get("conclusion")
-                    st.success(f"Completed — conclusion: {conclusion}.") if status == "completed" \
-                        else st.info(f"Status: {status}")
+                    client = _get_github_client()
+                    inputs = build_backfill_thread_subject_inputs(campaign_name, dry_run=dry_run)
+                    run_details = client.dispatch_workflow(WORKFLOW_BACKFILL_THREAD_SUBJECT, inputs)
+                    if run_details is None:
+                        time.sleep(2)
+                        run_details = client.find_recent_run(WORKFLOW_BACKFILL_THREAD_SUBJECT)
+                    if run_details:
+                        st.session_state["last_backfill_run_id"] = run_details.get("id") or run_details.get("run_id")
+                        st.session_state["last_backfill_run_url"] = run_details.get("html_url", "")
+                    st.success(f"Triggered backfill for '{campaign_name}'" + (" (dry run)" if dry_run else "") + ".")
                 except GitHubActionsError as exc:
-                    st.error(f"Failed to fetch run status: {exc}")
+                    st.error(f"Failed to trigger backfill: {exc}")
+
+            backfill_run_id = st.session_state.get("last_backfill_run_id")
+            if backfill_run_id:
+                st.write(f"**Last triggered run:** "
+                         f"[{backfill_run_id}]({st.session_state.get('last_backfill_run_url', '')})")
+                if st.button("🔄 Refresh status", key="campaigns_backfill_refresh_status"):
+                    try:
+                        run = _get_github_client().get_run(backfill_run_id)
+                        status = run.get("status", "unknown")
+                        conclusion = run.get("conclusion")
+                        st.success(f"Completed — conclusion: {conclusion}.") if status == "completed" \
+                            else st.info(f"Status: {status}")
+                    except GitHubActionsError as exc:
+                        st.error(f"Failed to fetch run status: {exc}")
 
 
 def _refresh_all_data():
