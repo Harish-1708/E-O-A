@@ -193,3 +193,48 @@ def test_the_preview_and_the_checks_card_have_the_designs_card_look():
 
 def test_the_stylesheet_targets_streamlits_stable_attributes_not_its_generated_class_names():
     assert not re.search(r"st-emotion|\.e[0-9a-z]{6,}\b|css-[0-9a-z]+", CSS)
+
+
+# ================================================================ the add forms' markup
+
+def test_the_new_stage_card_is_a_dashed_card_with_its_badge_and_progress():
+    markup = H.new_stage_card_html("Follow-up 10", "+2 days", "New · 1 of 4 variants ready")
+    assert 'class="sq-stage sq-stage-new"' in markup and 'sq-stage-name">Follow-up 10<' in markup and '<span class="sq-badge">+2 days</span>' in markup and "New · 1 of 4 variants ready" in markup and "\n" not in markup
+    assert "sq-badge" not in H.new_stage_card_html("Follow-up 10", "", "New")
+
+
+def test_the_add_intro_and_progress_lines_are_escaped_and_the_details_optional():
+    assert H.add_intro_html("Follow-up 10", "sends 2 days after Follow-up 9") == '<div class="sq-add-intro">Next stage: <b>Follow-up 10</b> · sends 2 days after Follow-up 9</div>'
+    assert H.add_intro_html("Follow-up 10", "") == '<div class="sq-add-intro">Next stage: <b>Follow-up 10</b></div>'
+    assert H.add_progress_html("1 of 4 variants ready") == '<div class="sq-add-progress">1 of 4 variants ready</div>'
+    for markup in (H.new_stage_card_html(HOSTILE, HOSTILE, HOSTILE), H.add_intro_html(HOSTILE, HOSTILE), H.add_progress_html(HOSTILE)):
+        assert "<script" not in markup and "<img" not in markup and "\u202e" not in markup
+
+
+def test_the_checks_card_title_can_be_changed_and_is_escaped():
+    items = [{"ok": True, "text": "fine"}]
+    assert 'sq-checks-title">Check before saving<' in H.checks_html(items) and 'sq-checks-title">Check before adding<' in H.checks_html(items, "Check before adding")
+    assert "<script" not in H.checks_html(items, "<script>x</script>")
+
+
+@pytest.mark.parametrize("index", [0, 1, 3, 9])
+def test_the_add_form_hides_every_tab_but_the_chosen_one_without_removing_any_input(index):
+    css = H.add_pane_css(index)
+    assert '[class*="st-key-sq_addpane_"] { display: none !important; }' in css and f'[class*="st-key-sq_addpane_{index}_x"] {{ display: flex !important; }}' in css
+
+
+def test_the_tab_keys_end_in_a_marker_so_one_tab_can_never_match_another():
+    """sq_addpane_1_x must not also match sq_addpane_10_x."""
+    assert "sq_addpane_1_x" not in "sq_addpane_10_x"
+
+
+def test_the_new_stage_card_is_dashed_blue():
+    css = H.SEQUENCES_CSS
+    rule = css[css.index(".sq-stage-new {"):css.index("}", css.index(".sq-stage-new {"))]
+    assert "border: 1.5px dashed #2563eb" in rule and "background: #f3f7ff" in rule
+
+
+def test_the_add_forms_footer_puts_the_progress_line_and_the_button_on_one_row():
+    css = H.SEQUENCES_CSS
+    rule = css[css.index('[class*="st-key-sq_addfoot"] {'):css.index("}", css.index('[class*="st-key-sq_addfoot"] {'))]
+    assert "flex-direction: row !important" in rule and "justify-content: space-between" in rule and "border-top: 1px solid #eef0f3" in rule
