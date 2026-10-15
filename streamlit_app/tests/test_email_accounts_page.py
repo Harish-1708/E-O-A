@@ -333,3 +333,215 @@ def test_cancel_in_the_remove_dialog_can_never_pick_up_the_red_remove_styling(tm
         at.run(timeout=30)
         keys = [b.key for b in at.button if (b.key or "").startswith("manage_")]
         assert keys.count("manage_remove_sales2") == 1 and [k for k in keys if selector in k] == ["manage_remove_sales2"]       # only the real Remove button matches the red style
+
+
+def test_arriving_from_home_with_add_account_opens_the_dialog_and_uses_up_the_note(tmp_path):
+    with accounts_page(tmp_path, prime={"ea_open_add_on_arrival": True}) as (at, _):
+        assert at.session_state["ea_dialog"] == {"kind": "add", "name": None} and any(t.key == "add_account_name" for t in at.text_input)
+        assert "ea_open_add_on_arrival" not in at.session_state
+
+
+# ================================================================ the redesigned Add email account dialog
+
+def open_add(at):
+    btn(at, "ea_add_open").click()
+    at.run(timeout=30)
+
+
+def fill(at, name=None, address=None, password=None, confirm=None):
+    if name is not None:
+        at.text_input(key="add_account_name").set_value(name)
+    if address is not None:
+        at.text_input(key="add_account_address").set_value(address)
+    if password is not None:
+        at.text_input(key="add_account_password").set_value(password)
+    if confirm is not None:
+        at.checkbox(key="add_account_confirm").set_value(confirm)
+    at.run(timeout=30)
+
+
+def go_button(at):
+    return btn(at, "add_account_go")
+
+
+def test_the_provider_is_two_cards_gmail_first_each_with_a_line_saying_what_it_is(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        open_add(at)
+        radio = at.radio(key="add_account_provider")
+        assert radio.value == "Gmail" and len(radio.options) == 2
+        assert "Use a Google app password" in radio.options[0] and "Hostinger, Outlook or any SMTP and IMAP server" in radio.options[1]
+
+
+@pytest.mark.parametrize("typed, kind, said", [("", "hint", "A short label you will see in campaigns"), ("sales1", "error", "already exists (slot 1). Use Edit on its card to change it."),
+                                              ("old_one", "info", "is set up in Streamlit secrets. Adding it here takes over managing it."), ("sales9", "ok", "Free to use")])
+def test_the_name_gets_a_live_hint_from_the_real_rules(tmp_path, typed, kind, said):
+    with accounts_page(tmp_path, legacy={"old_one": "old@kelson.agency"}) as (at, _):
+        open_add(at)
+        fill(at, name=typed)
+        assert f'class="ea-fl ea-fl-{kind}">' in markup(at) and said in html.unescape(markup(at))
+
+
+def test_an_address_without_an_at_sign_is_flagged_as_you_type_and_a_good_one_says_nothing(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        open_add(at)
+        fill(at, address="sales5.kelson.agency")
+        assert "That is not a valid email address." in markup(at)
+        fill(at, address="sales5@kelson.agency")
+        assert "That is not a valid email address." not in markup(at)
+
+
+def test_gmail_gets_one_line_of_app_password_help_and_no_server_fields(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        open_add(at)
+        assert "16-character app password" in markup(at) and at.text_input(key="add_account_password").label == "App password"
+        assert not any(t.key == "add_account_smtp_host" for t in at.text_input) and not any(t.key == "add_account_same_imap_password" for t in at.toggle)
+
+
+def test_a_custom_provider_shows_the_sending_and_checking_groups_and_hides_the_imap_password_until_asked(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        open_add(at)
+        at.radio(key="add_account_provider").set_value("Custom (Hostinger, etc.)")
+        at.run(timeout=30)
+        for key in ("add_account_smtp_host", "add_account_smtp_port", "add_account_smtp_username", "add_account_imap_host", "add_account_imap_port", "add_account_imap_username"):
+            assert any(t.key == key for t in at.text_input), key
+        assert "Sending (SMTP)" in markup(at) and "Checking replies (IMAP)" in markup(at) and at.text_input(key="add_account_password").label == "Password"
+        assert at.toggle(key="add_account_same_imap_password").value is True and not any(t.key == "add_account_imap_password" for t in at.text_input)
+        at.toggle(key="add_account_same_imap_password").set_value(False)
+        at.run(timeout=30)
+        assert any(t.key == "add_account_imap_password" for t in at.text_input)
+
+
+@pytest.mark.parametrize("name, address, confirm, enabled", [("sales9", "a@b.com", True, True), ("sales9", "a@b.com", False, False), ("", "a@b.com", True, False), ("sales1", "a@b.com", True, False), ("sales9", "nope", True, False)])
+def test_add_needs_a_free_name_a_real_address_and_the_deliberate_confirmation(tmp_path, name, address, confirm, enabled):
+    with accounts_page(tmp_path) as (at, _):
+        open_add(at)
+        fill(at, name=name, address=address, confirm=confirm)                   # no password typed: it is not part of this
+        assert go_button(at).disabled is (not enabled)
+
+
+def test_pressing_add_without_a_password_says_so_and_writes_nothing(tmp_path):
+    with accounts_page(tmp_path) as (at, captured):
+        open_add(at)
+        fill(at, name="sales9", address="sales9@kelson.agency", confirm=True)
+        go_button(at).click()
+        at.run(timeout=30)
+        assert any("Password is required." in e.value for e in at.error) and captured["secrets"]["set_secret_calls"] == [] and "ea_add_result" not in at.session_state
+
+
+def _add_one(at, name="sales9", address="sales9@kelson.agency"):
+    open_add(at)
+    fill(at, name=name, address=address, password="a-real-app-password", confirm=True)
+    go_button(at).click()
+    at.run(timeout=30)
+
+
+def test_adding_an_account_writes_its_secret_and_the_mapping_and_shows_what_was_done(tmp_path):
+    with accounts_page(tmp_path) as (at, captured):
+        _add_one(at)
+        calls = captured["secrets"]["set_secret_calls"]
+        assert list(at.exception) == [] and list(at.error) == [] and len(calls) == 1 and calls[0]["name"] == "EMAIL_ACCOUNT_SLOT_4"
+        payload = json.loads(calls[0]["value"])
+        assert payload["name"] == "sales9" and payload["address"] == "sales9@kelson.agency" and payload["app_password"] == "a-real-app-password"
+        assert set(yaml.safe_load(captured["commits"]["commits"][0]["content"].decode("utf-8"))) == {"sales1", "sales2", "sales3", "sales9"} and "check_account_health.yml" in captured["dispatched"][0]
+        assert at.session_state["ea_add_result"] == {"name": "sales9", "address": "sales9@kelson.agency", "slot": 4}
+        text = markup(at)
+        assert "sales9 was added" in text and "sales9@kelson.agency · slot 4" in text and "Connection check started" in text and not any(t.key == "add_account_name" for t in at.text_input)
+
+
+def test_a_custom_providers_server_details_and_a_separate_imap_password_are_sent_with_it(tmp_path):
+    with accounts_page(tmp_path) as (at, captured):
+        open_add(at)
+        at.radio(key="add_account_provider").set_value("Custom (Hostinger, etc.)")
+        at.run(timeout=30)
+        for key, value in (("add_account_smtp_host", "smtp.hostinger.com"), ("add_account_smtp_port", "465"), ("add_account_imap_host", "imap.hostinger.com"), ("add_account_imap_port", "993")):
+            at.text_input(key=key).set_value(value)
+        at.toggle(key="add_account_same_imap_password").set_value(False)
+        at.run(timeout=30)
+        at.text_input(key="add_account_imap_password").set_value("different-imap-password")
+        fill(at, name="host1", address="hello@brand.com", password="smtp-password", confirm=True)
+        go_button(at).click()
+        at.run(timeout=30)
+        payload = json.loads(captured["secrets"]["set_secret_calls"][0]["value"])
+        assert payload["smtp_host"] == "smtp.hostinger.com" and str(payload["smtp_port"]) == "465" and payload["imap_host"] == "imap.hostinger.com" and payload["imap_password"] == "different-imap-password"
+
+
+def test_with_the_same_password_for_imap_no_separate_imap_password_is_sent(tmp_path):
+    with accounts_page(tmp_path) as (at, captured):
+        open_add(at)
+        at.radio(key="add_account_provider").set_value("Custom (Hostinger, etc.)")
+        at.run(timeout=30)
+        fill(at, name="host1", address="hello@brand.com", password="smtp-password", confirm=True)
+        go_button(at).click()
+        at.run(timeout=30)
+        assert "imap_password" not in json.loads(captured["secrets"]["set_secret_calls"][0]["value"])
+
+
+def test_add_another_starts_an_empty_form_and_done_closes_the_dialog(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        _add_one(at)
+        btn(at, "ea_add_another").click()
+        at.run(timeout=30)
+        assert "ea_add_result" not in at.session_state and at.text_input(key="add_account_name").value == "" and at.text_input(key="add_account_password").value == "" and at.checkbox(key="add_account_confirm").value is False
+        assert go_button(at).disabled is True and at.session_state["ea_dialog"]["kind"] == "add"
+    with accounts_page(tmp_path) as (at, _):
+        _add_one(at)
+        btn(at, "ea_add_done").click()
+        at.run(timeout=30)
+        assert at.session_state["ea_dialog"] is None and "ea_add_result" not in at.session_state and not any(t.key == "add_account_name" for t in at.text_input)
+
+
+def test_opening_the_dialog_again_after_an_add_shows_an_empty_form_never_the_old_result(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        _add_one(at)
+        btn(at, "ea_add_done").click()
+        at.run(timeout=30)
+        open_add(at)
+        assert "was added" not in markup(at) and at.text_input(key="add_account_name").value == ""
+
+
+def test_cancelling_a_half_filled_form_and_reopening_gives_a_clean_one(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        open_add(at)
+        fill(at, name="half", address="half@x.com")
+        btn(at, "cancel_add_account").click()
+        at.run(timeout=30)
+        open_add(at)
+        assert at.text_input(key="add_account_name").value == "" and at.text_input(key="add_account_address").value == ""
+
+
+def test_a_failed_add_says_why_and_keeps_the_form_instead_of_pretending(tmp_path):
+    with accounts_page(tmp_path, set_secret_error=GitHubActionsError("boom")) as (at, captured):
+        _add_one(at)
+        assert any("Failed to add account: boom" in e.value for e in at.error) and "ea_add_result" not in at.session_state and at.text_input(key="add_account_name").value == "sales9"
+        assert captured["commits"].get("commits") in (None, [])
+
+
+def test_closing_the_dialog_with_the_cross_while_the_result_shows_and_reopening_gives_an_empty_form(tmp_path):
+    """The cross closes a dialog in the browser without telling the app, so the last result is still remembered. Opening Add again must still start from a clean form."""
+    with accounts_page(tmp_path) as (at, _):
+        _add_one(at)
+        assert "ea_add_result" in at.session_state                 # the result is showing; we never press Done or Add another (as when the cross is used)
+        btn(at, "ea_add_open").click()
+        at.run(timeout=30)
+        assert "ea_add_result" not in at.session_state and "was added" not in markup(at) and at.text_input(key="add_account_name").value == ""
+        assert at.text_input(key="add_account_address").value == "" and go_button(at).disabled is True
+
+
+def test_add_another_really_clears_the_result_so_the_form_comes_back(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        _add_one(at)
+        btn(at, "ea_add_another").click()
+        at.run(timeout=30)
+        assert "was added" not in markup(at) and any(t.key == "add_account_name" for t in at.text_input)
+
+
+def test_closing_a_half_filled_form_with_the_cross_and_clicking_add_again_gives_an_empty_form(tmp_path):
+    """The cross gives the app no signal, so the half-typed values are still remembered; opening Add again must start clean (this is what clears them)."""
+    with accounts_page(tmp_path) as (at, _):
+        open_add(at)
+        fill(at, name="half", address="half@x.com", password="secret", confirm=True)
+        assert at.text_input(key="add_account_name").value == "half"
+        btn(at, "ea_add_open").click()                              # no Cancel pressed: as if the cross had closed it
+        at.run(timeout=30)
+        assert at.text_input(key="add_account_name").value == "" and at.text_input(key="add_account_address").value == "" and at.text_input(key="add_account_password").value == ""
+        assert at.checkbox(key="add_account_confirm").value is False and go_button(at).disabled is True
