@@ -280,6 +280,15 @@ def resp(i, read="", lead_id=None):
             "ReceivedAt": f"2026-10-0{i} 09:00:00", "Intent": "Interested", "InReplyTo": "", "IsRead": read}
 
 
+def badge_count(at):
+    """The number drawn after 'Responses', read from the style rule that draws it (None when there is no badge)."""
+    for markdown in at.markdown:
+        found = re.search(r'st-key-camp_tabs[^{]*:nth-child\(6\)::after \{ content: "(\d+)"', str(markdown.value))
+        if found:
+            return int(found.group(1))
+    return None
+
+
 def tab_labels(at):
     return [t.label for t in at.tabs]
 
@@ -290,7 +299,7 @@ def three_replies(**kw):
 
 def test_the_responses_tab_shows_a_badge_with_the_number_of_unread_replies():
     with campaign_page(**three_replies()) as (at, _):
-        assert list(at.exception) == [] and tab_labels(at) == ["Performance", "Data", "Sequences", "Schedule", "Settings", "Responses :blue-badge[3]"]
+        assert list(at.exception) == [] and tab_labels(at) == ["Performance", "Data", "Sequences", "Schedule", "Settings", "Responses"] and badge_count(at) == 3
 
 
 def test_no_replies_or_all_replies_read_means_no_badge():
@@ -304,23 +313,40 @@ def test_no_replies_or_all_replies_read_means_no_badge():
 @pytest.mark.parametrize("flag, counted", [("Yes", False), ("yes", False), ("TRUE", False), ("1", False), (" yes ", False), ("", True), ("No", True), ("0", True), ("later", True)])
 def test_only_the_sheets_own_read_flag_decides_whether_a_reply_is_already_read(flag, counted):
     with campaign_page(leads=[lead(1)], responses=[resp(1, flag)]) as (at, _):
-        assert tab_labels(at)[-1] == ("Responses :blue-badge[1]" if counted else "Responses")
+        assert badge_count(at) == (1 if counted else None)
 
 
 def test_a_reply_read_in_this_session_but_not_yet_synced_is_not_counted():
     with campaign_page(**three_replies(preset={"read_response_keys": {f"{FIXTURE_CAMPAIGN}:R1", f"{FIXTURE_CAMPAIGN}:R3"}})) as (at, _):
-        assert tab_labels(at)[-1] == "Responses :blue-badge[1]"
+        assert badge_count(at) == 1
 
 
 def test_replies_read_in_another_campaign_never_affect_this_ones_badge():
     with campaign_page(**three_replies(preset={"read_response_keys": {"Other_Campaign:R1", "Other_Campaign:R2", f"{FIXTURE_CAMPAIGN}x:R3"}})) as (at, _):
-        assert tab_labels(at)[-1] == "Responses :blue-badge[3]"
+        assert badge_count(at) == 3
 
 
-@pytest.mark.parametrize("value, label", [(4, "Responses :blue-badge[4]"), (1, "Responses :blue-badge[1]"), (0, "Responses"), (-3, "Responses"), (None, "Responses"), ("x", "Responses"), ("7", "Responses :blue-badge[7]")])
-def test_the_badge_label_is_only_ever_a_positive_number(value, label):
-    from campaign_header_logic import responses_tab_label
-    assert responses_tab_label(value) == label
+@pytest.mark.parametrize("value, shown", [(4, 4), (1, 1), (120, 120), (0, None), (-3, None), (None, None), ("x", None), ("7", 7), (2.0, 2)])
+def test_the_badge_is_only_ever_a_positive_number(value, shown):
+    from campaign_header_logic import responses_badge_css
+    css = responses_badge_css(value)
+    assert (re.search(r'content: "(\d+)"', css).group(1) if css else None) == (str(shown) if shown is not None else None)
+    assert not css or ':nth-child(6)::after' in css and 'st-key-camp_tabs' in css
+
+
+def test_the_responses_tab_is_always_labelled_just_responses_so_a_changing_count_can_never_reset_the_tabs():
+    """REGRESSION (seen in a real browser): the label was 'Responses :blue-badge[N]', so marking everything read changed the label and Streamlit jumped back to the first tab,
+    leaving the open 'Mark all read' panel stranded in the top-left corner."""
+    from campaign_header_logic import RESPONSES_TAB_LABEL
+    assert RESPONSES_TAB_LABEL == "Responses"
+    with campaign_page(**three_replies()) as (at, _):
+        with_unread = tab_labels(at)
+        assert badge_count(at) == 3
+    with campaign_page(**three_replies(preset={"read_response_keys": {f"{FIXTURE_CAMPAIGN}:R1", f"{FIXTURE_CAMPAIGN}:R2", f"{FIXTURE_CAMPAIGN}:R3"}})) as (at, _):
+        all_read = tab_labels(at)
+        assert badge_count(at) is None
+    assert with_unread == all_read == ["Performance", "Data", "Sequences", "Schedule", "Settings", "Responses"]
+
 
 
 def test_the_campaign_tab_shares_the_read_state_of_the_main_responses_page():
@@ -338,7 +364,7 @@ def test_marking_a_conversation_read_lowers_the_badge_and_offers_to_sync_it_to_t
         assert buttons, "the campaign's Inbox should offer 'Mark as read' now that it tracks read state"
         buttons[0].click()
         at.run(timeout=30)
-        assert list(at.exception) == [] and tab_labels(at)[-1] == "Responses :blue-badge[2]"
+        assert list(at.exception) == [] and badge_count(at) == 2
         sync = [b for b in at.button if b.key == f"sync_read_status_{FIXTURE_CAMPAIGN}"]
         assert len(sync) == 1 and sync[0].label == "🔄 Sync read status (1 pending)"
 
@@ -389,19 +415,19 @@ def test_the_badge_counts_leads_with_something_unread_not_the_emails_they_sent()
     """REGRESSION: it showed 255 for a campaign with 55 leads, because it counted every email."""
     responses = replies_from(1, 4) + replies_from(2, 1) + replies_from(3, 3)                       # 8 emails from 3 leads
     with campaign_page(leads=[lead(1), lead(2), lead(3)], responses=responses) as (at, _):
-        assert tab_labels(at)[-1] == "Responses :blue-badge[3]"
+        assert badge_count(at) == 3
 
 
 def test_a_lead_with_one_unread_email_among_read_ones_still_counts_and_a_fully_read_lead_does_not():
     responses = replies_from(1, 3, read="Yes")[:2] + [{**replies_from(1, 3)[2]}] + replies_from(2, 2, read="Yes")
     with campaign_page(leads=[lead(1), lead(2)], responses=responses) as (at, _):
-        assert tab_labels(at)[-1] == "Responses :blue-badge[1]"
+        assert badge_count(at) == 1
 
 
 def test_the_badge_always_matches_the_inboxs_own_unread_count():
     responses = replies_from(1, 5) + replies_from(2, 2, read="Yes") + replies_from(3, 1) + replies_from(4, 7)
     with campaign_page(leads=[lead(i) for i in (1, 2, 3, 4)], responses=responses) as (at, _):
-        assert rail_unread_count(at) == 3 and tab_labels(at)[-1] == "Responses :blue-badge[3]"
+        assert rail_unread_count(at) == 3 and badge_count(at) == 3
 
 
 # ================================================================ the more-menu: Check Replies lives here now
@@ -531,7 +557,7 @@ def test_marking_only_this_view_leaves_the_other_statuses_unread():
         at.run(timeout=30)
         marked = at.session_state["read_response_keys"]
         assert marked == {f"{FIXTURE_CAMPAIGN}:L1M0", f"{FIXTURE_CAMPAIGN}:L1M1", f"{FIXTURE_CAMPAIGN}:L3M0"}                  # the two Interested leads, nobody else
-        assert tab_labels(at)[-1] == "Responses :blue-badge[1]" and any("Marked 2 conversations as read (3 replies)" in s.value for s in at.success)
+        assert badge_count(at) == 1 and any("Marked 2 conversations as read (3 replies)" in s.value for s in at.success)
 
 
 def test_choosing_everything_unread_marks_the_leads_outside_the_view_too():
@@ -570,3 +596,11 @@ def test_choosing_a_view_with_nothing_unread_turns_the_confirm_button_off_instea
         next(r for r in at.radio if r.key == f"tab_{FIXTURE_CAMPAIGN}_markall_scope").set_value("view")             # deliberately the empty one
         at.run(timeout=30)
         assert _go(at).disabled is True and _go(at).label == "✓ Mark 0 conversations as read" and at.session_state["read_response_keys"] == set()
+
+
+def test_the_tab_bar_sits_inside_the_container_the_badge_rule_is_aimed_at():
+    """The badge is drawn by a rule scoped to 'camp_tabs'; without that container around st.tabs the rule would match nothing and the badge would silently vanish."""
+    source = open(os.path.join(os.path.dirname(__file__), "..", "pages", "campaigns.py"), encoding="utf-8").read()
+    assert re.search(r'with st\.container\(key="camp_tabs"\):\s*\n\s*tabs = st\.tabs\(\[[^\]]*RESPONSES_TAB_LABEL\]\)', source)
+    from campaign_header_logic import responses_badge_css
+    assert 'st-key-camp_tabs' in responses_badge_css(1)
