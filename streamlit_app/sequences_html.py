@@ -20,6 +20,27 @@ def stage_card_html(card: Dict, selected: bool) -> str:
                      f'<div class="sq-stage-sub">{esc(card.get("variants"))}</div></div>')
 
 
+def new_stage_card_html(title: str, badge: str, sub: str) -> str:
+    """The stage that is about to be added, drawn in the list as a dashed card with how far along it is."""
+    badge_html = f'<span class="sq-badge">{esc(badge)}</span>' if badge else ""
+    return _one_line(f'<div class="sq-stage sq-stage-new"><div class="sq-stage-top"><span class="sq-stage-name">{esc(title)}</span>{badge_html}</div><div class="sq-stage-sub">{esc(sub)}</div></div>')
+
+
+def add_intro_html(title: str, details: str) -> str:
+    """The line under the add form's title: which stage is next, and what is known about it."""
+    return _one_line(f'<div class="sq-add-intro">Next stage: <b>{esc(title)}</b>{f" · {esc(details)}" if details else ""}</div>')
+
+
+def add_progress_html(text: str) -> str:
+    return f'<div class="sq-add-progress">{esc(text)}</div>'
+
+
+def add_pane_css(selected_index: int) -> str:
+    """The add forms keep EVERY tab's inputs on the page (Streamlit forgets an input that is not drawn, which would lose what was typed) and show only the chosen one."""
+    return ('[class*="st-key-sq_addpane_"] { display: none !important; }\n'
+            f'[class*="st-key-sq_addpane_{int(selected_index)}_x"] {{ display: flex !important; }}')
+
+
 def editor_title_html(title: str) -> str:
     """The editor's heading. (The Editing / Locked state is the unlock box itself, shown as a badge at the card's top right.)"""
     return _one_line(f'<div class="sq-editor-title"><span>{esc(title)}</span></div>')
@@ -50,12 +71,19 @@ def preview_html(from_text: str, to_text: str, subject: str, body: str) -> str:
                      f'<div class="sq-preview-body">{_paragraphs(body)}</div></div>')
 
 
-def checks_html(items: List[Dict]) -> str:
+def checks_html(items: List[Dict], title: str = "Check before saving") -> str:
     rows = "".join(f'<div class="sq-check {"sq-ok" if item["ok"] else "sq-warn"}">{"✓" if item["ok"] else "⚠"} {esc(item["text"])}</div>' for item in items)
-    return _one_line(f'<div class="sq-checks"><div class="sq-checks-title">Check before saving</div>{rows}</div>')
+    return _one_line(f'<div class="sq-checks"><div class="sq-checks-title">{esc(title)}</div>{rows}</div>')
 
 
 SEQUENCES_CSS = """
+.sq-stage-new { border: 1.5px dashed #2563eb !important; background: #f3f7ff !important; }
+.sq-stage-new .sq-stage-sub { color: #1d4ed8; }
+.sq-add-intro { font-size: 13.5px; color: #4b5563; margin: 2px 0 12px; }
+.sq-add-intro b { color: #111827; }
+.sq-add-progress { font-size: 13.5px; color: #6b7280; }
+[class*="st-key-sq_addfoot"] { flex-direction: row !important; align-items: center; justify-content: space-between; gap: 12px !important; border-top: 1px solid #eef0f3; padding-top: 12px; margin-top: 4px; }
+[class*="st-key-sq_addfoot"] > div { width: auto !important; flex: 0 0 auto; }
 .sq-label { font-size: 12.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #374151; margin: 2px 0 10px; }
 
 /* ---- the stage list: one card per stage; the whole card is the (invisible) button on top of it */
