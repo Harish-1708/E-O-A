@@ -54,6 +54,28 @@ def readiness_html(items: List[Dict]) -> str:
     return _one_line(f'<div class="se-checks">{rows}</div>')
 
 
+def section_label_html(text: str) -> str:
+    """A small grey capitals label above a group of cards ('Integrations', 'Maintenance')."""
+    return f'<div class="se-section">{esc(text)}</div>'
+
+
+def chip_html(kind: str, text: str) -> str:
+    """A small pill: 'on' (green), 'unsaved' (amber) or anything else (grey, as 'off'). An unknown kind can never become a class name."""
+    css = kind if kind in ("on", "unsaved") else "off"
+    return f'<span class="se-chip se-chip-{css}">{esc(text)}</span>'
+
+
+def tool_heading_html(icon: str, title: str, subtitle: str, chip_kind: str, chip_text: str) -> str:
+    """The head of an integration card: an icon, the title with its state pill, and a one-line purpose."""
+    return _one_line(f'<div class="se-tool"><div class="se-ico">{esc(icon)}</div><div><div class="se-tool-title"><span class="se-title">{esc(title)}</span>'
+                     f'{chip_html(chip_kind, chip_text)}</div><div class="se-sub" style="margin:3px 0 0">{esc(subtitle)}</div></div></div>')
+
+
+def tool_note_html(text: str) -> str:
+    """The short explanation inside an integration card."""
+    return f'<div class="se-tool-note">{esc(text)}</div>'
+
+
 SETTINGS_CSS = """
 .se-title { font-size: 18px; font-weight: 700; color: #111827; }
 .se-sub { font-size: 13.5px; color: #6b7280; margin: 2px 0 10px; }
@@ -86,6 +108,21 @@ SETTINGS_CSS = """
 /* ---- sending limits */
 [class*="st-key-se_limit_"] label p { font-weight: 700; font-size: 14px; color: #111827; }
 [class*="st-key-se_save"] button { background: #2563eb !important; border: 1px solid #2563eb !important; color: #fff !important; border-radius: 9px !important; font-weight: 700 !important; }
+
+/* ---- the integration and maintenance cards */
+.se-section { font-size: 12px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #6b7280; margin: 8px 2px 8px; }
+.se-tool { display: flex; align-items: center; gap: 12px; }
+.se-ico { width: 34px; height: 34px; border-radius: 10px; background: #eef2ff; display: flex; align-items: center; justify-content: center; font-size: 17px; flex: none; }
+.se-tool-title { display: flex; align-items: center; gap: 10px; }
+.se-chip { font-size: 12px; font-weight: 700; border-radius: 99px; padding: 2px 10px; border: 1px solid #d1d5db; color: #6b7280; background: #f9fafb; }
+.se-chip-on { color: #15803d; border-color: #bbe3c9; background: #f0fbf4; }
+.se-chip-unsaved { color: #b45309; border-color: #f3d9a8; background: #fffaf0; }
+.se-tool-note { font-size: 13px; line-height: 1.55; color: #6b7280; margin: 10px 0 4px; }
+[class*="st-key-se_card_maint"] details, [class*="st-key-se_card_asana"] details, [class*="st-key-se_card_tracker"] details,
+[class*="st-key-se_card_maint"] [data-testid="stExpander"], [class*="st-key-se_card_asana"] [data-testid="stExpander"], [class*="st-key-se_card_tracker"] [data-testid="stExpander"] { border: 0 !important; background: transparent !important; box-shadow: none !important; }
+[class*="st-key-se_card_maint"] summary, [class*="st-key-se_card_asana"] summary, [class*="st-key-se_card_tracker"] summary { background: transparent !important; padding-left: 0 !important; font-weight: 700; }
+[class*="st-key-se_card_asana"] summary, [class*="st-key-se_card_tracker"] summary { color: #1d4ed8; font-weight: 600; font-size: 13px; }
+[class*="st-key-se_card_asana"] [data-testid="stHorizontalBlock"], [class*="st-key-se_card_tracker"] [data-testid="stHorizontalBlock"] { align-items: center; }
 
 /* ---- campaign status: the pill on the left, the button at the right of the same row */
 [class*="st-key-se_card_status"] [data-testid="stHorizontalBlock"] { align-items: center; }
