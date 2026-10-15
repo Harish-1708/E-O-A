@@ -278,3 +278,9 @@ def test_the_totals_and_subtitle_always_describe_every_campaign_even_while_a_fil
         at.run(timeout=30)
         assert names_in_order(at) == ["Soon_Draft"]
         assert re.findall(r'hb-stat-v">(.*?)</div>', markup(at)) == before == ["1", "131", "518", "74"] and "6 campaigns · 1 running · 1 needs attention" in markup(at)
+
+
+def test_arriving_from_home_with_new_campaign_opens_the_dialog_and_uses_up_the_note():
+    with hub(prime={"hub_open_new_on_arrival": True}) as (at, _):
+        assert at.session_state["show_new_campaign_dialog"] is True and any(t.key == "new_campaign_name" for t in at.text_input)
+        assert "hub_open_new_on_arrival" not in at.session_state                                  # used once: it can never reopen the dialog later
