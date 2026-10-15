@@ -218,9 +218,12 @@ def test_performance_page_is_strictly_read_only():
 
 def test_performance_is_registered_in_the_navigation_and_listed_on_home():
     source = open(APP_FILE, encoding="utf-8").read()
-    assert 'st.Page("pages/performance.py"' in source
-    assert "performance_page" in source.split("st.navigation(")[1].split(")")[0]
-    assert "Performance" in source.split("def _home")[1]
+    assert 'PAGES["performance"] = st.Page("pages/performance.py"' in source
+    assert "list(PAGES.values())" in source.split("st.navigation(")[1].split("\n")[0]               # every registered page is in the navigation
+    import shell_logic
+    assert any(item[0] == "performance" and item[1] == "Performance" and item[2] == "pages/performance.py" for item in shell_logic.NAV_ITEMS)       # and has its link in the sidebar
+    home_view = open(os.path.join(os.path.dirname(APP_FILE), "shell_view.py"), encoding="utf-8").read()
+    assert '("performance", "Performance",' in home_view                                                       # and its card on Home
 
 
 # ================================================================ replacing Analytics, Overview and Dashboard
