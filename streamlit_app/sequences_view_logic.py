@@ -163,3 +163,44 @@ def settle_drafts(drafts: Dict, originals: Dict[Tuple[str, str], Dict], changed:
         else:
             pending.append((draft["prefix"], draft["variant"], draft["subject"], draft["body"]))
     return pending, dropped
+
+
+# ---------------------------------------------------------------- the add forms: tabs, progress and the wait
+
+def tab_label(name: str, ready: bool) -> str:
+    """A tab of the add form: 'Variant A ✓' when its content is valid, 'Variant B ○' when it still needs filling in."""
+    return f"{name} {'✓' if ready else '○'}"
+
+
+def join_names(names: List[str]) -> str:
+    """'B', 'B and C', 'B, C and D' (and 'Follow-up 1, Follow-up 2 and Follow-up 3' the same way)."""
+    names = [str(name) for name in names]
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def progress_text(ready: List[bool], names: List[str], plural: str, adding: str) -> str:
+    """The line at the foot of an add form. ready[i] says whether names[i] is complete.
+    '1 of 4 variants ready · fill B, C and D to add this stage' / 'All 4 variants ready'. (`plural` is 'variants' or 'stages'; `adding` is what is being added.)"""
+    total, done = len(ready), sum(1 for flag in ready if flag)
+    if total and done == total:
+        return f"All {total} {plural} ready"
+    missing = [name for name, flag in zip(names, ready) if not flag]
+    return f"{done} of {total} {plural} ready · fill {join_names(missing)} to add {adding}"
+
+
+def wait_sentence(previous_label: str, wait: Optional[int]) -> str:
+    """'sends 2 days after Follow-up 9' for the stage about to be added; empty when the wait is not known (nothing is claimed that is not known)."""
+    if not isinstance(wait, int) or isinstance(wait, bool) or wait < 0:
+        return ""
+    if wait == 0:
+        return f"sends the same day as {previous_label}"
+    return f"sends {wait} day{'' if wait == 1 else 's'} after {previous_label}"
+
+
+def new_stage_badge(wait: Optional[int]) -> str:
+    """The day badge on the card of a stage about to be added, the same wording as on the others: '+2 days', '+1 day', 'Same day'; empty when the wait is not known."""
+    if not isinstance(wait, int) or isinstance(wait, bool) or wait < 0:
+        return ""
+    return "Same day" if wait == 0 else f"+{wait} day{'' if wait == 1 else 's'}"
