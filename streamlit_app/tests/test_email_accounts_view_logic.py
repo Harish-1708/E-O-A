@@ -90,3 +90,38 @@ def test_the_show_more_label_says_how_many_are_left(hidden, label):
                                          (["A", "B"], "2 campaigns aren’t counted in “sent today” yet (nothing sent for them): A, B")])
 def test_the_footnote_about_campaigns_that_have_sent_nothing(names, text):
     assert V.not_counted_note(names) == text
+
+
+# ================================================================ the Add account dialog: live hints and readiness
+
+MANAGED = {"sales1": {"slot": 1, "address": "a@x"}, "sales2": {"slot": 2, "address": "b@x"}}
+
+
+@pytest.mark.parametrize("name, legacy, kind", [("", (), "hint"), ("   ", (), "hint"), (None, (), "hint"), ("sales1", (), "error"), (" sales2 ", (), "error"), ("old_one", ("old_one",), "info"),
+                                                ("sales5", (), "ok"), ("sales5", ("old_one",), "ok"), ("sales1", ("sales1",), "error")])
+def test_the_name_hint_follows_the_real_rules(name, legacy, kind):
+    assert V.account_name_feedback(name, MANAGED, legacy)[0] == kind
+
+
+def test_the_name_hints_say_where_to_go_and_what_adding_would_do():
+    assert V.account_name_feedback("sales1", MANAGED, ())[1] == "“sales1” already exists (slot 1). Use Edit on its card to change it."
+    assert V.account_name_feedback("old_one", MANAGED, ("old_one",))[1] == "“old_one” is set up in Streamlit secrets. Adding it here takes over managing it."
+    assert V.account_name_feedback("", MANAGED, ())[1].startswith("A short label") and V.account_name_feedback("x", MANAGED, ())[1].startswith("Free to use")
+
+
+@pytest.mark.parametrize("address, kind", [("", "hint"), ("  ", "hint"), (None, "hint"), ("sales5.kelson.agency", "error"), ("@kelson.agency", "error"), ("sales5@", "error"), ("a@b", "ok"), (" sales5@kelson.agency ", "ok")])
+def test_the_address_hint_flags_only_what_cannot_be_an_address(address, kind):
+    assert V.address_feedback(address)[0] == kind
+    if kind != "error":
+        assert V.address_feedback(address)[1] == ""
+
+
+@pytest.mark.parametrize("name, address, ready", [("sales5", "a@b.com", True), ("sales5", "nope", False), ("", "a@b.com", False), ("sales1", "a@b.com", False), ("sales5", "", False), (None, None, False)])
+def test_the_button_may_be_pressed_only_with_a_free_name_and_a_real_address(name, address, ready):
+    assert V.add_form_ready(name, address, MANAGED) is ready
+
+
+def test_the_password_is_deliberately_not_part_of_whether_add_may_be_pressed():
+    """REGRESSION (seen in a real browser): a password typed and left with Tab is not handed to the app until focus leaves its show/hide eye, so waiting for it left Add stuck."""
+    import inspect
+    assert list(inspect.signature(V.add_form_ready).parameters) == ["name", "address", "managed"]
