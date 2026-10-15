@@ -200,11 +200,18 @@ def next_send_line(campaign_cfg: Dict, now_utc: datetime, minute: Optional[int],
 
 # ---------------------------------------------------------------- the Responses tab badge
 
-def responses_tab_label(unread: int) -> str:
-    """'Responses' with a small blue number after it while there are unread replies ('Responses :blue-badge[4]', which the tab draws as a badge), and
-    plain 'Responses' when there are none. A count that is not a positive whole number shows no badge."""
+RESPONSES_TAB_LABEL = "Responses"      # ALWAYS this text: Streamlit resets to the first tab when a tab's label changes, so a number in the label threw you off the tab
+RESPONSES_TAB_POSITION = 6             # its place among the campaign's tabs (Performance, Data, Sequences, Schedule, Settings, Responses)
+
+
+def responses_badge_css(unread) -> str:
+    """The small blue number after 'Responses' while there are unread replies, drawn by a style rule on that one tab instead of being part of its label. A count that is not
+    a positive whole number gives no rule at all (so no badge)."""
     try:
         count = int(unread)
     except (TypeError, ValueError):
-        return "Responses"
-    return f"Responses :blue-badge[{count}]" if count > 0 else "Responses"
+        return ""
+    if count <= 0:
+        return ""
+    return (f'[class*="st-key-camp_tabs"] [role="tablist"] > [role="tab"]:nth-child({RESPONSES_TAB_POSITION})::after '
+            f'{{ content: "{count}"; display: inline-block; margin-left: 7px; padding: 1px 8px; border-radius: 999px; background: #dde9fb; color: #1d4ed8; font-size: 11.5px; font-weight: 700; line-height: 1.5; vertical-align: middle; }}')
