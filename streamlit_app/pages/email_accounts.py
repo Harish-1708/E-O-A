@@ -103,6 +103,8 @@ import email_accounts_view_logic as EV  # noqa: E402
 
 
 def _open_dialog(kind, name=None) -> None:
+    if kind == "add":
+        _reset_add_form()                                   # a fresh, empty form every time (and never the result of the last add)
     st.session_state["ea_dialog"] = {"kind": kind, "name": name}
 
 
@@ -123,42 +125,82 @@ def _clear_account_filters() -> None:
 # The four dialogs. Each one stays open across the reruns its own widgets cause (the page calls it again every run while ea_dialog says so), and
 # is reset on a genuine arrival at the page: the same pattern as the New Campaign dialog.
 # =============================================================================
-@st.dialog("Add email account")
+PROVIDER_LABELS = {"Gmail": "**Gmail**  \nUse a Google app password. The simplest setup.",
+                   "Custom (Hostinger, etc.)": "**Custom provider**  \nHostinger, Outlook or any SMTP and IMAP server."}
+
+
+def _reset_add_form() -> None:
+    """Start the Add account form empty again (forget what was typed and any result from the last add)."""
+    st.session_state.pop("ea_add_result", None)
+    for key in [k for k in st.session_state if str(k).startswith("add_account_")]:
+        del st.session_state[key]
+
+
+def _hint(markup: str) -> None:
+    """Draw a hint only when there is one (an empty hint would still take up a gap)."""
+    if markup:
+        st.markdown(markup, unsafe_allow_html=True)
+
+
+def _add_another() -> None:
+    _reset_add_form()
+
+
+def _done_adding() -> None:
+    _reset_add_form()
+    st.session_state["ea_dialog"] = None
+
+
+@st.dialog("Add email account", width="large")
 def _add_account_dialog(current_mapping):
-    st.markdown(EH.dialog_note_html(
-        "The password is encrypted on its way to GitHub and never stored here. If this name matches an account that is only in Streamlit secrets, "
-        "adding it here takes over managing that account."), unsafe_allow_html=True)
-    provider = st.radio("Provider", ["Gmail", "Custom (Hostinger, etc.)"], key="add_account_provider", horizontal=True)
-    name = st.text_input("Account name (e.g. sales1)", key="add_account_name")
-    address = st.text_input("Email address", key="add_account_address")
-    password = st.text_input(
-        "App password" if provider == "Gmail" else "SMTP password", type="password",
-        key="add_account_password",
-    )
+    result = st.session_state.get("ea_add_result")
+    if result:
+        st.markdown(EH.result_panel_html(result["name"], result["address"], result["slot"]), unsafe_allow_html=True)
+        _spacer, again_column, done_column = st.columns([1, 1.3, 1])
+        with again_column:
+            st.button("＋ Add another", key="ea_add_another", width="stretch", on_click=_add_another)
+        with done_column:
+            st.button("Done", type="primary", key="ea_add_done", width="stretch", on_click=_done_adding)
+        return
+
+    st.markdown(EH.dialog_header_html("Connect a mailbox your campaigns can send from."), unsafe_allow_html=True)
+    provider = st.radio("Provider", ["Gmail", "Custom (Hostinger, etc.)"], key="add_account_provider", horizontal=True, format_func=lambda option: PROVIDER_LABELS[option])
+    legacy_names = [n for n in account_directory if n not in current_mapping]
+    name = st.text_input("Account name", key="add_account_name", placeholder="e.g. sales1")
+    _hint(EH.field_feedback_html(*EV.account_name_feedback(name, current_mapping, legacy_names)))
+    address = st.text_input("Email address", key="add_account_address", placeholder="name@yourdomain.com")
+    _hint(EH.field_feedback_html(*EV.address_feedback(address)))
+    password = st.text_input("App password" if provider == "Gmail" else "Password", type="password", key="add_account_password")
+    if provider == "Gmail":
+        st.markdown(EH.field_feedback_html("hint", "Gmail needs a 16-character app password, not your normal password. Create one in your Google account under Security, then App passwords."), unsafe_allow_html=True)
 
     smtp_host = smtp_port = smtp_username = imap_host = imap_port = imap_username = imap_password = ""
     if provider != "Gmail":
-        st.caption("Leave any field blank to use the same value as above where sensible.")
-        col_smtp, col_imap = st.columns(2)
-        with col_smtp:
-            st.markdown("**SMTP (sending)**")
-            smtp_host = st.text_input("SMTP Host", key="add_account_smtp_host", placeholder="smtp.hostinger.com")
-            smtp_port = st.text_input("SMTP Port", key="add_account_smtp_port", placeholder="465")
-            smtp_username = st.text_input("SMTP Username", key="add_account_smtp_username", placeholder="defaults to email address")
-        with col_imap:
-            st.markdown("**IMAP (checking replies)**")
-            imap_host = st.text_input("IMAP Host", key="add_account_imap_host", placeholder="imap.hostinger.com")
-            imap_port = st.text_input("IMAP Port", key="add_account_imap_port", placeholder="993")
-            imap_username = st.text_input("IMAP Username", key="add_account_imap_username", placeholder="defaults to email address")
-            imap_password = st.text_input("IMAP Password (only if different from SMTP password above)", type="password", key="add_account_imap_password")
+        smtp_column, imap_column = st.columns(2)
+        with smtp_column:
+            with st.container(key="ea_grp_smtp"):
+                st.markdown(EH.group_title_html("Sending (SMTP)"), unsafe_allow_html=True)
+                smtp_host = st.text_input("SMTP Host", key="add_account_smtp_host", placeholder="smtp.hostinger.com")
+                smtp_port = st.text_input("SMTP Port", key="add_account_smtp_port", placeholder="465")
+                smtp_username = st.text_input("SMTP Username", key="add_account_smtp_username", placeholder="defaults to the email address")
+        with imap_column:
+            with st.container(key="ea_grp_imap"):
+                st.markdown(EH.group_title_html("Checking replies (IMAP)"), unsafe_allow_html=True)
+                imap_host = st.text_input("IMAP Host", key="add_account_imap_host", placeholder="imap.hostinger.com")
+                imap_port = st.text_input("IMAP Port", key="add_account_imap_port", placeholder="993")
+                imap_username = st.text_input("IMAP Username", key="add_account_imap_username", placeholder="defaults to the email address")
+        if not st.toggle("Use the same password for IMAP", value=True, key="add_account_same_imap_password"):
+            imap_password = st.text_input("IMAP password", type="password", key="add_account_imap_password")
 
-    confirm = st.checkbox("Add this account now", key="add_account_confirm")
+    st.markdown(EH.secure_note_html(), unsafe_allow_html=True)
+    confirm = st.checkbox("These details are right. Add this account now.", key="add_account_confirm")
+    ready = EV.add_form_ready(name, address, current_mapping)
 
     _spacer, cancel_column, go_column = st.columns([2, 1, 1.5])
     with cancel_column:
         cancelled = st.button("Cancel", key="cancel_add_account", width="stretch")
     with go_column:
-        submit_clicked = st.button("Add account", type="primary", disabled=not confirm, key="add_account_go", width="stretch")
+        submit_clicked = st.button("Add account", type="primary", disabled=not (confirm and ready), key="add_account_go", width="stretch")
     if cancelled:
         _close_dialog()
         st.rerun()
@@ -197,11 +239,8 @@ def _add_account_dialog(current_mapping):
                     client.dispatch_workflow(WORKFLOW_CHECK_ACCOUNT_HEALTH, {})
                 except GitHubActionsError:
                     pass  # non-critical — the periodic health check will still catch it within 2 hours
-                _close_dialog()
-                st.success(
-                    f"'{name.strip()}' added to slot {slot}. May take a minute to reflect here while the "
-                    "app redeploys — a connection check was triggered too."
-                )
+                st.session_state["ea_add_result"] = {"name": name.strip(), "address": address.strip(), "slot": slot}
+                st.rerun()
             except (ValueError, GitHubActionsError) as exc:
                 st.error(f"Failed to add account: {exc}")
 
@@ -384,6 +423,8 @@ if "ea_dialog" not in st.session_state:
 # calling mark_active_page a second time here would always see "no change" (the first call just set it).
 if _just_arrived:
     st.session_state["ea_dialog"] = None
+if st.session_state.pop("ea_open_add_on_arrival", False):                          # Home's "Add account" button: arrive with the dialog already open
+    _open_dialog("add")
 
 with st.container(key="ea_head"):
     head_column, refresh_column, bulk_column, add_column = st.columns([4.2, 1.6, 1.6, 1.6], vertical_alignment="center")       # the three buttons get the same width
