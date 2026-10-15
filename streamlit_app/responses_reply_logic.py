@@ -141,3 +141,35 @@ def reply_payload_path(campaign_name: str, response_id: str, timestamp: Optional
     ts = timestamp or datetime.now().strftime("%Y-%m-%d-%H%M%S")
     safe_response_id = str(response_id).replace("/", "_") or "unknown"
     return f"replies/{campaign_name}/{safe_response_id}-{ts}.json"
+
+
+# ---------------------------------------------------------------- the From field
+
+def sender_label(name: str, directory: Dict[str, str], health: Dict[str, Dict]) -> str:
+    """An account as it appears in the From list: 'harish@kelson.agency (sales1)', and for an account whose last health check failed, '… — disconnected: reason'. The name
+    alone when its address is not known."""
+    address = (directory or {}).get(name) or ""
+    label = f"{address} ({name})" if address else str(name)
+    record = (health or {}).get(name) or {}
+    if str(record.get("status") or "").strip().lower() == "disconnected":
+        detail = str(record.get("detail") or "").strip()
+        label += f" — disconnected{': ' + detail if detail else ''}"
+    return label
+
+
+def sender_choices(directory: Dict[str, str], default_account: str) -> List[str]:
+    """The accounts offered in the From list: the account this thread started from FIRST (so it is what is selected unless someone chooses otherwise), then every other
+    configured account by name. A thread account that is not a configured account is still offered, so what the thread really used is never hidden. With no thread
+    account the list starts with an empty choice, which cannot be sent from."""
+    others = [name for name in sorted(directory or {}) if name != default_account]
+    if default_account:
+        return [default_account] + others
+    return [""] + others
+
+
+def sender_change_note(chosen: str, default_account: str) -> str:
+    """The amber warning shown when the From account is not the one the thread started from; empty when it is (or when there is nothing to compare)."""
+    if not chosen or not default_account or chosen == default_account:
+        return ""
+    return (f"You are replying from {chosen}, not the account that started this thread ({default_account}). The lead will see a different sender. "
+            f"Use this only if {default_account} is having problems.")
