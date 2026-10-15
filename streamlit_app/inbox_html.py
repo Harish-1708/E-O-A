@@ -221,6 +221,60 @@ def empty_thread_html(text: str) -> str:
 
 # ----------------------------------------------------------------------------- the stylesheet
 
+def composer_label_html(text: str) -> str:
+    """The grey field name at the left of a composer row ('From', 'To', 'Cc', 'Bcc', 'Subject')."""
+    return f'<div class="ux-flabel">{esc(text)}</div>'
+
+
+def sender_hint_html(text: str) -> str:
+    """The quiet line beside the From field ('the thread's own account')."""
+    return f'<div class="ux-fhint">{esc(text)}</div>'
+
+
+def sender_note_html(text: str) -> str:
+    """The amber warning under the From field when another account than the thread's is chosen."""
+    return f'<div class="ux-fnote">⚠ {esc(text)}</div>'
+
+
+def _size_text(size_bytes) -> str:
+    try:
+        size = max(0, int(size_bytes))
+    except (TypeError, ValueError):
+        return "0 KB"
+    return f"{size / (1024 * 1024):.1f} MB" if size >= 1024 * 1024 else f"{max(1, round(size / 1024))} KB" if size else "0 KB"
+
+
+def attachment_chips_html(files, limit_bytes: int) -> str:
+    """One chip per attached file (name and size) and a running total against the limit: '1.2 of 10 MB', turning red once it is over. No files: nothing."""
+    files = list(files or [])
+    if not files:
+        return ""
+    total = 0
+    chips = []
+    for name, size in files:
+        try:
+            total += max(0, int(size))
+        except (TypeError, ValueError):
+            pass
+        chips.append(f'<span class="ux-chipf">📄 {esc(name)} <span class="ux-fhint">{esc(_size_text(size))}</span></span>')
+    over = total > limit_bytes
+    limit_text = f"{limit_bytes / (1024 * 1024):.0f} MB"
+    return _one_line_html(f'<div class="ux-attach">{"".join(chips)}<span class="ux-total{" ux-over" if over else ""}">{esc(_size_text(total))} of {esc(limit_text)}</span></div>')
+
+
+def _one_line_html(markup: str) -> str:
+    return " ".join(line.strip() for line in markup.splitlines() if line.strip())
+
+
+def composer_open_css(namespace: str, thread_px: int) -> str:
+    """Applied only while the composer is open: the thread takes `thread_px` of height (what is left of the pane after the composer), so the composer fits INSIDE the same
+    pane and the pane does not grow. Streamlit wraps the thread in an outer element with a fixed height, and that wrapper is what has to change (the inner element only
+    fills it), hence :has(). The Reply button shows it is the active one."""
+    height = max(int(thread_px), 120)
+    return (f'div:has(> [class*="st-key-ux_threadbody_{namespace}"]) {{ height: {height}px !important; flex: 0 0 {height}px !important; }}\n'
+            '[class*="st-key-ux_reply_"] button { background: #eaf1ff !important; color: #1d4ed8 !important; border-color: #2563eb !important; }')
+
+
 _BASE_CSS = """
 .ux-row, .ux-card, .ux-thread-head, .ux-list-head, .ux-rail-item, .ux-rail-title, .ux-placeholder {
   font-family: Inter, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; box-sizing: border-box; }
@@ -333,6 +387,33 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
 [class*="st-key-ux_reply_"] button { background: #2563eb; color: #fff; border: 1px solid #2563eb; }
 [class*="st-key-ux_reply_"] button:hover { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
 [class*="st-key-ux_bar_"] [class*="_mark_read_"] button, [class*="st-key-ux_bar_"] [data-testid="stPopover"] button { background: #fff; color: #374151; border: 1px solid #d1d5db; }
+
+/* ---- the composer: docked at the bottom of the conversation pane, field names at the left, the message last */
+[class*="st-key-ux_composer_"] { background: #fff; border-top: 1px solid #e5e7eb; box-shadow: 0 -6px 14px rgba(17, 24, 39, .05); padding: 0 20px 8px; gap: 0 !important; }
+[class*="st-key-ux_composer_"] [data-testid="stVerticalBlock"] { gap: 0 !important; }
+[class*="st-key-ux_frm_"] { border-bottom: 1px solid #eef0f3; min-height: 0 !important; height: 34px !important; flex: 0 0 34px !important; overflow: hidden !important; }
+[class*="st-key-ux_frm_"] [data-testid="stHorizontalBlock"], [class*="st-key-ux_foot_"] [data-testid="stHorizontalBlock"] { display: grid !important; align-items: center; gap: .5rem; }
+[class*="st-key-ux_frm_"] [data-testid="stHorizontalBlock"] { grid-template-columns: 72px minmax(0, 1fr) auto !important; }
+[class*="st-key-ux_foot_"] [data-testid="stHorizontalBlock"] { grid-template-columns: 112px minmax(0, 1fr) max-content 118px !important; column-gap: 14px !important; padding-top: 6px; }
+[class*="st-key-ux_foot_"] .ux-fhint { white-space: nowrap; }
+[class*="st-key-ux_frm_"] [data-testid="stColumn"], [class*="st-key-ux_foot_"] [data-testid="stColumn"] { width: auto !important; min-width: 0 !important; flex: unset !important; }
+[class*="st-key-ux_frm_"] [data-testid="stTextInputRootElement"] { border: 0 !important; background: transparent !important; box-shadow: none !important; height: 30px !important; min-height: 0 !important; }
+[class*="st-key-ux_composer_"] [data-testid="stTextAreaRootElement"] { border: 0 !important; background: transparent !important; box-shadow: none !important; }
+.ux-flabel { color: #6b7280; font-weight: 600; font-size: 13px; }
+.ux-fhint { color: #6b7280; font-size: 12.5px; }
+.ux-fnote { background: #fffaf0; border: 1px solid #f3d9a8; color: #92400e; border-radius: 10px; padding: 8px 12px; font-size: 12.5px; line-height: 1.45; margin: 8px 0 4px; }
+[class*="st-key-ux_frm_"] input { border: 0 !important; background: transparent !important; box-shadow: none !important; min-height: 30px !important; height: 30px !important; font-size: 13.5px; }
+[class*="st-key-ux_frm_"] [data-testid="stSelectbox"] > div > div { border: 0 !important; background: transparent !important; box-shadow: none !important; min-height: 0 !important; height: 30px !important; font-size: 13.5px; }
+.ux-flabel { line-height: 30px; margin: 0; padding: 0; }
+[class*="st-key-ux_frm_"] [data-testid="stMarkdownContainer"] { margin: 0 !important; }
+[class*="st-key-ux_frm_"] [data-testid="stTextInput"], [class*="st-key-ux_frm_"] [data-testid="stSelectbox"] { min-height: 0 !important; }
+[class*="st-key-ux_frm_"] [data-baseweb="base-input"], [class*="st-key-ux_frm_"] [data-baseweb="input"] { border: 0 !important; background: transparent !important; }
+[class*="st-key-ux_composer_"] textarea { border: 0 !important; box-shadow: none !important; background: transparent !important; font-size: 14px; }
+.ux-attach { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ux-chipf { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #d1d5db; border-radius: 8px; padding: 3px 9px; font-size: 12.5px; background: #fff; }
+.ux-total { color: #6b7280; font-size: 12.5px; }
+.ux-over { color: #b91c1c; font-weight: 700; }
+[class*="st-key-ux_send_"] button { font-weight: 700; }
 
 /* ---- small screens: the rail becomes one row of pills so it does not push everything down */
 @media (max-width: 899px) {
