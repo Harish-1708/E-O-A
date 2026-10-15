@@ -269,3 +269,40 @@ def test_the_row_number_column_the_sheet_connector_adds_is_never_offered_as_a_pl
     """REGRESSION: the real connector puts `_row` on every lead, and `{{_row}}` was being offered next to the real placeholders."""
     tokens = S.placeholder_tokens([{"_row": 5, "_internal": "x", "Client": "DubeRobe", "_": "y"}], SYSTEM)
     assert tokens == ["{{FirstName}}", "{{LastName}}", "{{CompanyName}}", "{{Email}}", "{{Client}}"]
+
+
+# ================================================================ the add forms: tab labels, progress, the wait
+
+
+
+@pytest.mark.parametrize("name, ready, label", [("Variant A", True, "Variant A ✓"), ("Variant B", False, "Variant B ○"), ("Follow-up 3", True, "Follow-up 3 ✓"), ("", False, " ○")])
+def test_a_tab_shows_a_tick_when_ready_and_an_open_circle_when_not(name, ready, label):
+    assert S.tab_label(name, ready) == label
+
+
+@pytest.mark.parametrize("names, text", [([], ""), (["B"], "B"), (["B", "C"], "B and C"), (["B", "C", "D"], "B, C and D"), (["Intro", "Follow-up 1", "Follow-up 2"], "Intro, Follow-up 1 and Follow-up 2")])
+def test_names_are_joined_the_way_a_person_would_write_them(names, text):
+    assert S.join_names(names) == text
+
+
+@pytest.mark.parametrize("ready, names, plural, adding, text", [
+    ([True, False, False, False], list("ABCD"), "variants", "this stage", "1 of 4 variants ready · fill B, C and D to add this stage"),
+    ([False] * 4, list("ABCD"), "variants", "this stage", "0 of 4 variants ready · fill A, B, C and D to add this stage"),
+    ([True, True, True, False], list("ABCD"), "variants", "this stage", "3 of 4 variants ready · fill D to add this stage"),
+    ([True] * 4, list("ABCD"), "variants", "this stage", "All 4 variants ready"),
+    ([True, False], ["Intro", "Follow-up 1"], "stages", "Variant C", "1 of 2 stages ready · fill Follow-up 1 to add Variant C"),
+    ([True] * 5, list("abcde"), "stages", "Variant C", "All 5 stages ready"),
+])
+def test_the_progress_line_says_how_far_along_it_is_and_what_is_missing(ready, names, plural, adding, text):
+    assert S.progress_text(ready, names, plural, adding) == text
+
+
+@pytest.mark.parametrize("wait, text", [(2, "sends 2 days after Follow-up 9"), (1, "sends 1 day after Follow-up 9"), (0, "sends the same day as Follow-up 9"), (90, "sends 90 days after Follow-up 9"),
+                                        (None, ""), (-1, ""), (True, ""), (2.5, ""), ("2", "")])
+def test_the_wait_sentence_is_only_ever_said_when_the_wait_is_known(wait, text):
+    assert S.wait_sentence("Follow-up 9", wait) == text
+
+
+@pytest.mark.parametrize("wait, badge", [(2, "+2 days"), (1, "+1 day"), (0, "Same day"), (None, ""), (-3, ""), (True, ""), ("x", "")])
+def test_the_new_stage_card_badge_uses_the_same_wording_as_the_other_cards(wait, badge):
+    assert S.new_stage_badge(wait) == badge
