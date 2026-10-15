@@ -19,6 +19,7 @@ from test_pages_smoke import FakeWorksheet, FakeSpreadsheet, FIXTURE_CAMPAIGN, P
 
 OVERRIDE_PATH = f"config/campaigns/{FIXTURE_CAMPAIGN}.yaml"
 ACCOUNTS = {"sales1": "sales1@kelson.agency", "sales2": "sales2@kelson.agency", "sales3": "sales3@kelson.agency"}
+MANY = {**ACCOUNTS, "sales4": "sales4@kelson.agency", "sales5": "sales5@kelson.agency", "sales6": "sales6@kelson.agency"}      # enough accounts for the search box to be shown
 SCHEDULE = {"timezone": "America/Chicago", "window_start": "08:30", "window_end": "18:15", "send_days": ["mon", "wed"]}
 
 
@@ -228,16 +229,17 @@ def test_select_all_switches_every_account_on_and_the_count_follows():
 
 def test_switching_an_account_on_updates_the_count_and_the_sentence_about_what_will_happen():
     with settings_page(sending={"rotation_accounts": ["sales1"]}) as (at, _):
-        assert "All emails go out from sales1." in markup(at)
+        assert "All emails go out from fixture-sales1@example.com (sales1)." in markup(at)
         set_toggle(at, "sales3", True)
-        assert select_all_button(at).label == "Select all · 2 of 3 on" and "Emails go out from 2 accounts, taking turns: sales1, sales3." in markup(at)
+        assert select_all_button(at).label == "Select all · 2 of 3 on"
+        assert "Emails go out from 2 accounts, taking turns: fixture-sales1@example.com (sales1), sales3@kelson.agency (sales3)." in markup(at)
         set_toggle(at, "sales1", False)
-        assert "All emails go out from sales3." in markup(at)
+        assert "All emails go out from sales3@kelson.agency (sales3)." in markup(at)
 
 
 @pytest.mark.parametrize("sending, sentence", [
     ({"rotation_accounts": None, "sender_rotation": True}, "No accounts picked, so every configured account takes turns."),
-    ({"rotation_accounts": None, "sender_rotation": False}, "No accounts picked and rotation is off, so the default sender (sales1) is used."),
+    ({"rotation_accounts": None, "sender_rotation": False}, "No accounts picked and rotation is off, so the default sender, fixture-sales1@example.com (sales1), is used."),
 ])
 def test_with_nothing_picked_the_page_says_what_the_engine_will_do(sending, sentence):
     with settings_page(sending=sending, cfg={"default_sender_account": "sales1"}) as (at, _):
@@ -252,7 +254,7 @@ def test_the_rotation_switch_starts_as_saved():
 
 
 def test_searching_shows_only_matching_accounts_and_says_when_none_match():
-    with settings_page() as (at, _):
+    with settings_page(accounts=MANY) as (at, _):
         next(t for t in at.text_input if t.key == f"se_search_{FIXTURE_CAMPAIGN}").set_value("sales2")
         at.run(timeout=30)
         assert list(toggles(at)) == ["sales2"]
@@ -264,7 +266,7 @@ def test_searching_shows_only_matching_accounts_and_says_when_none_match():
 def test_an_account_hidden_by_a_search_keeps_its_switch_and_is_still_saved():
     """Streamlit forgets a widget that is not drawn, so the choice lives in its own store: hiding a row must never un-pick it."""
     live = {}
-    with settings_page(live=live) as (at, captured):
+    with settings_page(live=live, accounts=MANY) as (at, captured):
         set_toggle(at, "sales1", True)
         next(t for t in at.text_input if t.key == f"se_search_{FIXTURE_CAMPAIGN}").set_value("sales3")
         at.run(timeout=30)
@@ -275,7 +277,20 @@ def test_an_account_hidden_by_a_search_keeps_its_switch_and_is_still_saved():
         assert committed(captured)["sending"]["rotation_accounts"] == ["sales1", "sales3"]        # the hidden one was kept and saved
         next(t for t in at.text_input if t.key == f"se_search_{FIXTURE_CAMPAIGN}").set_value("")
         at.run(timeout=30)
-        assert toggles(at) == {"sales1": True, "sales2": False, "sales3": True}
+        assert {k: v for k, v in toggles(at).items() if k in ("sales1", "sales2", "sales3")} == {"sales1": True, "sales2": False, "sales3": True}
+
+
+def test_the_search_box_is_shown_only_when_there_are_four_or_more_accounts():
+    with settings_page() as (at, _):                                                             # sales1, sales2 (fixture) and sales3: three accounts
+        assert not any((t.key or "").startswith("se_search_") for t in at.text_input)
+    st.cache_data.clear()
+    with settings_page(accounts=MANY) as (at, _):
+        assert any((t.key or "").startswith("se_search_") for t in at.text_input)
+
+
+def test_select_all_is_not_offered_when_there_is_only_one_account():
+    with settings_page(accounts={"only": "only@kelson.agency"}, no_slots=True) as (at, _):
+        assert list(toggles(at)) == ["only"] and not any((b.key or "").startswith("se_selectall_button_") for b in at.button)
 
 
 def test_with_no_accounts_configured_it_says_how_to_add_one_and_offers_no_toggles_or_search():
@@ -528,10 +543,12 @@ def test_a_failed_delete_says_why_and_the_campaign_stays_selected():
 
 # ================================================================ the rest of the tab
 
-def test_the_tools_the_design_does_not_show_are_still_there_collapsed():
+def test_the_tools_the_design_does_not_show_are_still_there_as_cards():
     with settings_page() as (at, _):
         labels = [e.label for e in at.expander]
-        assert any("Maintenance: Backfill ThreadSubject" in label for label in labels) and any("Asana Sync" in label for label in labels) and any("Creator Tracker Sync" in label for label in labels)
+        assert any("Maintenance · rarely needed repair tools" in label for label in labels)
+        assert labels.count("How it works") == 2                                                    # one under Asana, one under the Creator Tracker
+        assert 'se-title">Asana sync<' in markup(at) and 'se-title">Creator Tracker sync<' in markup(at)
 
 
 def test_looking_at_the_settings_tab_never_writes_anything():
@@ -548,7 +565,7 @@ def test_a_failing_health_lookup_never_breaks_the_tab():
 def test_asana_and_tracker_saves_now_read_the_live_file_too():
     live = {OVERRIDE_PATH: override_yaml(schedule=SCHEDULE, sending={"daily_limit": 55})}
     with settings_page(live=live, cfg={"schedule": None}) as (at, captured):
-        next(c for c in at.checkbox if c.key == "tracker_sync_enabled").set_value(True)
+        next(c for c in at.toggle if c.key == "tracker_sync_enabled").set_value(True)
         at.run(timeout=30)
         next(b for b in at.button if b.key == "tracker_sync_save").click()
         at.run(timeout=30)
@@ -571,10 +588,208 @@ def test_restoring_a_campaign_reads_the_live_file_so_nothing_saved_a_moment_ago_
 def test_the_asana_settings_save_reads_the_live_file_too():
     live = {OVERRIDE_PATH: override_yaml(schedule=SCHEDULE, sending={"daily_limit": 55})}
     with settings_page(live=live, cfg={"schedule": None}) as (at, captured):
-        next(c for c in at.checkbox if c.key == "asana_sync_enabled").set_value(True)
+        next(c for c in at.toggle if c.key == "asana_sync_enabled").set_value(True)
+        at.run(timeout=30)                                                                      # the project-name box appears once the switch is on
         next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Creator Outreach")
         at.run(timeout=30)
         next(b for b in at.button if b.key == "asana_sync_save").click()
         at.run(timeout=30)
         saved = committed(captured)
         assert saved["asana"] == {"enabled": True, "project_name": "Creator Outreach"} and saved["schedule"] == SCHEDULE and saved["sending"] == {"daily_limit": 55}
+
+
+# ================================================================ the integration and maintenance cards
+
+ASANA_ON = {"asana": {"enabled": True, "project_name": "Creator Outreach"}}
+
+
+def btn(at, key):
+    return next(b for b in at.button if b.key == key)
+
+
+def tog(at, key):
+    return next(t for t in at.toggle if t.key == key)
+
+
+def chips(at):
+    return re.findall(r'<span class="se-chip se-chip-(\w+)">(.*?)</span>', markup(at))
+
+
+def test_the_cards_show_what_each_integration_is_and_whether_it_is_on():
+    with settings_page(cfg={**ASANA_ON, "tracker_sync": {"enabled": False}}) as (at, _):
+        text = markup(at)
+        assert ">Integrations<" in text and ">Maintenance<" in text and 'se-title">Asana sync<' in text and 'se-title">Creator Tracker sync<' in text
+        assert ("on", "● On") in chips(at) and ("off", "○ Off") in chips(at)
+        assert "One Asana task per lead — never a duplicate." in html.unescape(text)
+
+
+def test_a_switched_off_asana_asks_for_nothing_and_offers_no_save_or_sync():
+    with settings_page(cfg={"asana": {"enabled": False, "project_name": ""}}) as (at, _):
+        assert tog(at, "asana_sync_enabled").value is False and not any(t.key == "asana_sync_project_name" for t in at.text_input)
+        assert btn(at, "asana_sync_save").disabled is True and btn(at, "asana_sync_now").disabled is True
+        assert "Turn this on and save to start syncing." in markup(at)
+
+
+def test_switching_asana_on_shows_the_project_box_flags_the_unsaved_change_and_keeps_sync_off_until_saved():
+    with settings_page(cfg={"asana": {"enabled": False, "project_name": ""}}) as (at, captured):
+        tog(at, "asana_sync_enabled").set_value(True)
+        at.run(timeout=30)
+        assert any(t.key == "asana_sync_project_name" for t in at.text_input) and ("unsaved", "● Unsaved change") in chips(at)
+        assert btn(at, "asana_sync_save").disabled is False and btn(at, "asana_sync_now").disabled is True and captured.get("commits") is None
+
+
+def test_a_saved_asana_has_save_off_sync_on_and_flips_the_moment_the_project_is_edited():
+    with settings_page(cfg=ASANA_ON) as (at, _):
+        assert btn(at, "asana_sync_save").disabled is True and btn(at, "asana_sync_now").disabled is False and ("unsaved", "● Unsaved change") not in chips(at)
+        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Another project")
+        at.run(timeout=30)
+        assert btn(at, "asana_sync_save").disabled is False and btn(at, "asana_sync_now").disabled is True and ("unsaved", "● Unsaved change") in chips(at)
+        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Creator Outreach")
+        at.run(timeout=30)
+        assert btn(at, "asana_sync_save").disabled is True and btn(at, "asana_sync_now").disabled is False
+
+
+def test_a_project_name_that_is_only_spaces_counts_as_unchanged_and_blank_is_refused_on_save():
+    with settings_page(cfg=ASANA_ON, live={}) as (at, captured):
+        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("  Creator Outreach  ")
+        at.run(timeout=30)
+        assert btn(at, "asana_sync_save").disabled is True                                            # trimmed, so the same as what is saved
+        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("   ")
+        at.run(timeout=30)
+        btn(at, "asana_sync_save").click()
+        at.run(timeout=30)
+        assert any("Enter the Asana project name, or switch Enabled off." in e.value for e in at.error) and captured.get("commits") is None
+
+
+def test_saving_asana_commits_it_keeps_the_other_live_settings_and_then_the_page_treats_it_as_saved():
+    live = {OVERRIDE_PATH: override_yaml(schedule=SCHEDULE, sending={"daily_limit": 55})}
+    with settings_page(live=live, cfg={"schedule": None, "asana": {"enabled": False, "project_name": ""}}) as (at, captured):
+        tog(at, "asana_sync_enabled").set_value(True)
+        at.run(timeout=30)
+        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Creator Outreach")
+        at.run(timeout=30)
+        btn(at, "asana_sync_save").click()
+        at.run(timeout=30)
+        saved = committed(captured)
+        assert saved["asana"] == {"enabled": True, "project_name": "Creator Outreach"} and saved["schedule"] == SCHEDULE and saved["sending"] == {"daily_limit": 55}
+        assert "Update Asana sync settings for " in captured["commits"][0]["message"] and any("Asana settings saved." in s.value for s in at.success)
+        at.run(timeout=30)
+        assert btn(at, "asana_sync_save").disabled is True and btn(at, "asana_sync_now").disabled is False and ("on", "● On") in chips(at)       # saved, although the page's own copy is old
+
+
+def test_switching_asana_off_and_saving_keeps_the_project_name_for_next_time():
+    with settings_page(cfg=ASANA_ON, live={}) as (at, captured):
+        tog(at, "asana_sync_enabled").set_value(False)
+        at.run(timeout=30)
+        assert btn(at, "asana_sync_save").disabled is False and ("on", "● On") in chips(at)       # still on until it is saved
+        btn(at, "asana_sync_save").click()
+        at.run(timeout=30)
+        assert committed(captured)["asana"] == {"enabled": False, "project_name": "Creator Outreach"}
+
+
+def test_sync_now_starts_the_sync_workflow_for_this_campaign_and_says_so():
+    with settings_page(cfg=ASANA_ON) as (at, captured):
+        btn(at, "asana_sync_now").click()
+        at.run(timeout=30)
+        assert captured["dispatches"] == [("sync_asana.yml", {"campaign": FIXTURE_CAMPAIGN})] and any("Asana sync triggered" in s.value for s in at.success)
+
+
+def test_a_failed_asana_save_or_sync_says_why():
+    from github_client import GitHubActionsError
+    with settings_page(cfg=ASANA_ON, live={}, commit_error=GitHubActionsError("boom")) as (at, captured):
+        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Another project")
+        at.run(timeout=30)
+        btn(at, "asana_sync_save").click()
+        at.run(timeout=30)
+        assert any("Failed to save: boom" in e.value for e in at.error) and not at.success and captured.get("commits") is None and btn(at, "asana_sync_save").disabled is False
+
+
+def test_the_tracker_card_follows_the_same_rules_without_a_project_name():
+    with settings_page(cfg={"tracker_sync": {"enabled": False}}, live={}) as (at, captured):
+        assert btn(at, "tracker_sync_save").disabled is True and btn(at, "tracker_sync_now").disabled is True and "Turn this on and save to start syncing." in markup(at)
+        tog(at, "tracker_sync_enabled").set_value(True)
+        at.run(timeout=30)
+        assert btn(at, "tracker_sync_save").disabled is False and btn(at, "tracker_sync_now").disabled is True and ("unsaved", "● Unsaved change") in chips(at)
+        btn(at, "tracker_sync_save").click()
+        at.run(timeout=30)
+        assert committed(captured)["tracker_sync"] == {"enabled": True} and any("Creator Tracker settings saved." in s.value for s in at.success)
+        at.run(timeout=30)
+        assert btn(at, "tracker_sync_now").disabled is False
+        btn(at, "tracker_sync_now").click()
+        at.run(timeout=30)
+        assert captured["dispatches"] == [("sync_asana.yml", {"campaign": FIXTURE_CAMPAIGN})]
+
+
+def test_asana_and_the_tracker_are_saved_separately_so_one_never_disturbs_the_other():
+    live = {OVERRIDE_PATH: override_yaml(asana={"enabled": True, "project_name": "Creator Outreach"})}
+    with settings_page(cfg={**ASANA_ON, "tracker_sync": {"enabled": False}}, live=live) as (at, captured):
+        tog(at, "tracker_sync_enabled").set_value(True)
+        at.run(timeout=30)
+        btn(at, "tracker_sync_save").click()
+        at.run(timeout=30)
+        saved = committed(captured)
+        assert saved["asana"] == {"enabled": True, "project_name": "Creator Outreach"} and saved["tracker_sync"] == {"enabled": True}
+
+
+def test_the_maintenance_card_has_the_backfill_with_a_dry_run_switch_that_starts_on():
+    with settings_page() as (at, _):
+        assert ">Maintenance<" in markup(at) and any("Maintenance · rarely needed repair tools" in e.label for e in at.expander)
+        assert tog(at, "campaigns_backfill_dry_run").value is True and btn(at, "campaigns_run_backfill").label == "▶ Run backfill"
+        assert "Backfill ThreadSubject" in markup(at) and "safe to run more than once" in html.unescape(markup(at))
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_running_the_backfill_starts_its_workflow_with_the_dry_run_choice(dry_run):
+    from send_logic import build_backfill_thread_subject_inputs
+    with settings_page() as (at, captured):
+        tog(at, "campaigns_backfill_dry_run").set_value(dry_run)
+        at.run(timeout=30)
+        btn(at, "campaigns_run_backfill").click()
+        at.run(timeout=30)
+        assert captured["dispatches"][0][1] == build_backfill_thread_subject_inputs(FIXTURE_CAMPAIGN, dry_run=dry_run)
+        assert any("Triggered backfill" in s.value and (" (dry run)" in s.value) is dry_run for s in at.success)
+        assert btn(at, "campaigns_backfill_refresh_status") is not None                           # the last run can be followed
+
+
+def test_every_card_name_in_the_page_and_the_settings_view_is_unique_and_none_contains_another():
+    root = os.path.join(os.path.dirname(__file__), "..")
+    keys = []
+    for name in ("settings_view.py", os.path.join("pages", "campaigns.py")):
+        keys += re.findall(r'key=f?"(se_card_[^"]+)"', open(os.path.join(root, name), encoding="utf-8").read())
+    assert sorted(keys) == ["se_card_accounts", "se_card_asana", "se_card_danger", "se_card_limits", "se_card_maint", "se_card_readiness", "se_card_status", "se_card_tracker"]
+
+
+def test_just_after_saving_the_page_shows_it_as_saved_even_while_its_own_copy_of_the_settings_is_still_old():
+    """The page's copy of the settings can lag behind GitHub for a while. Without a note of what was just saved, 'Unsaved change' would stay on and Sync would stay off."""
+    with settings_page(cfg={"asana": {"enabled": False, "project_name": ""}, "tracker_sync": {"enabled": False}}, live=None) as (at, captured):       # GitHub cannot be re-read here
+        tog(at, "asana_sync_enabled").set_value(True)
+        tog(at, "tracker_sync_enabled").set_value(True)
+        at.run(timeout=30)
+        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Creator Outreach")
+        at.run(timeout=30)
+        btn(at, "asana_sync_save").click()
+        at.run(timeout=30)
+        at.run(timeout=30)
+        assert btn(at, "asana_sync_save").disabled is True and btn(at, "asana_sync_now").disabled is False
+        assert btn(at, "tracker_sync_save").disabled is False and btn(at, "tracker_sync_now").disabled is True        # the tracker was not saved: it is still a draft
+        btn(at, "tracker_sync_save").click()
+        at.run(timeout=30)
+        at.run(timeout=30)
+        assert btn(at, "tracker_sync_save").disabled is True and btn(at, "tracker_sync_now").disabled is False and len(captured["commits"]) == 2
+
+
+def test_a_saved_tracker_cannot_sync_while_its_switch_has_an_unsaved_change_and_can_again_once_put_back():
+    with settings_page(cfg={"tracker_sync": {"enabled": True}}) as (at, _):
+        assert btn(at, "tracker_sync_now").disabled is False and btn(at, "tracker_sync_save").disabled is True and ("on", "● On") in chips(at)
+        tog(at, "tracker_sync_enabled").set_value(False)
+        at.run(timeout=30)
+        assert btn(at, "tracker_sync_now").disabled is True and btn(at, "tracker_sync_save").disabled is False and ("unsaved", "● Unsaved change") in chips(at)
+        tog(at, "tracker_sync_enabled").set_value(True)
+        at.run(timeout=30)
+        assert btn(at, "tracker_sync_now").disabled is False and btn(at, "tracker_sync_save").disabled is True
+
+
+def test_the_cards_come_in_the_designs_order_integrations_first_and_maintenance_last():
+    with settings_page() as (at, _):
+        text = markup(at)
+        assert text.index(">Integrations<") < text.index('se-title">Asana sync<') < text.index('se-title">Creator Tracker sync<') < text.index(">Maintenance<")
