@@ -106,7 +106,7 @@ def _render_accounts(ctx: SettingsContext) -> Dict:
         with title_column:
             st.markdown(H.card_heading_html("Sender accounts", "Emails rotate across the accounts you switch on."), unsafe_allow_html=True)
         search = ""
-        if directory:
+        if L.show_search(len(directory)):
             with search_column:
                 search = st.text_input("Search accounts", placeholder="🔍 Search accounts", key=f"se_search_{name}", label_visibility="collapsed")
 
@@ -125,9 +125,10 @@ def _render_accounts(ctx: SettingsContext) -> Dict:
             with st.container(key=f"se_rotation_{name}"):
                 rotation_on = st.toggle("Rotate across multiple sender accounts", value=bool(sending.get("sender_rotation")), key=f"se_rotation_toggle_{name}")
         if directory:
-            with all_column:
-                with st.container(key=f"se_selectall_{name}"):
-                    st.button(L.select_all_text(len(picked & set(directory)), len(directory)), key=f"se_selectall_button_{name}", on_click=_select_all, args=(name, list(directory)))
+            if L.show_select_all(len(directory)):
+                with all_column:
+                    with st.container(key=f"se_selectall_{name}"):
+                        st.button(L.select_all_text(len(picked & set(directory)), len(directory)), key=f"se_selectall_button_{name}", on_click=_select_all, args=(name, list(directory)))
 
             health_rows = L.account_rows(directory, ctx.health, outreach._count_sent_today_by_account(ctx.send_log), picked, rotation_on,   # noqa: SLF001
                                          _per_account_limit_now(sending, name))
@@ -142,7 +143,7 @@ def _render_accounts(ctx: SettingsContext) -> Dict:
             if search and not L.filter_accounts(health_rows, search):
                 st.caption("No account matches that search.")
         st.markdown(H.note_html(L.rotation_summary(L.ordered_picks(sending.get("rotation_accounts") or [], picked, list(directory)) if directory else sorted(picked), rotation_on,
-                                                   ctx.default_account), "info"), unsafe_allow_html=True)
+                                                   ctx.default_account, directory), "info"), unsafe_allow_html=True)
     return {"picked": picked, "rotation_on": rotation_on}
 
 
