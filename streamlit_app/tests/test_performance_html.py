@@ -347,3 +347,96 @@ def test_the_change_line_colours():
         return css[i:css.index("}", i)]                                   # only what is INSIDE this rule (the same colours are used by other rules)
 
     assert "color: #15803d" in rule(".pf-trend-up {") and "color: #b91c1c" in rule(".pf-trend-down {") and "color: #6b7280" in rule(".pf-trend-flat {")
+
+
+# ================================================================ the "All campaigns at a glance" table
+
+def _grow(**kw):
+    base = {"name": "Camp_A", "status": "completed", "status_label": "✓ Completed", "leads": 39, "contacted": 39, "pending": 0, "sent": 235, "delivered": 233, "hard": 0, "soft": 2,
+            "replies": 20, "reply_rate": 0.513, "reply_rate_text": "51.3%", "completion": 0.386, "completion_text": "38.6%", "completed": 15, "best": False}
+    base.update(kw)
+    return base
+
+
+_GTOTAL = {"campaigns": 3, "leads": 126, "contacted": 126, "pending": 0, "sent": 525, "delivered": 523, "hard": 0, "soft": 2, "replies": 74, "reply_rate": 0.587, "reply_rate_text": "58.7%",
+           "completion": 0.238, "completion_text": "23.8%", "completed": 30}
+
+
+def test_the_table_has_the_seven_columns_one_row_per_campaign_and_a_total_row():
+    markup = P.glance_table_html([_grow(), _grow(name="Camp_B")], _GTOTAL)
+    for heading in ("Campaign", "Contacted", "Emails sent", "Replies", "Reply rate", "Bounces", "Sequence completion"):
+        assert f"<th>{heading}</th>" in markup
+    assert markup.count("<tr>") == 3 and '<tr class="pg-total">' in markup                          # the heading row and two campaign rows, then the total row
+    assert "All 3 campaigns" in markup and "58.7%" in markup and "\n" not in markup
+
+
+def test_a_row_shows_its_figures_with_a_note_or_a_bar_where_a_comparison_helps():
+    markup = P.glance_table_html([_grow()], _GTOTAL)
+    assert "39 <span class=\"pg-of\">of 39</span>" in markup and "233 delivered (est.)" in markup and "15 completed the sequence" in markup and "none pending" in markup
+    assert re.findall(r'style="width:(\d+)%"', markup) == ["100", "51", "39"]                      # contacted of leads, reply rate, sequence completion, in that order
+
+
+def test_pending_leads_get_a_chip_and_no_pending_says_so_quietly():
+    assert '<span class="pg-pend">4 pending</span>' in P.glance_table_html([_grow(leads=43, contacted=39, pending=4)], _GTOTAL)
+    assert "none pending" in P.glance_table_html([_grow()], _GTOTAL)
+
+
+def test_zero_bounces_are_quiet_grey_and_only_real_ones_are_coloured():
+    quiet = P.glance_table_html([_grow(hard=0, soft=0)], {**_GTOTAL, "soft": 0})
+    assert quiet.count("pg-bc-zero") >= 2 and "pg-bc-warn" not in quiet and "pg-bc-bad" not in quiet
+    coloured = P.glance_table_html([_grow(hard=3, soft=2)], _GTOTAL)
+    assert "pg-bc pg-bc-bad\">3 hard" in coloured and "pg-bc pg-bc-warn\">2 soft" in coloured
+
+
+def test_only_the_best_campaign_gets_the_star():
+    assert P.glance_table_html([_grow(best=True)], _GTOTAL).count("★ best rate") == 1
+    assert "★" not in P.glance_table_html([_grow()], _GTOTAL)
+
+
+@pytest.mark.parametrize("status, kind", [("running", "live"), ("attention", "warn"), ("draft", "draft"), ("paused", "paused"), ("completed", "done"), ("mystery", "done")])
+def test_the_status_chip_uses_the_campaign_lists_colour_families_and_an_unknown_one_is_the_neutral_grey(status, kind):
+    assert f'pg-chip pg-chip-{kind}"' in P.glance_table_html([_grow(status=status)], _GTOTAL)
+
+
+@pytest.mark.parametrize("fraction", [0, 0.5, 1, 1.7, -0.4, None])
+def test_no_bar_ever_goes_past_full_or_below_empty(fraction):
+    markup = P.glance_table_html([_grow(reply_rate=fraction, completion=fraction)], _GTOTAL)
+    assert all(0 <= int(w) <= 100 for w in re.findall(r'style="width:(-?\d+)%"', markup))
+
+
+def test_the_total_row_says_campaign_in_the_singular_for_one():
+    assert "All 1 campaign<" in P.glance_table_html([_grow()], {**_GTOTAL, "campaigns": 1})
+
+
+@pytest.mark.parametrize("hostile", [HOSTILE, '"><img src=x onerror=alert(1)>', "</td></tr><tr class=\"pg-total\">forged"])
+def test_hostile_text_in_a_campaign_name_or_status_can_never_become_markup(hostile):
+    markup = P.glance_table_html([_grow(name=hostile, status_label=hostile)], _GTOTAL) + P.glance_header_html(hostile)
+    assert "<script" not in markup and "<img" not in markup and "\u202e" not in markup and "\x00" not in markup and "forged</td>" not in markup
+    assert markup.count("<td") == markup.count("</td>") and markup.count("<tr") == markup.count("</tr>")
+
+
+def test_the_header_says_how_the_table_is_sorted():
+    assert "All campaigns at a glance" in P.glance_header_html("Reply rate") and "Sorted by reply rate." in P.glance_header_html("Reply rate") and "Sorted by name." in P.glance_header_html("Name")
+
+
+def _grule(start):
+    i = P.GLANCE_CSS.index(start)
+    return P.GLANCE_CSS[i:P.GLANCE_CSS.index("}", i)]
+
+
+def test_the_table_sits_in_a_card_that_scrolls_sideways_instead_of_squeezing_on_a_narrow_window():
+    assert "border-radius: 14px" in _grule('[class*="st-key-pg_glance"] {') and "overflow-x: auto" in _grule(".pg-scroll {")
+    assert "white-space: nowrap" in _grule(".pg-table th {")
+
+
+def test_the_glance_styles_are_part_of_the_performance_stylesheet_and_scoped_to_themselves():
+    assert P.GLANCE_CSS in P.PERFORMANCE_CSS
+    for part in P.GLANCE_CSS.split("}"):
+        selector = part.split("{")[0].strip()
+        if selector:
+            assert re.search(r"pg-|pg_", selector), f"an unscoped rule: {selector}"
+
+
+def test_the_table_has_only_horizontal_lines_between_rows_not_the_vertical_ones_streamlit_adds():
+    rule = _grule(".pg-table th, .pg-table td {")
+    assert "border-left: 0 !important" in rule and "border-right: 0 !important" in rule
