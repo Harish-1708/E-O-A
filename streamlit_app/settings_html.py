@@ -71,6 +71,24 @@ def tool_heading_html(icon: str, title: str, subtitle: str, chip_kind: str, chip
                      f'{chip_html(chip_kind, chip_text)}</div><div class="se-sub" style="margin:3px 0 0">{esc(subtitle)}</div></div></div>')
 
 
+def field_label_html(label: str, hint: str = "") -> str:
+    """The label above a field in an integration card: the name in bold and a quiet hint after it ('exact match')."""
+    extra = f' <span>· {esc(hint)}</span>' if hint else ""
+    return f'<div class="se-field-label">{esc(label)}{extra}</div>'
+
+
+def lock_help_html(locked: bool) -> str:
+    """The line under the project-name box that says whether it is locked and what the padlock does."""
+    if locked:
+        return '<div class="se-lock-help">🔒 Locked, so it cannot be changed by accident. Press the lock to edit.</div>'
+    return '<div class="se-lock-help se-lock-open">🔓 Unlocked. Press the lock again, or Save, to lock it.</div>'
+
+
+def rule_html() -> str:
+    """A thin line across the whole card, between its header, its settings and its 'How it works'."""
+    return '<div class="se-rule"></div>'
+
+
 def tool_note_html(text: str) -> str:
     """The short explanation inside an integration card."""
     return f'<div class="se-tool-note">{esc(text)}</div>'
@@ -82,7 +100,7 @@ SETTINGS_CSS = """
 .se-danger-title { color: #b91c1c; }
 
 /* ---- the cards: native containers styled as cards (their widgets are Streamlit's own) */
-[class*="st-key-se_card_"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 20px 22px; margin-bottom: 14px; }
+[class*="st-key-se_card_"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 22px 24px 18px; margin-bottom: 18px; }
 [class*="st-key-se_card_danger"] { border-color: #f3c4c4; }
 
 /* ---- sender accounts */
@@ -123,6 +141,24 @@ SETTINGS_CSS = """
 [class*="st-key-se_card_maint"] summary, [class*="st-key-se_card_asana"] summary, [class*="st-key-se_card_tracker"] summary { background: transparent !important; padding-left: 0 !important; font-weight: 700; }
 [class*="st-key-se_card_asana"] summary, [class*="st-key-se_card_tracker"] summary { color: #1d4ed8; font-weight: 600; font-size: 13px; }
 [class*="st-key-se_card_asana"] [data-testid="stHorizontalBlock"], [class*="st-key-se_card_tracker"] [data-testid="stHorizontalBlock"] { align-items: center; }
+
+/* ---- spacing inside the Asana and Tracker cards: a header, a line, the settings, the buttons, a line, then 'How it works' */
+.se-rule { height: 1px; background: #eef0f3; margin: 16px -24px; }
+.se-field-label { font-size: 13px; font-weight: 700; color: #374151; margin: 0 0 6px; }
+.se-field-label span { font-weight: 500; color: #9ca3af; }
+.se-lock-help { font-size: 12.5px; color: #6b7280; margin: 6px 0 0; }
+.se-lock-open { color: #1d4ed8; }
+[class*="st-key-se_card_asana"] .se-tool-note, [class*="st-key-se_card_tracker"] .se-tool-note { margin: 14px 0 0; }
+/* the Save / Sync row sits 16px under the explanation, and the thin line 16px under the buttons */
+[class*="st-key-se_card_asana"] [data-testid="stHorizontalBlock"]:has([class*="st-key-asana_sync_save"]), [class*="st-key-se_card_tracker"] [data-testid="stHorizontalBlock"]:has([class*="st-key-tracker_sync_save"]) { margin-top: 16px; }
+/* the project-name box and its padlock read as ONE control: the box loses its right corners and the padlock is its end cap */
+[class*="st-key-se_asana_field"] [data-testid="stHorizontalBlock"] { gap: 0 !important; align-items: stretch; }
+[class*="st-key-se_asana_field"] [data-testid="stTextInputRootElement"] { border-top-right-radius: 0 !important; border-bottom-right-radius: 0 !important; min-height: 42px; }
+[class*="st-key-se_asana_field"] [data-testid="stTextInputRootElement"]:has(input:disabled) { background: #f3f4f6 !important; }
+[class*="st-key-se_asana_field"] input:disabled { -webkit-text-fill-color: #4b5563; color: #4b5563; }
+[class*="st-key-asana_name_lock"] button { min-height: 42px; height: 42px; width: 100%; border-radius: 0 10px 10px 0 !important; border: 1px solid #d1d5db; border-left: 0; background: #fff; color: #4b5563; padding: 0; }
+[class*="st-key-asana_name_lock"] button:hover { background: #f3f4f6; }
+[class*="st-key-se_card_asana"]:has(input:not(:disabled)[aria-label="Asana project name (exact match)"]) [class*="st-key-asana_name_lock"] button { background: #eaf1ff; color: #1d4ed8; border-color: #c7d7fb; }
 
 /* ---- campaign status: the pill on the left, the button at the right of the same row */
 [class*="st-key-se_card_status"] [data-testid="stHorizontalBlock"] { align-items: center; }
