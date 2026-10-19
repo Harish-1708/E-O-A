@@ -26,6 +26,7 @@ from data_import_logic import payload_to_bytes  # noqa: E402
 from inbox_view import InboxContext, render_inbox  # noqa: E402
 from inbox_senders import build_sender_options  # noqa: E402
 from accounts_logic import build_health_lookup  # noqa: E402
+import responses_page_html as RH  # noqa: E402
 
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -35,11 +36,12 @@ _just_arrived = mark_active_page("responses")
 if not login_gate():
     st.stop()
 
-st.title("💬 Responses")
-st.caption(
-    "Every reply across every campaign, in one place. For working inside a single campaign's own "
-    "context, the Campaigns page has the same reply tools under each campaign's Responses tab."
-)
+st.markdown(f"<style>{RH.RESPONSES_PAGE_CSS}</style>", unsafe_allow_html=True)
+# The header's right-hand buttons are filled in further down, once the campaign list is known (the Replies menu needs it).
+with st.container(key="rp_head"):
+    head_title, head_refresh, head_menu = st.columns([6, 1.2, 1.4], vertical_alignment="center")
+head_title.markdown(RH.title_html(), unsafe_allow_html=True)
+notice = st.container()                                  # where the outcome of a Replies-menu action is shown, right under the header
 
 
 @st.cache_resource(show_spinner=False)
@@ -140,20 +142,83 @@ except Exception as exc:  # noqa: BLE001
     st.error(f"Couldn't list campaigns: {exc}")
     st.stop()
 
-if st.button("🔄 Refresh"):
-    _load_all_responses.clear()
-    _load_all_leads.clear()
-    _load_sent_mail_cached.clear()
+with head_refresh:
+    if st.button("🔄 Refresh", key="responses_refresh", width="stretch"):
+        _load_all_responses.clear()
+        _load_all_leads.clear()
+        _load_sent_mail_cached.clear()
+
+if "read_response_keys" not in st.session_state:
+    st.session_state["read_response_keys"] = set()
+if "pending_sync_keys" not in st.session_state:
+    st.session_state["pending_sync_keys"] = set()
+
+
+def _sync_read_status(pending):
+    grouped = split_keys_by_campaign(pending)
+    client = _get_github_client()
+    synced_campaigns = []
+    failed_campaigns = []
+    for campaign_for_sync, response_ids in grouped.items():
+        try:
+            payload = build_mark_read_payload(response_ids)
+            path = f"mark_read/{campaign_for_sync}/{time.strftime('%Y-%m-%d-%H%M%S')}.json"
+            client.create_file(
+                path, payload_to_bytes(payload),
+                message=f"Mark {len(response_ids)} response(s) read in {campaign_for_sync} "
+                        f"(via Streamlit, by {current_user()})",
+            )
+            client.dispatch_workflow(WORKFLOW_MARK_RESPONSES_READ,
+                                      {"campaign": campaign_for_sync, "payload_path": path})
+            synced_campaigns.append(campaign_for_sync)
+        except GitHubActionsError:
+            failed_campaigns.append(campaign_for_sync)
+    keys_to_remove = {f"{c}:{rid}" for c in synced_campaigns for rid in grouped[c]}
+    st.session_state["pending_sync_keys"] = pending - keys_to_remove
+    with notice:
+        if synced_campaigns:
+            st.success(f"Synced read status for {len(synced_campaigns)} campaign(s).")
+        if failed_campaigns:
+            st.warning(f"Failed to sync: {', '.join(failed_campaigns)}")
+
+
+def _check_replies_now(names):
+    client = _get_github_client()
+    triggered = []
+    failed = []
+    for name in names:
+        try:
+            inputs = build_check_replies_inputs(name)
+            client.dispatch_workflow(WORKFLOW_CHECK_REPLIES, inputs)
+            triggered.append(name)
+        except GitHubActionsError:
+            failed.append(name)
+    with notice:
+        st.success(f"Triggered a check for {len(triggered)} campaign(s).")
+        if failed:
+            st.warning(f"Failed to trigger for: {', '.join(failed)}")
+
+
+# The Replies menu: asking for new replies, and saving what has been read. (They used to sit under the inbox and between the filters.)
+with head_menu:
+    with st.popover("⋯ Replies", width="stretch"):
+        st.markdown(RH.group_label_html("Replies"), unsafe_allow_html=True)
+        st.caption(RH.CHECK_REPLIES_HELP)
+        if st.button("📥 Check replies now", key="responses_check_replies", width="stretch"):
+            _check_replies_now(campaign_names)
+        st.markdown(RH.group_label_html("Read status"), unsafe_allow_html=True)
+        pending_for_menu = st.session_state["pending_sync_keys"]
+        if pending_for_menu:
+            st.caption(RH.SYNC_HELP)
+            if st.button(f"🔄 Sync read status ({len(pending_for_menu)} pending)", key="responses_sync_read", width="stretch"):
+                _sync_read_status(pending_for_menu)
+        else:
+            st.caption(RH.NOTHING_TO_SYNC)
 
 all_responses, unavailable_campaigns = _load_all_responses(tuple(campaign_names))
 leads_by_campaign = _load_all_leads(tuple(campaign_names))
 
-if "read_response_keys" not in st.session_state:
-    st.session_state["read_response_keys"] = set()
 read_keys = st.session_state["read_response_keys"]
-
-if "pending_sync_keys" not in st.session_state:
-    st.session_state["pending_sync_keys"] = set()
 pending_sync_keys = st.session_state["pending_sync_keys"]
 
 # Read/unread is now persistent — each response's own IsRead column in
@@ -165,47 +230,21 @@ pending_sync_keys = st.session_state["pending_sync_keys"]
 # mark_responses_read.yml, batched rather than one run per response.
 unread_count = count_unread(all_responses, read_keys)
 
-if pending_sync_keys:
-    if st.button(f"🔄 Sync read status ({len(pending_sync_keys)} pending)"):
-        grouped = split_keys_by_campaign(pending_sync_keys)
-        client = _get_github_client()
-        synced_campaigns = []
-        failed_campaigns = []
-        for campaign_for_sync, response_ids in grouped.items():
-            try:
-                payload = build_mark_read_payload(response_ids)
-                path = f"mark_read/{campaign_for_sync}/{time.strftime('%Y-%m-%d-%H%M%S')}.json"
-                client.create_file(
-                    path, payload_to_bytes(payload),
-                    message=f"Mark {len(response_ids)} response(s) read in {campaign_for_sync} "
-                            f"(via Streamlit, by {current_user()})",
-                )
-                client.dispatch_workflow(WORKFLOW_MARK_RESPONSES_READ,
-                                          {"campaign": campaign_for_sync, "payload_path": path})
-                synced_campaigns.append(campaign_for_sync)
-            except GitHubActionsError:
-                failed_campaigns.append(campaign_for_sync)
-        keys_to_remove = {f"{c}:{rid}" for c in synced_campaigns for rid in grouped[c]}
-        st.session_state["pending_sync_keys"] = pending_sync_keys - keys_to_remove
-        if synced_campaigns:
-            st.success(f"Synced read status for {len(synced_campaigns)} campaign(s).")
-        if failed_campaigns:
-            st.warning(f"Failed to sync: {', '.join(failed_campaigns)}")
-
-search_query = st.text_input("🔍 Search responses (sender, subject, snippet, campaign)",
-                              key="responses_search_query")
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    status_filter = st.selectbox("Status", CLASSIFICATION_OPTIONS, key="responses_status_filter")
-with col2:
-    campaign_options = [STATUS_FILTER_ALL] + get_campaign_names_present(all_responses)
-    campaign_filter = st.selectbox("Campaign", campaign_options, key="responses_campaign_filter")
-with col3:
-    inbox_filter = st.radio(
-        "Show", [INBOX_FILTER_ALL, INBOX_FILTER_UNREAD], key="responses_inbox_chip", horizontal=True,
-        format_func=lambda v: "All" if v == INBOX_FILTER_ALL else f"Unread ({unread_count})",
-    )
+campaign_options = [STATUS_FILTER_ALL] + get_campaign_names_present(all_responses)
+with st.container(key="rp_toolbar"):
+    search_column, campaign_column, status_column, show_column = st.columns([5, 1.9, 1.7, 1.6], vertical_alignment="center")
+    with search_column:
+        search_query = st.text_input("🔍 Search responses (sender, subject, snippet, campaign)", key="responses_search_query", label_visibility="collapsed",
+                                     placeholder="🔍 Search responses (sender, subject, snippet, campaign)")
+    with campaign_column:
+        campaign_filter = st.selectbox("Campaign", campaign_options, key="responses_campaign_filter", label_visibility="collapsed", format_func=lambda v: f"Campaign: {v}")
+    with status_column:
+        status_filter = st.selectbox("Status", CLASSIFICATION_OPTIONS, key="responses_status_filter", label_visibility="collapsed", format_func=lambda v: f"Status: {v}")
+    with show_column:
+        inbox_filter = st.radio(
+            "Show", [INBOX_FILTER_ALL, INBOX_FILTER_UNREAD], key="responses_inbox_chip", horizontal=True, label_visibility="collapsed",
+            format_func=lambda v: "All" if v == INBOX_FILTER_ALL else f"Unread · {unread_count}",
+        )
 
 if unavailable_campaigns:
     st.caption(f"{len(unavailable_campaigns)} campaign(s) not counted yet (no Response Sheet tab exists — "
@@ -245,19 +284,3 @@ if groups:
     ))
 else:
     st.info("No responses match these filters.")
-
-st.divider()
-if st.button("📥 Check Replies Now (all campaigns)"):
-    client = _get_github_client()
-    triggered = []
-    failed = []
-    for name in campaign_names:
-        try:
-            inputs = build_check_replies_inputs(name)
-            client.dispatch_workflow(WORKFLOW_CHECK_REPLIES, inputs)
-            triggered.append(name)
-        except GitHubActionsError:
-            failed.append(name)
-    st.success(f"Triggered a check for {len(triggered)} campaign(s).")
-    if failed:
-        st.warning(f"Failed to trigger for: {', '.join(failed)}")
