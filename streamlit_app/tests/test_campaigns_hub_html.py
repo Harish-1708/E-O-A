@@ -163,4 +163,28 @@ def test_the_hub_rules_are_all_scoped_to_the_hub_or_its_dialogs():
 
 
 def test_the_cards_have_room_to_breathe_at_the_bottom_as_well_as_the_top():
-    assert "padding: 16px 18px 20px" in _rule('[class*="st-key-hub_card_"] {')
+    assert "padding: 22px 24px;" in _rule('[class*="st-key-hub_card_"] {')                                # equal top and bottom (see the card-spacing tests below)
+
+
+# ================================================================ the card's spacing: the content sits in the middle of its box
+
+def _hub_rule(start):
+    i = H.HUB_CSS.index(start)
+    return H.HUB_CSS[i:H.HUB_CSS.index("}", i)]
+
+
+def test_a_card_has_equal_space_above_and_below_its_content_and_centres_it():
+    """REGRESSION (reported, then measured): the padding was 16px on top and 20px below, plus a stray 4px margin, so the content looked pushed down onto the bottom edge."""
+    rule = _hub_rule('[class*="st-key-hub_card_"] {')
+    assert "padding: 22px 24px;" in rule and "margin-bottom: 12px" in rule and "min-height: 96px" in rule and "justify-content: center" in rule
+    assert "padding: 22px 24px 18px" not in rule and "16px 18px 20px" not in rule
+
+
+def test_streamlits_negative_margin_under_markdown_does_not_drag_the_cards_content_down():
+    rule = _hub_rule('[class*="st-key-hub_card_"] [data-testid="stMarkdownContainer"], [class*="st-key-hub_card_"] [data-testid="stElementContainer"] {')
+    assert "margin-bottom: 0 !important" in rule
+
+
+def test_the_tiles_and_the_list_follow_one_spacing_rhythm():
+    stats = _hub_rule(".hb-stats {")
+    assert "gap: 16px" in stats and "margin: 20px 0 16px" in stats and "padding: 16px 20px" in _hub_rule(".hb-stat {")
