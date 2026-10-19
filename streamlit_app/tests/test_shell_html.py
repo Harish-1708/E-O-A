@@ -264,3 +264,16 @@ def test_the_stage_table_has_no_vertical_lines_and_streamlits_gap_under_markdown
 
 def test_the_old_figures_and_the_running_now_card_are_gone():
     assert not hasattr(H, "stats_html") and not hasattr(H, "running_card_html") and "sh-run" not in H.SHELL_CSS and "home_run_" not in H.SHELL_CSS
+
+
+def test_a_today_card_has_room_between_its_parts_and_around_its_dropdowns():
+    """REGRESSION (reported, then measured in a real browser): the summary, the 'Stage breakdown' dropdown and the 'Who is due now' dropdown had 0px between them."""
+    card = _rule('[class*="st-key-home_today_"] {')
+    assert "gap: 12px !important" in card and "padding: 22px 24px" in card and "margin-bottom: 14px" in card and "gap: 0 !important" not in card
+    box = _rule('[class*="st-key-home_today_"] [data-testid="stExpander"] {')
+    assert "border: 1px solid #e5e7eb !important" in box and "border-radius: 10px !important" in box and "background: #fafbfc" in box
+    assert "padding: 10px 14px" in _rule('[class*="st-key-home_today_"] [data-testid="stExpander"] summary {')
+
+
+def test_the_figures_and_the_summary_line_inside_a_card_are_spaced_apart():
+    assert "margin-top: 18px" in _rule(".sh-tc-grid {") and "margin-top: 18px; padding-top: 16px" in _rule(".sh-tc-foot {") and "margin-top: 6px" in _rule(".sh-tc-seq {")
