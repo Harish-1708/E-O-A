@@ -440,3 +440,20 @@ def test_the_glance_styles_are_part_of_the_performance_stylesheet_and_scoped_to_
 def test_the_table_has_only_horizontal_lines_between_rows_not_the_vertical_ones_streamlit_adds():
     rule = _grule(".pg-table th, .pg-table td {")
     assert "border-left: 0 !important" in rule and "border-right: 0 !important" in rule
+
+
+def test_the_replies_cell_says_how_many_of_the_replies_were_positive():
+    assert '<div class="pg-num">20</div><div class="pg-sub">replied · 12 positive</div>' in P.glance_table_html([_grow(positive=12)], {**_GTOTAL, "positive": 12})
+    assert "replied · 0 positive" in P.glance_table_html([_grow()], _GTOTAL)                       # a row without the figure says 0, never fails
+
+
+def test_the_reasons_a_campaign_needs_attention_are_amber_chips_under_its_status_and_absent_when_there_are_none():
+    markup = P.glance_table_html([_grow(problems=["No leads with an email address", "No templates"])], _GTOTAL)
+    assert markup.count('class="pg-problem"') == 2 and "⚠ No leads with an email address" in markup and '<div class="pg-problems">' in markup
+    assert "pg-problem" not in P.glance_table_html([_grow(problems=[])], _GTOTAL).replace(".pg-problem", "") and "pg-problems" not in P.glance_table_html([_grow()], _GTOTAL)
+
+
+@pytest.mark.parametrize("hostile", [HOSTILE, '"><img src=x onerror=alert(1)>'])
+def test_hostile_text_in_an_attention_reason_can_never_become_markup(hostile):
+    markup = P.glance_table_html([_grow(problems=[hostile])], _GTOTAL)
+    assert "<script" not in markup and "<img" not in markup and "\u202e" not in markup and markup.count("<td") == markup.count("</td>")
