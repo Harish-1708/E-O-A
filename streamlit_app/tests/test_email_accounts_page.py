@@ -545,3 +545,154 @@ def test_closing_a_half_filled_form_with_the_cross_and_clicking_add_again_gives_
         at.run(timeout=30)
         assert at.text_input(key="add_account_name").value == "" and at.text_input(key="add_account_address").value == "" and at.text_input(key="add_account_password").value == ""
         assert at.checkbox(key="add_account_confirm").value is False and go_button(at).disabled is True
+
+
+# ================================================================ the redesigned Bulk add dialog
+
+def open_bulk(at):
+    btn(at, "ea_bulk_open").click()
+    at.run(timeout=30)
+
+
+def upload_csv(at, text):
+    next(fu for fu in at.file_uploader if fu.key == "bulk_accounts_csv_upload").upload("accounts.csv", text.encode("utf-8"), "text/csv")
+    at.run(timeout=30)
+
+
+GOOD_CSV = "Name,Email,Password,SMTP Host,SMTP Port\nsales5,s5@kelson.agency,pw5,,\nhost1,hello@brand.com,pw6,smtp.hostinger.com,465\nsales7,s7@kelson.agency,pw7,,\n"
+
+
+def test_the_dialog_starts_with_the_columns_a_download_and_an_upload_and_no_review_yet(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        open_bulk(at)
+        text = markup(at)
+        assert 'ea-bnum">1<' in text and 'ea-bnum">2<' in text and 'ea-bnum">3<' not in text
+        assert re.findall(r'ea-cc ea-cc-req">(\w+)<', text) == ["Email", "Password"] and "ea-cc ea-cc-opt\">Name<" in text and "ea-cc ea-cc-opt\">IMAP Username<" in text
+        assert [b.proto.label for b in at.get("download_button")] == ["⬇ Download template"]
+        assert any(e.label == "See an example" for e in at.expander) and not at.dataframe
+
+
+def test_the_template_is_accepted_by_the_real_parser_with_its_example_rows():
+    """Round trip: what the Download template button gives is a file the dialog itself can read."""
+    import csv
+    import io
+    import email_accounts_view_logic as EV
+    from email_account_slots_logic import BULK_ACCOUNT_CSV_COLUMNS, parse_bulk_accounts_csv
+    rows = list(csv.DictReader(io.StringIO(EV.bulk_template_csv().decode("utf-8"))))
+    assert list(rows[0].keys()) == BULK_ACCOUNT_CSV_COLUMNS and len(rows) == 2
+    parsed, errors = parse_bulk_accounts_csv(BULK_ACCOUNT_CSV_COLUMNS, rows)
+    assert errors == [] and [p["name"] for p in parsed] == ["sales1", "hostinger1"] and parsed[1]["smtp_host"] == "smtp.hostinger.com" and parsed[0]["smtp_host"] is None
+
+
+def test_an_uploaded_file_is_reviewed_with_a_summary_a_table_and_a_deliberate_confirmation(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        open_bulk(at)
+        upload_csv(at, GOOD_CSV)
+        text = markup(at)
+        assert 'ea-bnum">3<' in text and "✓ 3 ready" in text and "skipped" not in text.split("Review")[1].split("These accounts")[0]
+        table = at.dataframe[0].value
+        assert list(table.columns) == ["Name", "Email", "Provider", "Status"] and table["Provider"].tolist() == ["Gmail", "Custom", "Gmail"] and set(table["Status"]) == {"✓ Ready"}
+        assert at.checkbox(key="confirm_bulk_add_accounts").label == "These accounts are right. Add all 3 now."
+        assert btn(at, "bulk_add_accounts_button").label == "Add all 3 accounts" and btn(at, "bulk_add_accounts_button").disabled is True
+        at.checkbox(key="confirm_bulk_add_accounts").set_value(True)
+        at.run(timeout=30)
+        assert btn(at, "bulk_add_accounts_button").disabled is False
+
+
+def test_bad_rows_are_explained_in_an_amber_box_and_the_good_ones_stay_ready(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        open_bulk(at)
+        upload_csv(at, "Name,Email,Password\nsales5,s5@kelson.agency,pw\nbad,,pw\nnopass,n@x.com,\n")
+        text = markup(at)
+        assert "✓ 1 ready" in text and "⚠ 2 skipped" in text and "Row 2: Email is required." in text and "Row 3: Password is required." in text
+        assert at.checkbox(key="confirm_bulk_add_accounts").label == "These accounts are right. Add all 1 now."
+
+
+def test_a_file_without_the_required_columns_says_so_and_offers_nothing_to_add(tmp_path):
+    with accounts_page(tmp_path) as (at, captured):
+        open_bulk(at)
+        upload_csv(at, "Name,Email\nsales5,s5@kelson.agency\n")
+        assert "CSV is missing required column(s): Password" in markup(at) and "⚠ 1 skipped" in markup(at)
+        assert not any(b.key == "bulk_add_accounts_button" for b in at.button) and any(b.key == "cancel_bulk_accounts" for b in at.button) and captured["secrets"]["set_secret_calls"] == []
+
+
+def _add_all(at, text=GOOD_CSV):
+    open_bulk(at)
+    upload_csv(at, text)
+    at.checkbox(key="confirm_bulk_add_accounts").set_value(True)
+    at.run(timeout=30)
+    btn(at, "bulk_add_accounts_button").click()
+    at.run(timeout=60)
+
+
+def test_adding_all_writes_each_secret_one_mapping_file_and_a_health_check_then_shows_every_account_with_its_slot(tmp_path):
+    with accounts_page(tmp_path) as (at, captured):
+        _add_all(at)
+        calls = captured["secrets"]["set_secret_calls"]
+        assert list(at.exception) == [] and [c["name"] for c in calls] == ["EMAIL_ACCOUNT_SLOT_4", "EMAIL_ACCOUNT_SLOT_5", "EMAIL_ACCOUNT_SLOT_6"]
+        assert json.loads(calls[1]["value"])["smtp_host"] == "smtp.hostinger.com" and json.loads(calls[0]["value"])["app_password"] == "pw5"
+        assert len(captured["commits"]["commits"]) == 1 and "check_account_health.yml" in captured["dispatched"][0]                  # ONE mapping file for all three
+        assert set(yaml.safe_load(captured["commits"]["commits"][0]["content"].decode("utf-8"))) == {"sales1", "sales2", "sales3", "sales5", "host1", "sales7"}
+        assert at.session_state["ea_bulk_result"] == {"added": [("sales5", 4), ("host1", 5), ("sales7", 6)], "skipped": []}
+        text = markup(at)
+        assert "3 accounts added" in text and "sales5 <span class=\"ea-slot\">· slot 4" in text and "host1 <span class=\"ea-slot\">· slot 5" in text and "Skipped" not in text
+
+
+def test_an_account_that_cannot_be_added_is_skipped_with_its_reason_and_the_rest_are_added(tmp_path):
+    with accounts_page(tmp_path) as (at, captured):
+        _add_all(at, "Name,Email,Password\nsales1,again@kelson.agency,pw\nsales5,s5@kelson.agency,pw\n")                               # sales1 already exists
+        result = at.session_state["ea_bulk_result"]
+        assert [n for n, _ in result["added"]] == ["sales5"] and len(result["skipped"]) == 1 and result["skipped"][0].startswith("sales1:")
+        assert "1 account added" in markup(at) and "<b>Skipped:</b>" in markup(at) and len(captured["commits"]["commits"]) == 1
+
+
+def test_if_nothing_could_be_added_it_says_so_and_commits_no_mapping(tmp_path):
+    from github_client import GitHubActionsError
+    with accounts_page(tmp_path, set_secret_error=GitHubActionsError("boom")) as (at, captured):
+        _add_all(at)
+        assert at.session_state["ea_bulk_result"]["added"] == [] and len(at.session_state["ea_bulk_result"]["skipped"]) == 3
+        assert "No accounts were added" in markup(at) and "boom" in markup(at) and captured["commits"].get("commits") in (None, [])
+
+
+def test_add_more_gives_an_empty_dialog_and_done_closes_it(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        _add_all(at)
+        btn(at, "ea_bulk_more").click()
+        at.run(timeout=30)
+        assert "ea_bulk_result" not in at.session_state and at.session_state["ea_dialog"]["kind"] == "bulk" and not at.dataframe and not any(b.key == "bulk_add_accounts_button" for b in at.button)
+    with accounts_page(tmp_path) as (at, _):
+        _add_all(at)
+        btn(at, "ea_bulk_done").click()
+        at.run(timeout=30)
+        assert at.session_state["ea_dialog"] is None and "ea_bulk_result" not in at.session_state
+
+
+def test_closing_the_dialog_with_the_cross_while_the_result_shows_and_reopening_gives_a_clean_dialog(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        _add_all(at)
+        assert "ea_bulk_result" in at.session_state
+        btn(at, "ea_bulk_open").click()                                    # no Done pressed: as if the cross had closed it
+        at.run(timeout=30)
+        assert "ea_bulk_result" not in at.session_state and "accounts added" not in markup(at) and not at.dataframe
+
+
+def test_cancel_without_a_file_closes_the_dialog(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        open_bulk(at)
+        btn(at, "cancel_bulk_accounts_empty").click()
+        at.run(timeout=30)
+        assert at.session_state["ea_dialog"] is None
+
+
+def test_the_progress_view_names_the_account_in_hand_out_of_the_total():
+    """The progress bar is transient (gone before the page finishes its run), so the test harness cannot see it: the source is checked."""
+    source = open(os.path.join(os.path.dirname(__file__), "..", "pages", "email_accounts.py"), encoding="utf-8").read()
+    assert 'text=f"Adding account {index + 1} of {total} · {row[\'name\']}"' in source and "progress.progress(index / total" in source
+
+
+def test_rows_skipped_in_the_file_are_still_listed_in_the_final_result_next_to_the_accounts_added(tmp_path):
+    with accounts_page(tmp_path) as (at, _):
+        _add_all(at, "Name,Email,Password\nsales5,s5@kelson.agency,pw\nbad,,pw\n")
+        result = at.session_state["ea_bulk_result"]
+        assert result["added"] == [("sales5", 4)] and result["skipped"] == ["Row 2: Email is required."]
+        assert "1 account added" in markup(at) and "Row 2: Email is required." in markup(at)
