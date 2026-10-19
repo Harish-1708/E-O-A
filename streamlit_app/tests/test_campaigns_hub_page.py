@@ -30,15 +30,16 @@ def _clear_streamlit_caches():
     st.cache_data.clear()
 
 
-def row(name, status, leads=0, sent=0, replies=0, rate="—", last="", problems=None, bars=None):
+def row(name, status, leads=0, sent=0, replies=0, rate="—", last="", problems=None, bars=None, contacted=None):
+    contacted = (leads if sent else 0) if contacted is None else contacted
     series = {"bars": bars, "unit": "day", "start": "2026-10-01", "end": "2026-10-05", "total": sum(bars)} if bars else {"bars": [], "unit": "day", "start": "", "end": "", "total": 0}
-    return {"name": name, "status": status, "status_label": status_label(status), "problems": problems or [], "total_leads": leads, "sent": sent, "replies": replies,
+    return {"name": name, "status": status, "status_label": status_label(status), "problems": problems or [], "total_leads": leads, "contacted": contacted, "sent": sent, "replies": replies,
             "reply_rate": rate, "last_activity": last, "series": series}
 
 
-ROWS = [row("Old_Done", "completed", 10, 28, 3, "10.7%", "2026-09-01 10:00:00", bars=[3, 2, 1]), row("Live_17SEP", "running", 77, 252, 51, "20.2%", "2026-10-14 09:00:00", bars=[0, 12, 40, 3]),
-        row("Soon_Draft", "draft"), row("Mid_Done", "completed", 39, 235, 20, "8.5%", "2026-10-12 09:00:00", bars=[60, 70]),
-        row("Stuck_Q4", "attention", problems=["No leads with an email address"]), row("On_Hold", "paused", 5, 3, 0, "0.0%", "2026-10-13 09:00:00")]
+ROWS = [row("Old_Done", "completed", 10, 28, 3, "30.0%", "2026-09-01 10:00:00", bars=[3, 2, 1]), row("Live_17SEP", "running", 77, 252, 51, "66.2%", "2026-10-14 09:00:00", bars=[0, 12, 40, 3]),
+        row("Soon_Draft", "draft"), row("Mid_Done", "completed", 39, 235, 20, "51.3%", "2026-10-12 09:00:00", bars=[60, 70]),
+        row("Stuck_Q4", "attention", problems=["No leads with an email address"]), row("On_Hold", "paused", 5, 3, 0, "0.0%", "2026-10-13 09:00:00", contacted=3)]
 
 
 def hub(rows=None, deleted=None, errors=None, boom=None, prime=None):
@@ -87,7 +88,7 @@ def test_the_header_says_what_is_in_the_list_and_the_four_totals_add_up():
         text = markup(at)
         assert 'hb-title">Campaigns<' in text and "6 campaigns · 1 running · 1 needs attention" in text
         values = re.findall(r'hb-stat-v">(.*?)</div>', text)
-        assert values == ["1", "131", "518", "74"] and "14.3% reply rate" in text
+        assert values == ["1", "131", "518", "74"] and "57.4% of 129 leads replied" in text and "14.3%" not in text
 
 
 def test_the_list_starts_active_first_running_then_attention_paused_draft_and_completed():
