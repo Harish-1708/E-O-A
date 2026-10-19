@@ -112,6 +112,52 @@ def result_panel_html(name: str, address: str, slot) -> str:
                      f'<div class="ea-done-n">It can take a minute to appear in the list while the app redeploys.</div></div>')
 
 
+def bulk_step_html(number: int, text: str) -> str:
+    """A numbered heading inside the Bulk add dialog ('1  Your file needs these columns')."""
+    return f'<div class="ea-bstep"><span class="ea-bnum">{int(number)}</span><b>{esc(text)}</b></div>'
+
+
+def column_chips_html(required, optional) -> str:
+    """The columns a file needs: required ones as blue chips, optional ones as grey chips, each group under its own small heading."""
+    req = "".join(f'<span class="ea-cc ea-cc-req">{esc(c)}</span>' for c in required)
+    opt = "".join(f'<span class="ea-cc ea-cc-opt">{esc(c)}</span>' for c in optional)
+    return _one_line(f'<div class="ea-clabel">Required</div><div>{req}</div><div class="ea-clabel">Optional: a blank Name is taken from the address; the rest only matter for a non-Gmail provider (Hostinger and the like)</div><div>{opt}</div>')
+
+
+def bulk_summary_html(ready: int, skipped: int) -> str:
+    """The two chips over the review table: how many rows are ready (green) and how many were skipped (amber, only when some were)."""
+    chips = f'<span class="ea-sumc ea-sumc-ok">✓ {int(ready)} ready</span>'
+    if skipped:
+        chips += f'<span class="ea-sumc ea-sumc-warn">⚠ {int(skipped)} skipped</span>'
+    return f'<div class="ea-sumrow">{chips}</div>'
+
+
+def bulk_skipped_html(messages) -> str:
+    """Why rows were skipped, one line each, in an amber box."""
+    lines = "".join(f"<div>{esc(m)}</div>" for m in messages)
+    return f'<div class="ea-warnbox"><b>Skipped:</b>{lines}</div>' if lines else ""
+
+
+def bulk_progress_html(done, remaining) -> str:
+    """The list under the progress bar while accounts are being added: the ones done with a tick, the one in hand 'adding…', and the rest greyed."""
+    rows = "".join(f'<div class="ea-prow"><i class="ea-ptick">✓</i>{esc(n)} — added</div>' for n in done)
+    rows += "".join(f'<div class="ea-prow ea-prest"><i class="ea-ptick ea-pnone">·</i>{esc(n)}{" — adding…" if i == 0 else ""}</div>' for i, n in enumerate(remaining))
+    return f'<div class="ea-plist">{rows}</div>'
+
+
+def bulk_result_html(added, skipped) -> str:
+    """What the dialog shows when a bulk add has finished: every account added with its slot, and anything skipped with the reason."""
+    if added:
+        head = (f'<div class="ea-done-ico">{_svg("check", 28, "#15803d", 2.6)}</div><div class="ea-done-t">{len(added)} account{"" if len(added) == 1 else "s"} added</div>'
+                '<div class="ea-done-s">A connection check has started for each.</div>')
+        rows = "".join(f'<div class="ea-step"><i>{_svg("check", 12, "#15803d", 3)}</i>{esc(n)} <span class="ea-slot">· slot {esc(s)}</span></div>' for n, s in added)
+        note = '<div class="ea-done-n">They can take a minute to appear in the list while the app redeploys.</div>'
+    else:
+        head = '<div class="ea-done-t">No accounts were added</div><div class="ea-done-s">Everything in the file was skipped.</div>'
+        rows, note = "", ""
+    return _one_line(f'<div class="ea-done">{head}<div class="ea-steps">{rows}</div>{bulk_skipped_html(skipped)}{note}</div>')
+
+
 def dialog_note_html(text: str) -> str:
     return f'<div class="ea-dialog-note">{esc(text)}</div>'
 
@@ -186,5 +232,18 @@ EA_CSS = """
 .ea-step { display: flex; gap: 10px; align-items: center; font-size: 13.5px; color: #374151; }
 .ea-step i { width: 20px; height: 20px; border-radius: 50%; background: #dcfce7; display: flex; align-items: center; justify-content: center; flex: none; }
 .ea-done-n { font-size: 12px; color: #6b7280; margin: 14px 0 4px; }
+.ea-bstep { display: flex; gap: 10px; align-items: center; margin: 16px 0 8px; font-size: 14px; color: #111827; }
+.ea-bnum { width: 22px; height: 22px; border-radius: 50%; background: #2563eb; color: #fff; font-weight: 800; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.ea-clabel { font-size: 12px; color: #6b7280; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; margin: 8px 0 2px; }
+.ea-cc { display: inline-block; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 700; margin: 3px 4px 3px 0; }
+.ea-cc-req { background: #dde9fb; color: #1d4ed8; } .ea-cc-opt { background: #f1f2f4; color: #4b5563; }
+.ea-sumrow { margin: 4px 0 6px; }
+.ea-sumc { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 12px; font-size: 13px; font-weight: 700; margin-right: 8px; }
+.ea-sumc-ok { background: #f0fbf4; color: #15803d; border: 1px solid #bbe3c9; } .ea-sumc-warn { background: #fffaf0; color: #b45309; border: 1px solid #f3d9a8; }
+.ea-plist { margin-top: 12px; } .ea-prow { display: flex; gap: 10px; align-items: center; font-size: 13.5px; color: #374151; margin: 7px 0; } .ea-prest { color: #9ca3af; }
+.ea-ptick { width: 20px; height: 20px; border-radius: 50%; background: #dcfce7; color: #15803d; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-style: normal; flex: none; } .ea-pnone { background: #eef0f3; color: #9ca3af; }
+.ea-slot { color: #6b7280; }
+/* the upload box becomes a dashed drop area */
+[class*="st-key-bulk_accounts_csv_upload"] [data-testid="stFileUploaderDropzone"] { border: 2px dashed #c7d7fb; background: #f8faff; border-radius: 14px; padding: 22px; }
 .ea-warnbox { background: #fffaf0; border: 1px solid #f3d9a8; color: #92400e; border-radius: 10px; padding: 10px 14px; font-size: 13px; line-height: 1.5; margin: 6px 0 10px; }
 """
