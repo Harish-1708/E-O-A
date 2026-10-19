@@ -53,7 +53,7 @@ def stats_html(summary: Dict) -> str:
     cards = [stat_card_html("Running now", summary["running"], f"of {summary['count']} campaign{'' if summary['count'] == 1 else 's'}"),
              stat_card_html("Leads", summary["leads"], "across all campaigns"),
              stat_card_html("Emails sent", summary["sent"], "all time"),
-             stat_card_html("Replies", summary["replies"], f"{summary['reply_rate']} reply rate" if summary["reply_rate"] != "—" else "no reply rate yet")]
+             stat_card_html("Replies", summary["replies"], f"{summary['reply_rate']} of {int(summary.get('contacted') or 0)} leads replied" if summary["reply_rate"] != "—" else "no reply rate yet")]
     return f'<div class="hb-stats">{"".join(cards)}</div>'
 
 
