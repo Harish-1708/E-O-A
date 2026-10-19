@@ -168,7 +168,10 @@ SHELL_CSS = """
 .sh-stat-v { font-size: 27px; font-weight: 800; letter-spacing: -.02em; margin-top: 4px; color: #111827; }
 .sh-of { font-size: 15px; color: #6b7280; font-weight: 600; letter-spacing: 0; }
 .sh-stat-s { font-size: 12.5px; color: #6b7280; margin-top: 3px; }
-[class*="st-key-home_today_"] { background: #fff; border: 1px solid #e5e7eb; border-left: 4px solid #22c55e; border-radius: 14px; padding: 20px 24px; margin-bottom: 6px; gap: 0 !important; }
+[class*="st-key-home_today_"] { background: #fff; border: 1px solid #e5e7eb; border-left: 4px solid #22c55e; border-radius: 14px; padding: 22px 24px; margin-bottom: 14px; gap: 12px !important; }
+/* the "Stage breakdown" and "Who is due now" dropdowns: a light box each, with a clear gap above, between and below (they used to touch the summary and each other) */
+[class*="st-key-home_today_"] [data-testid="stExpander"] { border: 1px solid #e5e7eb !important; border-radius: 10px !important; background: #fafbfc; }
+[class*="st-key-home_today_"] [data-testid="stExpander"] summary { padding: 10px 14px; font-weight: 600; font-size: 13.5px; color: #374151; }
 [class*="st-key-home_today_"] [data-testid="stMarkdownContainer"], [class*="st-key-home_today_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
 [class*="st-key-home_today_"] [data-testid="stHorizontalBlock"] { align-items: flex-start; gap: 1rem; }
 [class*="st-key-home_today_shut"] { border-left-color: #9ca3af; }
@@ -177,14 +180,14 @@ SHELL_CSS = """
 .sh-pill { display: inline-flex; font-size: 12.5px; font-weight: 600; border-radius: 999px; padding: 3px 11px; border: 1px solid #bbe3c9; background: #f0fbf4; color: #15803d; }
 .sh-win { display: inline-flex; font-size: 12.5px; font-weight: 700; border-radius: 999px; padding: 3px 11px; border: 1px solid #d1d5db; }
 .sh-win-open { background: #f0fbf4; color: #15803d; border-color: #bbe3c9; } .sh-win-shut { background: #f3f4f6; color: #4b5563; } .sh-win-unknown { background: #fffaf0; color: #b45309; border-color: #f3d9a8; }
-.sh-tc-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-top: 16px; }
+.sh-tc-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-top: 18px; }
 .sh-tc-l { font-size: 12px; color: #6b7280; font-weight: 600; } .sh-tc-v { font-size: 22px; font-weight: 800; line-height: 1.25; color: #111827; }
 .sh-tc-sv { font-size: 12.5px; font-weight: 600; color: #4b5563; margin-top: 5px; line-height: 1.45; }
 .sh-due { color: #b45309 !important; }
 .sh-bar { height: 7px; background: #eef0f3; border-radius: 99px; overflow: hidden; margin-top: 7px; }
 .sh-bar i { display: block; height: 100%; background: #2563eb; border-radius: 99px; }
-.sh-tc-foot { margin-top: 16px; padding-top: 14px; border-top: 1px solid #eef0f3; font-size: 13px; color: #374151; line-height: 1.55; }
-.sh-tc-seq { display: block; color: #6b7280; font-size: 12.5px; margin-top: 3px; }
+.sh-tc-foot { margin-top: 18px; padding-top: 16px; border-top: 1px solid #eef0f3; font-size: 13px; color: #374151; line-height: 1.6; }
+.sh-tc-seq { display: block; color: #6b7280; font-size: 12.5px; margin-top: 6px; }
 .sh-stages { width: 100%; border-collapse: collapse; font-size: 13.5px; margin-top: 4px; }
 .sh-stages th, .sh-stages td { border-left: 0 !important; border-right: 0 !important; text-align: left; padding: 9px 10px; border-bottom: 1px solid #f1f2f4; }
 .sh-stages th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: #6b7280; font-weight: 700; }
