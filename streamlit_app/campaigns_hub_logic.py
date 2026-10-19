@@ -77,7 +77,7 @@ def build_draft_campaign_row(campaign_cfg: Dict) -> Dict:
     return {
         "name": campaign_cfg["_campaign_name"], "status": "draft",
         "status_label": status_label("draft"), "problems": [],
-        "total_leads": 0, "sent": 0, "replies": 0, "reply_rate": "—",
+        "total_leads": 0, "contacted": 0, "sent": 0, "replies": 0, "reply_rate": "—",
         "last_activity": "", "series": dict(EMPTY_SERIES),
     }
 
@@ -90,7 +90,7 @@ def build_deleted_campaign_row(campaign_cfg: Dict) -> Dict:
     return {
         "name": campaign_cfg["_campaign_name"], "status": "deleted",
         "status_label": status_label("deleted"), "problems": [],
-        "total_leads": 0, "sent": 0, "replies": 0, "reply_rate": "—",
+        "total_leads": 0, "contacted": 0, "sent": 0, "replies": 0, "reply_rate": "—",
         "last_activity": "", "series": dict(EMPTY_SERIES),
     }
 
@@ -104,7 +104,7 @@ def build_campaign_hub_row(campaign_cfg: Dict, leads: List[Dict], responses: Lis
     return {
         "name": campaign_cfg["_campaign_name"], "status": status,
         "status_label": status_label(status), "problems": problems,
-        "total_leads": int(base_row[1]), "sent": int(base_row[3]),
+        "total_leads": int(base_row[1]), "contacted": int(base_row[2]), "sent": int(base_row[3]),
         "replies": int(base_row[7]), "reply_rate": base_row[8],
         "last_activity": compute_last_activity_timestamp(send_log),
         "series": send_series(send_log, today or date.today(), through_today=(status == STATUS_RUNNING)),
@@ -198,17 +198,20 @@ SORT_OPTIONS = ["Active first", "Last activity", "Name", "Most replies"]
 _ACTIVE_ORDER = [STATUS_RUNNING, STATUS_ATTENTION, STATUS_PAUSED, STATUS_DRAFT, STATUS_COMPLETED]
 
 
-def reply_rate_text(replies: int, sent: int) -> str:
-    """The overall reply rate, one decimal ('14.4%'); '—' when nothing has been sent."""
-    return f"{replies / sent * 100:.1f}%" if sent else "—"
+def reply_rate_text(replies: int, contacted: int) -> str:
+    """The reply rate, one decimal ('58.7%'): leads who replied out of leads who were contacted (sent at least one email). This is the SAME measure each campaign uses for its own
+    rate, so one campaign's total always equals its own figure. (It was once replies divided by EMAILS sent, a different measure that gave a misleadingly low 14.4%.) '—' when
+    nobody has been contacted."""
+    return f"{replies / contacted * 100:.1f}%" if contacted else "—"
 
 
 def summarize_campaigns(rows: List[Dict]) -> Dict:
     """The totals above the list, added up from the rows (archived campaigns are never in `rows`)."""
     sent = sum(int(r.get("sent") or 0) for r in rows)
     replies = sum(int(r.get("replies") or 0) for r in rows)
+    contacted = sum(int(r.get("contacted") or 0) for r in rows)
     return {"count": len(rows), "running": sum(1 for r in rows if r.get("status") == STATUS_RUNNING), "attention": sum(1 for r in rows if r.get("status") == STATUS_ATTENTION),
-            "leads": sum(int(r.get("total_leads") or 0) for r in rows), "sent": sent, "replies": replies, "reply_rate": reply_rate_text(replies, sent)}
+            "leads": sum(int(r.get("total_leads") or 0) for r in rows), "contacted": contacted, "sent": sent, "replies": replies, "reply_rate": reply_rate_text(replies, contacted)}
 
 
 def hub_subtitle(summary: Dict) -> str:
