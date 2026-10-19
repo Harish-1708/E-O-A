@@ -585,12 +585,20 @@ def test_restoring_a_campaign_reads_the_live_file_so_nothing_saved_a_moment_ago_
         assert saved["sending"] == {"daily_limit": 77} and saved["schedule"] == SCHEDULE
 
 
+def type_project(at, value):
+    """Types into the Asana project-name box the way a person must: if it is locked, press the padlock first, then type."""
+    if next(t for t in at.text_input if t.key == "asana_sync_project_name").disabled:
+        next(b for b in at.button if b.key == "asana_name_lock").click()
+        at.run(timeout=30)
+    next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value(value)
+
+
 def test_the_asana_settings_save_reads_the_live_file_too():
     live = {OVERRIDE_PATH: override_yaml(schedule=SCHEDULE, sending={"daily_limit": 55})}
     with settings_page(live=live, cfg={"schedule": None}) as (at, captured):
         next(c for c in at.toggle if c.key == "asana_sync_enabled").set_value(True)
         at.run(timeout=30)                                                                      # the project-name box appears once the switch is on
-        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Creator Outreach")
+        type_project(at, "Creator Outreach")
         at.run(timeout=30)
         next(b for b in at.button if b.key == "asana_sync_save").click()
         at.run(timeout=30)
@@ -641,20 +649,20 @@ def test_switching_asana_on_shows_the_project_box_flags_the_unsaved_change_and_k
 def test_a_saved_asana_has_save_off_sync_on_and_flips_the_moment_the_project_is_edited():
     with settings_page(cfg=ASANA_ON) as (at, _):
         assert btn(at, "asana_sync_save").disabled is True and btn(at, "asana_sync_now").disabled is False and ("unsaved", "● Unsaved change") not in chips(at)
-        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Another project")
+        type_project(at, "Another project")
         at.run(timeout=30)
         assert btn(at, "asana_sync_save").disabled is False and btn(at, "asana_sync_now").disabled is True and ("unsaved", "● Unsaved change") in chips(at)
-        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Creator Outreach")
+        type_project(at, "Creator Outreach")
         at.run(timeout=30)
         assert btn(at, "asana_sync_save").disabled is True and btn(at, "asana_sync_now").disabled is False
 
 
 def test_a_project_name_that_is_only_spaces_counts_as_unchanged_and_blank_is_refused_on_save():
     with settings_page(cfg=ASANA_ON, live={}) as (at, captured):
-        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("  Creator Outreach  ")
+        type_project(at, "  Creator Outreach  ")
         at.run(timeout=30)
         assert btn(at, "asana_sync_save").disabled is True                                            # trimmed, so the same as what is saved
-        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("   ")
+        type_project(at, "   ")
         at.run(timeout=30)
         btn(at, "asana_sync_save").click()
         at.run(timeout=30)
@@ -666,7 +674,7 @@ def test_saving_asana_commits_it_keeps_the_other_live_settings_and_then_the_page
     with settings_page(live=live, cfg={"schedule": None, "asana": {"enabled": False, "project_name": ""}}) as (at, captured):
         tog(at, "asana_sync_enabled").set_value(True)
         at.run(timeout=30)
-        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Creator Outreach")
+        type_project(at, "Creator Outreach")
         at.run(timeout=30)
         btn(at, "asana_sync_save").click()
         at.run(timeout=30)
@@ -697,7 +705,7 @@ def test_sync_now_starts_the_sync_workflow_for_this_campaign_and_says_so():
 def test_a_failed_asana_save_or_sync_says_why():
     from github_client import GitHubActionsError
     with settings_page(cfg=ASANA_ON, live={}, commit_error=GitHubActionsError("boom")) as (at, captured):
-        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Another project")
+        type_project(at, "Another project")
         at.run(timeout=30)
         btn(at, "asana_sync_save").click()
         at.run(timeout=30)
@@ -765,7 +773,7 @@ def test_just_after_saving_the_page_shows_it_as_saved_even_while_its_own_copy_of
         tog(at, "asana_sync_enabled").set_value(True)
         tog(at, "tracker_sync_enabled").set_value(True)
         at.run(timeout=30)
-        next(t for t in at.text_input if t.key == "asana_sync_project_name").set_value("Creator Outreach")
+        type_project(at, "Creator Outreach")
         at.run(timeout=30)
         btn(at, "asana_sync_save").click()
         at.run(timeout=30)
@@ -793,3 +801,77 @@ def test_the_cards_come_in_the_designs_order_integrations_first_and_maintenance_
     with settings_page() as (at, _):
         text = markup(at)
         assert text.index(">Integrations<") < text.index('se-title">Asana sync<') < text.index('se-title">Creator Tracker sync<') < text.index(">Maintenance<")
+
+
+# ================================================================ the lock on the Asana project name
+
+LOCK_KEY = f"asana_name_locked_{FIXTURE_CAMPAIGN}"
+
+
+def project_box(at):
+    return next(t for t in at.text_input if t.key == "asana_sync_project_name")
+
+
+def test_with_a_saved_project_name_the_box_starts_locked_and_says_so():
+    with settings_page(cfg=ASANA_ON) as (at, _):
+        assert project_box(at).disabled is True and project_box(at).value == "Creator Outreach"
+        assert "Locked, so it cannot be changed by accident" in markup(at) and btn(at, "asana_name_lock").help == "Locked. Press to edit the project name."
+
+
+def test_with_no_saved_project_name_there_is_nothing_to_protect_so_the_box_starts_open():
+    with settings_page(cfg={"asana": {"enabled": False, "project_name": ""}}) as (at, _):
+        tog(at, "asana_sync_enabled").set_value(True)
+        at.run(timeout=30)
+        assert project_box(at).disabled is False and "Unlocked. Press the lock again" in markup(at) and btn(at, "asana_name_lock").help == "Unlocked. Press to lock it again."
+
+
+def test_the_padlock_unlocks_and_locks_again_and_keeps_what_was_typed():
+    with settings_page(cfg=ASANA_ON) as (at, _):
+        btn(at, "asana_name_lock").click()
+        at.run(timeout=30)
+        assert project_box(at).disabled is False and "Unlocked. Press the lock again" in markup(at)
+        project_box(at).set_value("Another project")
+        at.run(timeout=30)
+        btn(at, "asana_name_lock").click()
+        at.run(timeout=30)
+        assert project_box(at).disabled is True and project_box(at).value == "Another project"          # locking does not throw the edit away
+        assert ("unsaved", "● Unsaved change") in chips(at) and btn(at, "asana_sync_save").disabled is False and btn(at, "asana_sync_now").disabled is True
+
+
+def test_a_locked_box_cannot_be_typed_into():
+    with settings_page(cfg=ASANA_ON) as (at, _):
+        with pytest.raises(Exception, match="disabled"):
+            project_box(at).set_value("Typed by accident")
+
+
+def test_pressing_save_locks_the_name_again():
+    with settings_page(cfg=ASANA_ON, live={}) as (at, captured):
+        type_project(at, "Another project")
+        at.run(timeout=30)
+        assert project_box(at).disabled is False
+        btn(at, "asana_sync_save").click()
+        at.run(timeout=30)
+        assert committed(captured)["asana"]["project_name"] == "Another project"
+        assert at.session_state[LOCK_KEY] is True and project_box(at).disabled is True and "Locked, so it cannot be changed" in markup(at)
+
+
+def test_saving_a_blank_name_is_refused_and_leaves_the_box_open_to_fill_in():
+    with settings_page(cfg=ASANA_ON, live={}) as (at, captured):
+        type_project(at, "   ")
+        at.run(timeout=30)
+        btn(at, "asana_sync_save").click()
+        at.run(timeout=30)
+        assert any("Enter the Asana project name" in e.value for e in at.error) and project_box(at).disabled is False and captured.get("commits") is None
+
+
+def test_the_lock_guards_only_the_project_name_not_the_switch_or_the_sync():
+    with settings_page(cfg=ASANA_ON) as (at, _):
+        assert project_box(at).disabled is True and tog(at, "asana_sync_enabled").value is True and btn(at, "asana_sync_now").disabled is False
+        tog(at, "asana_sync_enabled").set_value(False)
+        at.run(timeout=30)
+        assert not any(t.key == "asana_sync_project_name" for t in at.text_input)                 # the switch still works while the name is locked
+
+
+def test_both_integration_cards_have_their_dividing_lines():
+    with settings_page(cfg=ASANA_ON) as (at, _):
+        assert markup(at).count('<div class="se-rule"></div>') == 4                                  # two in the Asana card, two in the Tracker card
