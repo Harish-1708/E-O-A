@@ -23,7 +23,6 @@ def _home():
 # characters for some people (a filesystem/encoding issue, not a Streamlit
 # bug). Page files themselves now have plain ASCII names.
 PAGES["home"] = st.Page(_home, title="Home", icon="📬", default=True)
-PAGES["today"] = st.Page("pages/today.py", title="Today", icon="📋")
 PAGES["performance"] = st.Page("pages/performance.py", title="Performance", icon="🎯")
 PAGES["campaigns"] = st.Page("pages/campaigns.py", title="Campaigns", icon="🗂️")
 PAGES["responses"] = st.Page("pages/responses.py", title="Responses", icon="💬")
