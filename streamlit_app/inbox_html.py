@@ -266,13 +266,10 @@ def _one_line_html(markup: str) -> str:
     return " ".join(line.strip() for line in markup.splitlines() if line.strip())
 
 
-def composer_open_css(namespace: str, thread_px: int) -> str:
-    """Applied only while the composer is open: the thread takes `thread_px` of height (what is left of the pane after the composer), so the composer fits INSIDE the same
-    pane and the pane does not grow. Streamlit wraps the thread in an outer element with a fixed height, and that wrapper is what has to change (the inner element only
-    fills it), hence :has(). The Reply button shows it is the active one."""
-    height = max(int(thread_px), 120)
-    return (f'div:has(> [class*="st-key-ux_threadbody_{namespace}"]) {{ height: {height}px !important; flex: 0 0 {height}px !important; }}\n'
-            '[class*="st-key-ux_reply_"] button { background: #eaf1ff !important; color: #1d4ed8 !important; border-color: #2563eb !important; }')
+def composer_open_css(namespace: str) -> str:
+    """Applied only while the composer is open: the Reply button shows it is the active one. (The conversation makes room for the composer by itself, because it takes whatever
+    height is left in the frame; there is no height to compute.)"""
+    return '[class*="st-key-ux_reply_"] button { background: #eaf1ff !important; color: #1d4ed8 !important; border-color: #2563eb !important; }'
 
 
 _BASE_CSS = """
@@ -288,11 +285,16 @@ div:has(> .ux-card), div:has(> .ux-placeholder) { margin-bottom: 0 !important; }
    (ux_railpane_hub, ux_railpane_tab_Camp...), and each pattern ends in that underscore so that, for example,
    "ux_list_" can never also match "ux_listpane_" or an invisible button. */
 [class*="st-key-ux_shell_"] { --ux-h: max(700px, calc(100vh - 230px)); border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; overflow: hidden; }
+/* on a campaign's own Responses tab the frame starts 143px lower (under the campaign's title bar and tabs), so it gets that much less height */
+[class*="st-key-ux_shell_tab_"] { --ux-h: max(700px, calc(100vh - 373px)); }
 /* use the whole width of the page: Streamlit's default content column is narrow, which squeezes three panes */
 [data-testid="stMainBlockContainer"]:has([class*="st-key-ux_shell_"]) { max-width: 100% !important; padding-left: 1.5rem !important; padding-right: 1.5rem !important; }
-/* the panes are as tall as the window allows (never shorter than 700px), instead of a fixed size */
-[class*="st-key-ux_list_"] { height: calc(var(--ux-h) - 44px) !important; }
-[class*="st-key-ux_threadbody_"] { height: calc(var(--ux-h) - 114px) !important; }
+/* the frame is as tall as the window allows (never shorter than 700px), and what is inside FILLS it instead of having a fixed size. Streamlit puts each pane and each scrolling area
+   inside an OUTER element, and the outer element is what has to flex: the pane's takes its column's whole height, and the scrolling area's takes whatever is left between the header
+   above it and the bar (or the composer) below it. (Sizing the inner elements changed nothing, and fixed heights left the list and the conversation 656px and 586px tall in any
+   window, with the empty rest of the frame under them. Because the area now simply takes what is left, opening the composer needs no special height: the conversation gives way.) */
+div:has(> [class*="st-key-ux_listpane_"]), div:has(> [class*="st-key-ux_threadpane_"]) { flex: 1 1 auto !important; min-height: 0 !important; }
+div:has(> [class*="st-key-ux_list_"]), div:has(> [class*="st-key-ux_threadbody_"]) { flex: 1 1 0 !important; min-height: 0 !important; height: auto !important; }
 [class*="st-key-ux_shell_"] [data-testid="stHorizontalBlock"] { gap: 0 !important; }
 [class*="st-key-ux_railpane_"] { gap: 0 !important; padding: 6px 8px; border-right: 1px solid #eef0f3; }
 @media (min-width: 900px) {
