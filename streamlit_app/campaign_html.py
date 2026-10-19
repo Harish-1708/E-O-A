@@ -36,7 +36,7 @@ def subline_html(text: str) -> str:
 
 CAMPAIGN_SKIN_CSS = """
 /* ---- the frame of the page: full width with the design's margins */
-[data-testid="stMainBlockContainer"]:has([class*="st-key-cp_titlebar"]) { max-width: 100% !important; padding: 3.4rem 2.2rem 4rem !important; }
+[data-testid="stMainBlockContainer"]:has([class*="st-key-cp_titlebar"]) { max-width: 100% !important; padding: 3.25rem 2.2rem 4rem !important; }
 [data-testid="stMainBlockContainer"]:has([class*="st-key-cp_titlebar"]) [data-testid="stVerticalBlock"] { gap: 0.9rem; }
 
 /* ---- the page font: the design's system sans-serif stack, on text only (icon fonts are left alone) */
