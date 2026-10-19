@@ -493,3 +493,62 @@ def at_a_glance_rows(perfs: List[Dict], status_labels: Callable[[str], str] = la
     return [[p["campaign"], status_labels(p.get("status", "")), str(p["total_leads"]), str(p["contacted"]),
              str(p["pending"]), str(p["sent"]), str(p["delivered_est"]), str(p["bounced_hard"]), str(p["bounced_soft"]),
              str(p["replies"]), format_rate(p["reply_rate"]), format_rate(p["sequence_completion"])] for p in perfs]
+
+
+# ---------------------------------------------------------------- the "All campaigns at a glance" table
+
+GLANCE_SORT_OPTIONS = ["Reply rate", "Replies", "Emails sent", "Name"]
+# The words on a status chip in the table: the same ones the Campaigns list uses. A status not listed here falls back to the page's own label for it.
+GLANCE_STATUS_TEXT = {"running": "● Running", "paused": "Paused", "draft": "Draft", "completed": "✓ Completed", "attention": "⚠ Attention needed"}
+
+
+def sort_perfs(perfs: List[Dict], sort: str = "Reply rate") -> List[Dict]:
+    """The campaigns in the order the table shows them: best reply rate first (a campaign with no rate yet last), most replies first, most emails first, or by name. An
+    unknown choice falls back to the reply rate. Ties are always broken by name so the order is stable."""
+    def name(p):
+        return str(p.get("campaign") or "").lower()
+    if sort == "Replies":
+        return sorted(perfs, key=lambda p: (-int(p.get("replies") or 0), name(p)))
+    if sort == "Emails sent":
+        return sorted(perfs, key=lambda p: (-int(p.get("sent") or 0), name(p)))
+    if sort == "Name":
+        return sorted(perfs, key=name)
+    return sorted(perfs, key=lambda p: (p.get("reply_rate") is None, -(p.get("reply_rate") or 0), name(p)))
+
+
+def _glance_figures(p: Dict) -> Dict:
+    return {"leads": int(p.get("total_leads") or 0), "contacted": int(p.get("contacted") or 0), "pending": int(p.get("pending") or 0), "sent": int(p.get("sent") or 0),
+            "delivered": int(p.get("delivered_est") or 0), "hard": int(p.get("bounced_hard") or 0), "soft": int(p.get("bounced_soft") or 0), "replies": int(p.get("replies") or 0),
+            "reply_rate": p.get("reply_rate"), "reply_rate_text": format_rate(p.get("reply_rate")), "completion": p.get("sequence_completion"),
+            "completion_text": format_rate(p.get("sequence_completion")), "completed": int(p.get("completed") or 0)}
+
+
+def glance_rows(perfs: List[Dict], status_labels: Callable[[str], str] = lambda s: s, sort: str = "Reply rate") -> List[Dict]:
+    """One dict per campaign for the table, in the chosen order. `best` marks the campaign with the single highest reply rate, but only when two or more campaigns have a rate
+    and one of them is strictly ahead (a star on a tie, or on the only campaign, would mean nothing)."""
+    ordered = sort_perfs(perfs, sort)
+    rows = [{"name": p.get("campaign"), "status": p.get("status", ""), "status_label": GLANCE_STATUS_TEXT.get(p.get("status", "")) or status_labels(p.get("status", "")), "best": False, **_glance_figures(p)} for p in ordered]
+    rated = [r for r in rows if r["reply_rate"] is not None and r["contacted"] > 0]
+    if len(rated) >= 2:
+        top = max(r["reply_rate"] for r in rated)
+        leaders = [r for r in rated if r["reply_rate"] == top]
+        if len(leaders) == 1:
+            leaders[0]["best"] = True
+    return rows
+
+
+def glance_totals(combined: Dict, campaigns: int) -> Dict:
+    """The total row: the combined figures (added up by combine_performance with the same rules as each row, so it always agrees with them) and how many campaigns."""
+    return {"campaigns": int(campaigns), **_glance_figures(combined)}
+
+
+def glance_csv(perfs: List[Dict], status_labels: Callable[[str], str] = lambda s: s, sort: str = "Reply rate") -> bytes:
+    """The table as a CSV with every column the old table had, in the order shown on screen."""
+    import csv
+    import io
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(AT_A_GLANCE_COLUMNS)
+    for row in at_a_glance_rows(sort_perfs(perfs, sort), status_labels):
+        writer.writerow(row)
+    return buffer.getvalue().encode("utf-8")
