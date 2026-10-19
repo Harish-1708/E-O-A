@@ -211,7 +211,7 @@ def test_filter_counts_ask_the_real_filter_for_each_option():
     from data_import_logic import FILTER_OPTIONS, filter_leads
     leads = [lead(Status="Removed"), lead(Status="Stopped - Replied"), lead(Status="Stopped - Bounced"), lead(IntroSentAt="2026-10-01", Approval="Yes"), lead(Approval="Yes")]
     counts = L.filter_counts(leads, FILTER_OPTIONS, filter_leads)
-    assert counts == {"All": 5, "Pending Approval": 3, "In Progress": 1, "Replied": 1, "Bounced": 1, "Removed": 1}
+    assert counts == {"All": 5, "In Progress": 1, "Replied": 1, "Bounced": 1, "Removed": 1}
 
 
 # ================================================================ the extra filters
