@@ -1,0 +1,32 @@
+schedule:
+  timezone: America/New_York
+  window_start: '9:00'
+  window_end: '18:00'
+  send_days:
+  - mon
+  - tue
+  - wed
+  - thu
+  - fri
+sending:
+  daily_limit: 200
+  sender_rotation: true
+  rotation_accounts:
+  - sales1
+  per_account_daily_limit: 200
+asana:
+  enabled: true
+  project_name: Creator Outreach
+tracker_sync:
+  enabled: true
+status: draft
+stage_wait_days:
+  followup1: 2
+  followup2: 2
+  followup3: 2
+  followup4: 2
+  followup5: 2
+  followup6: 2
+  followup7: 2
+  followup8: 2
+  followup9: 2
