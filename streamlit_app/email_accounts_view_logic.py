@@ -3,6 +3,8 @@ status filters and search, and showing a long list 25 at a time. No Streamlit he
 """
 from typing import Dict, List, Optional, Tuple
 
+from email_account_slots_logic import BULK_ACCOUNT_CSV_COLUMNS
+
 PAGE_SIZE = 25
 SEARCH_MIN_ACCOUNTS = 4          # the search box is only useful once there are several accounts (the same threshold as the sender list on a campaign's Settings tab)
 STATUS_FILTERS = [("all", "All"), ("Connected", "Connected"), ("Disconnected", "Disconnected"), ("Unknown", "Unknown")]
@@ -127,3 +129,33 @@ def add_form_ready(name: str, address: str, managed: Dict[str, Dict]) -> bool:
     of this: a browser only hands a typed value to the app when the field loses focus, and pressing Tab in a password field moves focus to its show/hide eye, which does not count,
     so waiting for the password here would leave the button stuck for anyone who tabs through. A missing password is reported when Add is pressed instead."""
     return account_name_feedback(name, managed, ())[0] == "ok" and address_feedback(address)[0] == "ok"
+
+
+# ---------------------------------------------------------------- the Bulk add dialog
+
+BULK_REQUIRED_COLUMNS = ["Email", "Password"]          # what parse_bulk_accounts_csv requires; a blank Name falls back to the part of the address before the @
+BULK_OPTIONAL_COLUMNS = [c for c in BULK_ACCOUNT_CSV_COLUMNS if c not in BULK_REQUIRED_COLUMNS]
+BULK_TEMPLATE_ROWS = [["sales1", "sales1@gmail.com", "app-password-here", "", "", "", "", "", "", ""],
+                      ["hostinger1", "sales@example.com", "smtp-password-here", "imap-password-if-different", "smtp.hostinger.com", "465", "", "imap.hostinger.com", "993", ""]]
+
+
+def bulk_template_csv() -> bytes:
+    """The file to download and fill in: the real column headings in the real order, with a Gmail example and a custom-provider (Hostinger) example."""
+    import csv
+    import io
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(BULK_ACCOUNT_CSV_COLUMNS)
+    writer.writerows(BULK_TEMPLATE_ROWS)
+    return buffer.getvalue().encode("utf-8")
+
+
+def bulk_review_rows(parsed: List[Dict]) -> Dict[str, List[str]]:
+    """The review table, column by column: each ready account with its provider (Custom when it has its own SMTP host, otherwise Gmail) and its status."""
+    return {"Name": [r["name"] for r in parsed], "Email": [r["address"] for r in parsed], "Provider": ["Custom" if r.get("smtp_host") else "Gmail" for r in parsed],
+            "Status": ["✓ Ready" for _ in parsed]}
+
+
+def bulk_counts(parsed: List[Dict], errors: List[str]) -> Dict[str, int]:
+    """How many rows are ready and how many were skipped (every message from the parser is a skipped row, or a missing-column problem that skips the lot)."""
+    return {"ready": len(parsed), "skipped": len(errors)}
