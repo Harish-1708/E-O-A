@@ -73,7 +73,7 @@ def test_the_stylesheet_is_well_formed_and_loads_nothing_from_outside():
 
 def test_the_page_uses_the_whole_width_with_room_under_streamlits_own_toolbar():
     rule = _rule('[data-testid="stMainBlockContainer"]:has([class*="st-key-cp_titlebar"]) {')
-    assert "max-width: 100% !important" in rule and "padding: 3.4rem 2.2rem 4rem !important" in rule
+    assert "max-width: 100% !important" in rule and "padding: 3.25rem 2.2rem 4rem !important" in rule          # 52px, the same top as every other page
 
 
 def test_the_title_bar_is_one_row_with_the_name_status_chips_and_the_action_button_pushed_right():
