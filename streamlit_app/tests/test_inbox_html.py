@@ -382,11 +382,20 @@ def test_the_sizes_are_ordered_and_the_default_is_one_of_them_and_larger_than_be
     assert list(H.SIZES.values()) == sorted(H.SIZES.values()) and H.DEFAULT_SIZE in H.SIZES and H.SIZES[H.DEFAULT_SIZE] > 1.0
 
 
-def test_the_panes_follow_the_height_of_the_window_but_never_get_shorter_than_700px():
+def test_the_frame_follows_the_height_of_the_window_but_never_gets_shorter_than_700px_and_a_phone_keeps_the_fixed_height():
     css = H.INBOX_CSS
-    assert "--ux-h: max(700px, calc(100vh - 230px))" in css
-    assert 'height: calc(var(--ux-h) - 44px) !important' in css and 'height: calc(var(--ux-h) - 114px) !important' in css
-    assert "min-height: var(--ux-h)" in css and "--ux-h: 700px" in css                  # a phone keeps the fixed height
+    assert "--ux-h: max(700px, calc(100vh - 230px))" in css and "min-height: var(--ux-h)" in css and "--ux-h: 700px" in css
+    assert css.index('[class*="st-key-ux_shell_tab_"] { --ux-h: max(700px, calc(100vh - 373px)); }') < css.index("@media (max-width: 899px)")     # the phone rule still has the last word
+
+
+def test_what_is_inside_the_frame_fills_it_through_the_outer_elements_not_through_fixed_heights():
+    """REGRESSION (seen in a real browser, in the installed app): the list and the conversation stayed 656px and 586px tall in every window, with the empty rest of the frame under them.
+    Streamlit wraps each pane and each scrolling area in an OUTER element that carries the code's fixed height, and the inner element only fills it, so the rules must flex the OUTER one."""
+    css = H.INBOX_CSS
+    assert 'div:has(> [class*="st-key-ux_listpane_"]), div:has(> [class*="st-key-ux_threadpane_"]) { flex: 1 1 auto !important; min-height: 0 !important; }' in css
+    assert 'div:has(> [class*="st-key-ux_list_"]), div:has(> [class*="st-key-ux_threadbody_"]) { flex: 1 1 0 !important; min-height: 0 !important; height: auto !important; }' in css
+    assert not re.search(r'^\[class\*="st-key-ux_list_"\] \{ height:', css, re.M) and not re.search(r'^\[class\*="st-key-ux_threadbody_"\] \{ height:', css, re.M)     # the rules that did nothing are gone
+    assert "calc(var(--ux-h) - 44px)" not in css and "calc(var(--ux-h) - 114px)" not in css                                                                  # and so are the guessed overheads
 
 
 def test_the_inbox_uses_the_whole_width_of_the_page_instead_of_a_narrow_column():
@@ -525,18 +534,6 @@ def test_file_sizes_read_naturally_and_a_bad_size_is_zero(size, text):
     assert H._size_text(size) == text
 
 
-def test_the_thread_height_rule_resizes_the_outer_wrapper_not_just_the_inner_element():
-    """REGRESSION: Streamlit gives the thread an OUTER wrapper with a fixed flex-basis; sizing only the inner element changed nothing, and the pane grew instead."""
-    css = H.composer_open_css("tab_Camp", 271)
-    assert 'div:has(> [class*="st-key-ux_threadbody_tab_Camp"]) { height: 271px !important; flex: 0 0 271px !important; }' in css
-    assert '[class*="st-key-ux_reply_"] button { background: #eaf1ff !important;' in css
-
-
-@pytest.mark.parametrize("asked, used", [(271, 271), (120, 120), (119, 120), (0, 120), (-50, 120), ("300", 300)])
-def test_the_thread_never_shrinks_below_a_readable_height(asked, used):
-    assert f"height: {used}px !important" in H.composer_open_css("ns", asked)
-
-
 def test_the_composer_is_docked_with_a_top_edge_and_the_field_rows_are_a_fixed_34_pixels():
     assert "border-top: 1px solid #e5e7eb" in _inbox_rule('[class*="st-key-ux_composer_"] {')
     row = _inbox_rule('[class*="st-key-ux_frm_"] {')
@@ -575,3 +572,10 @@ def test_the_composer_rules_are_scoped_to_the_composer_not_the_whole_page():
     for selector, _body in re.findall(r"([^{}]+)\{([^{}]*)\}", re.sub(r"/\*.*?\*/", "", block, flags=re.S)):
         for part in selector.split(","):
             assert "ux" in part, f"an unscoped composer rule: {part.strip()}"
+
+
+def test_opening_the_composer_only_highlights_the_reply_button_and_sets_no_height_because_the_conversation_makes_room_by_itself():
+    import inspect
+    css = H.composer_open_css("tab_Camp")
+    assert css == '[class*="st-key-ux_reply_"] button { background: #eaf1ff !important; color: #1d4ed8 !important; border-color: #2563eb !important; }'
+    assert "height" not in css and list(inspect.signature(H.composer_open_css).parameters) == ["namespace"]
