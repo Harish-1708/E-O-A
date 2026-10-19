@@ -135,7 +135,7 @@ def test_all_rules_are_scoped_to_this_page_or_its_dialogs():
     css = re.sub(r"/\*.*?\*/", "", H.EA_CSS, flags=re.S)
     for selector, _body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
         for part in selector.split(","):
-            assert re.search(r"ea-|ea_|manage_|add_account_", part), f"an unscoped rule: {part.strip()}"
+            assert re.search(r"ea-|ea_|manage_|add_account_|bulk_accounts_", part), f"an unscoped rule: {part.strip()}"
 
 
 def test_the_remove_button_inside_its_dialog_is_red_when_it_can_be_pressed():
@@ -213,3 +213,51 @@ def test_the_provider_cards_span_the_whole_width_of_the_dialog():
     """REGRESSION (seen in a real browser): the two cards filled only about half of the dialog."""
     rule = _rule('[class*="st-key-add_account_provider"], [class*="st-key-add_account_provider"] [data-testid="stRadio"],')
     assert "width: 100% !important" in rule and rule.count("add_account_provider") == 3          # the outer element that carries the name, the radio and its wrapper
+
+
+# ================================================================ the Bulk add dialog's markup
+
+def test_a_step_heading_has_its_number_and_words():
+    assert H.bulk_step_html(2, "Upload it") == '<div class="ea-bstep"><span class="ea-bnum">2</span><b>Upload it</b></div>'
+
+
+def test_required_columns_are_blue_chips_and_optional_ones_grey_each_group_under_its_own_heading():
+    markup = H.column_chips_html(["Email", "Password"], ["Name", "SMTP Host"])
+    assert markup.count("ea-cc-req") == 2 and markup.count("ea-cc-opt") == 2 and 'ea-clabel">Required<' in markup and "a blank Name is taken from the address" in markup and "\n" not in markup
+
+
+def test_the_summary_shows_ready_always_and_skipped_only_when_there_are_some():
+    assert H.bulk_summary_html(5, 1) == '<div class="ea-sumrow"><span class="ea-sumc ea-sumc-ok">✓ 5 ready</span><span class="ea-sumc ea-sumc-warn">⚠ 1 skipped</span></div>'
+    assert "skipped" not in H.bulk_summary_html(5, 0) and "✓ 0 ready" in H.bulk_summary_html(0, 2)
+
+
+def test_skipped_reasons_are_one_line_each_and_nothing_is_drawn_when_there_are_none():
+    markup = H.bulk_skipped_html(["Row 2: Email is required.", "Row 3: Password is required."])
+    assert markup.count("<div>Row") == 2 and "<b>Skipped:</b>" in markup and H.bulk_skipped_html([]) == ""
+
+
+def test_the_progress_list_ticks_the_done_ones_marks_the_one_in_hand_and_greys_the_rest():
+    markup = H.bulk_progress_html(["sales5", "host1"], ["host2", "sales6", "sales7"])
+    assert markup.count("ea-ptick\">✓<") == 2 and "sales5 — added" in markup and "host2 — adding…" in markup and markup.count("ea-prest") == 3 and "sales6 — adding" not in markup
+
+
+def test_the_result_lists_each_added_account_with_its_slot_and_any_skipped_with_the_reason():
+    markup = H.bulk_result_html([("sales5", 4), ("host1", 5)], ["sales8: password missing"])
+    assert "2 accounts added" in markup and "sales5 <span class=\"ea-slot\">· slot 4" in markup and "host1 <span class=\"ea-slot\">· slot 5" in markup and "sales8: password missing" in markup and "\n" not in markup
+    assert "1 account added" in H.bulk_result_html([("a", 1)], []) and "accounts added" not in H.bulk_result_html([("a", 1)], [])
+
+
+def test_if_nothing_was_added_the_result_says_so_and_shows_why():
+    markup = H.bulk_result_html([], ["a: exists", "b: boom"])
+    assert "No accounts were added" in markup and "a: exists" in markup and 'class="ea-step"' not in markup and "appear in the list" not in markup
+
+
+@pytest.mark.parametrize("hostile", HOSTILE)
+def test_hostile_text_in_the_bulk_pieces_can_never_become_markup(hostile):
+    for markup in (H.bulk_step_html(1, hostile), H.column_chips_html([hostile], [hostile]), H.bulk_skipped_html([hostile]), H.bulk_progress_html([hostile], [hostile]), H.bulk_result_html([(hostile, hostile)], [hostile])):
+        _safe_dialog(markup)
+
+
+def test_the_upload_box_is_a_dashed_drop_area_and_the_column_chips_use_the_two_colour_families():
+    assert "border: 2px dashed #c7d7fb" in _rule('[class*="st-key-bulk_accounts_csv_upload"] [data-testid="stFileUploaderDropzone"] {')
+    assert "background: #dde9fb" in _rule(".ea-cc-req {") and "background: #f1f2f4" in _rule(".ea-cc-opt {")
