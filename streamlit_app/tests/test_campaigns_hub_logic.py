@@ -354,26 +354,41 @@ def test_the_chart_caption_says_what_the_bars_are_and_over_what_dates(series, te
     assert HL.series_caption(series) == text
 
 
-def _row(name, status, leads=0, sent=0, replies=0, last=""):
-    return {"name": name, "status": status, "total_leads": leads, "sent": sent, "replies": replies, "last_activity": last, "reply_rate": "—", "problems": [], "series": HL.EMPTY_SERIES}
+def _row(name, status, leads=0, sent=0, replies=0, last="", contacted=None):
+    contacted = (leads if sent else 0) if contacted is None else contacted
+    return {"name": name, "status": status, "total_leads": leads, "contacted": contacted, "sent": sent, "replies": replies, "last_activity": last, "reply_rate": HL.reply_rate_text(replies, contacted), "problems": [], "series": HL.EMPTY_SERIES}
 
 
 ROWS = [_row("Old", "completed", 10, 28, 3, "2026-09-01 10:00:00"), _row("Live", "running", 77, 252, 51, "2026-10-14 09:00:00"), _row("Soon", "draft"), _row("Mid", "completed", 39, 235, 20, "2026-10-12 09:00:00"),
-        _row("Stuck", "attention"), _row("Hold", "paused", 5, 3, 0, "2026-10-13 09:00:00")]
+        _row("Stuck", "attention"), _row("Hold", "paused", 5, 3, 0, "2026-10-13 09:00:00", contacted=3)]
 
 
 def test_the_totals_are_added_up_from_the_rows_and_the_rate_is_overall():
     summary = HL.summarize_campaigns(ROWS)
-    assert summary == {"count": 6, "running": 1, "attention": 1, "leads": 131, "sent": 518, "replies": 74, "reply_rate": "14.3%"}
+    assert summary == {"count": 6, "running": 1, "attention": 1, "leads": 131, "contacted": 129, "sent": 518, "replies": 74, "reply_rate": "57.4%"}      # 74 replied of 129 contacted (not of 518 emails)
 
 
-@pytest.mark.parametrize("replies, sent, text", [(74, 515, "14.4%"), (0, 10, "0.0%"), (5, 0, "—"), (0, 0, "—"), (1, 3, "33.3%")])
-def test_the_overall_reply_rate_has_one_decimal_and_is_a_dash_with_nothing_sent(replies, sent, text):
-    assert HL.reply_rate_text(replies, sent) == text
+@pytest.mark.parametrize("replies, contacted, text", [(74, 126, "58.7%"), (51, 77, "66.2%"), (0, 10, "0.0%"), (5, 0, "—"), (0, 0, "—"), (1, 3, "33.3%")])
+def test_the_reply_rate_is_leads_who_replied_over_leads_contacted_with_one_decimal_and_a_dash_when_nobody_was_contacted(replies, contacted, text):
+    assert HL.reply_rate_text(replies, contacted) == text
+
+
+def test_the_overall_rate_never_divides_by_emails_sent():
+    """REGRESSION (reported twice): 74 replied of 126 leads contacted is 58.7%; dividing by the 515 EMAILS sent gave a misleading 14.4%."""
+    rows = [_row("A", "completed", 10, 28, 3), _row("B", "running", 77, 252, 51), _row("C", "completed", 39, 235, 20)]
+    summary = HL.summarize_campaigns(rows)
+    assert (summary["replies"], summary["contacted"], summary["sent"], summary["reply_rate"]) == (74, 126, 515, "58.7%")
+
+
+@pytest.mark.parametrize("leads, sent, replies, contacted", [(77, 252, 51, 77), (10, 28, 3, 10), (39, 235, 20, 39), (5, 40, 1, 4), (8, 100, 2, 2)])
+def test_one_campaigns_total_always_equals_its_own_reply_rate(leads, sent, replies, contacted):
+    """The law that was broken: the figure above the list must agree with the figure on the card, whatever the numbers are."""
+    row = _row("Only", "running", leads, sent, replies, contacted=contacted)
+    assert HL.summarize_campaigns([row])["reply_rate"] == row["reply_rate"]
 
 
 def test_the_totals_of_no_campaigns_are_zero_and_a_dash():
-    assert HL.summarize_campaigns([]) == {"count": 0, "running": 0, "attention": 0, "leads": 0, "sent": 0, "replies": 0, "reply_rate": "—"}
+    assert HL.summarize_campaigns([]) == {"count": 0, "running": 0, "attention": 0, "leads": 0, "contacted": 0, "sent": 0, "replies": 0, "reply_rate": "—"}
 
 
 @pytest.mark.parametrize("summary, text", [
@@ -427,7 +442,7 @@ from unittest.mock import patch  # noqa: E402
 
 def _built_row(status, send_log, today=date(2026, 10, 10)):
     cfg = {"_campaign_name": "C", "stages": [{"name": "intro"}]}
-    base = ["C", 5, 0, 4, 0, 0, 0, 1, "25.0%"]
+    base = ["C", 5, 4, 4, 0, 0, 0, 1, "25.0%"]                      # 5 leads, 4 contacted, 4 emails sent, 1 replied: 25% of the contacted
     with patch.object(HL, "compute_campaign_status", lambda c, leads: (status, [])), patch.object(HL.outreach, "compute_all_campaigns_row", lambda *a, **k: base):
         return HL.build_campaign_hub_row(cfg, [], [], send_log, today=today)
 
@@ -442,5 +457,17 @@ def test_a_running_campaigns_chart_reaches_today_but_a_finished_ones_stops_at_it
 
 def test_a_built_row_carries_the_numbers_the_card_shows_and_the_series_total_matches_the_sent_log():
     row = _built_row("running", _sent("2026-10-01", 4))
-    assert (row["total_leads"], row["sent"], row["replies"], row["reply_rate"], row["status"]) == (5, 4, 1, "25.0%", "running") and row["series"]["total"] == 4
+    assert (row["total_leads"], row["contacted"], row["sent"], row["replies"], row["reply_rate"], row["status"]) == (5, 4, 4, 1, "25.0%", "running") and row["series"]["total"] == 4
     assert row["last_activity"] == "2026-10-01 10:00:00"
+
+
+def test_with_the_real_engine_calculation_the_row_and_the_total_agree_and_neither_divides_by_emails():
+    """No stand-in numbers: 5 leads, 4 contacted (one of them replied), and 9 emails sent in all (follow-ups included)."""
+    cfg = {"_campaign_name": "C", "stages": [{"name": "intro"}, {"name": "followup1"}]}
+    leads = [{"Email": f"l{i}@x.com", "IntroSentAt": "2026-10-01 10:00:00" if i < 4 else "", "ReplyStatus": "Replied" if i == 0 else ""} for i in range(5)]
+    log = [{"Status": "sent", "Timestamp": "2026-10-01 10:00:00"}] * 9
+    with patch.object(HL, "compute_campaign_status", lambda c, ls: ("running", [])):
+        row = HL.build_campaign_hub_row(cfg, leads, [], log, today=date(2026, 10, 10))
+    assert (row["total_leads"], row["contacted"], row["sent"], row["replies"], row["reply_rate"]) == (5, 4, 9, 1, "25.0%")
+    summary = HL.summarize_campaigns([row])
+    assert summary["reply_rate"] == "25.0%" and summary["contacted"] == 4                      # not 1 of 9 emails (11.1%)
