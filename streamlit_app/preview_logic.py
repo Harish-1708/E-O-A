@@ -6,6 +6,7 @@ never need to exist anywhere near the Streamlit process — only Send needs
 them, and Send always happens via GitHub Actions, which is the only place
 that credential lives.
 """
+import os
 import sys
 from typing import Dict, List, Optional
 
@@ -17,17 +18,47 @@ if config.REPO_ROOT not in sys.path:
 import outreach  # noqa: E402
 
 
+# Set by the Streamlit app (shell_data) at start-up: campaign name -> the template file names read LIVE from GitHub, or None when they cannot be read. Kept as a plain hook
+# so this module stays free of Streamlit and of any GitHub client.
+_live_template_listing = None
+
+
+def register_live_template_listing(provider) -> None:
+    global _live_template_listing
+    _live_template_listing = provider
+
+
+def local_templates_present(campaign_name: str) -> bool:
+    """Whether this app's own checked-out copy of the campaign's templates folder has at least one template file."""
+    directory = os.path.join(config.TEMPLATES_ROOT, campaign_name)
+    try:
+        return os.path.isdir(directory) and any(name.endswith(".txt") for name in os.listdir(directory))
+    except OSError:
+        return False
+
+
 def get_campaign_cfg(campaign_name: str) -> Dict:
     # Reads config.SETTINGS_PATH/CAMPAIGNS_DIR/TEMPLATES_ROOT at CALL time via
     # the module (not `from config import X` at import time) — this module
     # is imported once and cached by Python for the whole process, so a
     # test's patch("config.CAMPAIGNS_DIR", ...) must still be visible on
     # every call, not just the first one before the patch took effect.
+    #
+    # A campaign's existence is read live from GitHub (list_campaigns_live), but its settings are built from the templates folder in THIS app's own checkout, which only
+    # catches up when Streamlit Cloud redeploys. A campaign created or duplicated a moment ago therefore showed up in the list and then failed to load ("No template
+    # files found") until that happened, which could take very long. When the local copy has no template files for it, build the settings from the live GitHub listing.
+    template_filenames = None
+    if _live_template_listing is not None and not local_templates_present(campaign_name):
+        try:
+            template_filenames = _live_template_listing(campaign_name) or None
+        except Exception:  # noqa: BLE001 - if the live listing cannot be had, report the ordinary error rather than a new one
+            template_filenames = None
     return outreach.get_campaign(
         campaign_name,
         settings_path=config.SETTINGS_PATH,
         campaigns_dir=config.CAMPAIGNS_DIR,
         templates_root=config.TEMPLATES_ROOT,
+        template_filenames=template_filenames,
     )
 
 
