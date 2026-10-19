@@ -16,7 +16,7 @@ from accounts_logic import build_health_lookup
 from campaign_header_logic import read_cron_minute
 from github_client import GitHubClient
 from inbox_senders import build_sender_options
-from preview_logic import get_campaign_cfg, list_campaigns_live
+from preview_logic import get_campaign_cfg, list_campaigns_live, register_live_template_listing
 from settings_logic import load_raw_override_live, merge_live_override_into_cfg
 from sheets_readonly import ReadOnlySheetsConnector
 
@@ -51,6 +51,21 @@ def fetch_sheet_data(campaign_cfg, connector=None):
     responses = connector.get_all_responses(campaign_cfg["responses_tab"])
     send_log = connector.get_all_send_log(campaign_cfg["send_log_tab"])
     return leads, responses, send_log
+
+
+def _live_template_listing(campaign_name: str):
+    """The campaign's template file names, read LIVE from GitHub (None when that cannot be done): what get_campaign_cfg falls back to when this app's own checkout does not
+    have the campaign's templates yet."""
+    client = safe_github_client()
+    if client is None:
+        return None
+    try:
+        return [name for name in client.list_directory_files(f"templates/{campaign_name}") if name.endswith(".txt")]
+    except Exception:  # noqa: BLE001 - not being able to read it just means the original error is reported
+        return None
+
+
+register_live_template_listing(_live_template_listing)
 
 
 def get_campaign_cfg_live(campaign_name: str):
