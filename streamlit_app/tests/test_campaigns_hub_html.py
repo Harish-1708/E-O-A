@@ -54,8 +54,8 @@ def test_relative_times_read_naturally_and_a_bad_one_is_shown_as_it_is(ts, text)
 
 
 def test_the_four_totals_say_what_they_are():
-    markup = H.stats_html({"count": 5, "running": 1, "attention": 1, "leads": 126, "sent": 515, "replies": 74, "reply_rate": "14.4%"})
-    assert markup.count('class="hb-stat"') == 4 and '<div class="hb-stat-v">126</div>' in markup and "14.4% reply rate" in markup and "of 5 campaigns" in markup
+    markup = H.stats_html({"count": 5, "running": 1, "attention": 1, "leads": 126, "contacted": 126, "sent": 515, "replies": 74, "reply_rate": "58.7%"})
+    assert markup.count('class="hb-stat"') == 4 and '<div class="hb-stat-v">126</div>' in markup and "58.7% of 126 leads replied" in markup and "of 5 campaigns" in markup and "14.4%" not in markup
     assert "of 1 campaign<" in H.stats_html({"count": 1, "running": 0, "attention": 0, "leads": 0, "sent": 0, "replies": 0, "reply_rate": "—"}) and "no reply rate yet" in H.stats_html({"count": 1, "running": 0, "attention": 0, "leads": 0, "sent": 0, "replies": 0, "reply_rate": "—"})
 
 
