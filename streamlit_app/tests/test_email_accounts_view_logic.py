@@ -125,3 +125,39 @@ def test_the_password_is_deliberately_not_part_of_whether_add_may_be_pressed():
     """REGRESSION (seen in a real browser): a password typed and left with Tab is not handed to the app until focus leaves its show/hide eye, so waiting for it left Add stuck."""
     import inspect
     assert list(inspect.signature(V.add_form_ready).parameters) == ["name", "address", "managed"]
+
+
+# ================================================================ the Bulk add dialog's logic
+
+def test_the_required_columns_are_what_the_parser_requires_and_every_other_column_is_optional():
+    from email_account_slots_logic import BULK_ACCOUNT_CSV_COLUMNS
+    assert V.BULK_REQUIRED_COLUMNS == ["Email", "Password"] and V.BULK_OPTIONAL_COLUMNS == ["Name", "IMAP Password", "SMTP Host", "SMTP Port", "SMTP Username", "IMAP Host", "IMAP Port", "IMAP Username"]
+    assert sorted(V.BULK_REQUIRED_COLUMNS + V.BULK_OPTIONAL_COLUMNS) == sorted(BULK_ACCOUNT_CSV_COLUMNS)
+
+
+def test_a_file_with_only_the_required_columns_is_really_accepted_by_the_parser():
+    """So the chips never tell anyone a column is needed that is not (the old text said Name was required; it is not)."""
+    from email_account_slots_logic import parse_bulk_accounts_csv
+    parsed, errors = parse_bulk_accounts_csv(["Email", "Password"], [{"Email": "a@x.com", "Password": "pw"}])
+    assert errors == [] and parsed[0]["name"] == "a"
+    assert parse_bulk_accounts_csv(["Name", "Email"], [{"Name": "n", "Email": "a@x.com"}])[1] == ["CSV is missing required column(s): Password"]
+
+
+def test_the_template_has_the_real_headings_in_order_and_a_gmail_and_a_custom_provider_example():
+    import csv
+    import io
+    from email_account_slots_logic import BULK_ACCOUNT_CSV_COLUMNS
+    rows = list(csv.reader(io.StringIO(V.bulk_template_csv().decode("utf-8"))))
+    assert rows[0] == BULK_ACCOUNT_CSV_COLUMNS and len(rows) == 3 and all(len(r) == len(BULK_ACCOUNT_CSV_COLUMNS) for r in rows)
+    assert rows[1][:3] == ["sales1", "sales1@gmail.com", "app-password-here"] and "smtp.hostinger.com" in rows[2]
+
+
+def test_the_review_table_marks_a_row_custom_only_when_it_has_its_own_smtp_host():
+    parsed = [{"name": "a", "address": "a@x.com", "smtp_host": None}, {"name": "b", "address": "b@x.com", "smtp_host": "smtp.hostinger.com"}, {"name": "c", "address": "c@x.com"}]
+    assert V.bulk_review_rows(parsed) == {"Name": ["a", "b", "c"], "Email": ["a@x.com", "b@x.com", "c@x.com"], "Provider": ["Gmail", "Custom", "Gmail"], "Status": ["✓ Ready"] * 3}
+    assert V.bulk_review_rows([]) == {"Name": [], "Email": [], "Provider": [], "Status": []}
+
+
+@pytest.mark.parametrize("parsed, errors, ready, skipped", [([{}] * 3, [], 3, 0), ([{}], ["Row 2: Email is required."], 1, 1), ([], ["CSV is missing required column(s): Password"], 0, 1), ([], [], 0, 0), ([{}, {}], ["Row 1: a", "Row 4: b", "Row 7: c"], 2, 3)])
+def test_the_counts_are_ready_rows_and_skipped_messages(parsed, errors, ready, skipped):
+    assert V.bulk_counts(parsed, errors) == {"ready": ready, "skipped": skipped}
