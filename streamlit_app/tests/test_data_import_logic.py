@@ -10,7 +10,7 @@ from data_import_logic import (
     build_removal_payload, removal_payload_path, payload_to_bytes,
     filter_leads, search_leads, validate_custom_field_name, find_duplicate_columns,
     build_full_lead_table,
-    FILTER_ALL, FILTER_PENDING_APPROVAL, FILTER_IN_PROGRESS, FILTER_REPLIED,
+    FILTER_ALL, FILTER_OPTIONS, FILTER_IN_PROGRESS, FILTER_REPLIED,
     FILTER_BOUNCED, FILTER_REMOVED,
 )
 
@@ -205,11 +205,14 @@ def test_filter_all_returns_everything():
     assert filter_leads(leads, FILTER_ALL) == leads
 
 
-def test_filter_pending_approval():
+def test_there_is_no_pending_approval_filter_any_more_and_approval_does_not_affect_any_filter():
+    """Approval is not used any more (it does not gate sending), so it is no longer a filter on the Data tab."""
+    import data_import_logic
+    assert not hasattr(data_import_logic, "FILTER_PENDING_APPROVAL") and "Pending Approval" not in FILTER_OPTIONS
+    assert FILTER_OPTIONS == ["All", "In Progress", "Replied", "Bounced", "Removed"]
     leads = [_lead(Approval="Yes"), _lead(Approval=""), _lead(Approval="No")]
-    result = filter_leads(leads, FILTER_PENDING_APPROVAL)
-    assert len(result) == 2
-    assert all(l["Approval"] != "Yes" for l in result)
+    assert filter_leads(leads, "Pending Approval") == leads                      # an old saved choice falls back to showing everything, never an error
+    assert filter_leads(leads, FILTER_ALL) == leads
 
 
 def test_filter_in_progress_excludes_terminal_and_removed():
