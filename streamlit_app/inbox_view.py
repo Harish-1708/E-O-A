@@ -37,9 +37,6 @@ from responses_reply_logic import (  # noqa: E402
 
 PANE_HEIGHT = 700                                   # the three panes share one height; the lists scroll inside it
 HEADER_HEIGHT, BAR_HEIGHT = 52, 62
-THREAD_HEIGHT = PANE_HEIGHT - HEADER_HEIGHT - BAR_HEIGHT   # the thread's height with no composer open (what the page really gives it)
-COMPOSER_HEIGHT = 315                              # measured in a real browser: what the composer takes from the pane while it is open (the thread gives up exactly this much)
-NOTE_HEIGHT = 56                                   # measured: what the amber 'different sender' note adds to the composer, when it is showing
 WORKFLOW_SET_RESPONSE_STATUS = "set_response_status.yml"
 COLLAPSE_THRESHOLD, KEEP_NEWEST = 8, 5      # a conversation of more than 8 emails shows only the newest 5 until asked for the rest
 EMPTY_EMAIL_NOTE = "This email has no readable text — it may be only an image or an attachment. Open it in the mailbox to see it."
@@ -412,13 +409,6 @@ def _sender_data(ctx: InboxContext) -> Optional[Dict]:
     return data if isinstance(data, dict) and isinstance(data.get("directory"), dict) else None
 
 
-def _note_extra(ctx: InboxContext, k: Dict[str, str], defaults: Dict) -> int:
-    """The height the amber note adds to the composer, so the thread can give up that much more: only while a different account than the thread's is chosen."""
-    if ctx.sender_options is None:
-        return 0
-    return NOTE_HEIGHT if (sender_change_note(st.session_state.get(k["from"], ""), defaults["sender_account"]) or not defaults["sender_account"]) else 0
-
-
 def _field_row(ns: str, field: str, label: str):
     """One labelled row of the composer: the grey name at the left, the field filling the rest. Returns (the field's column, the hint column)."""
     with st.container(key=f"ux_frm_{ns}_{field}"):
@@ -438,7 +428,7 @@ def _render_composer(ctx: InboxContext, group: Dict, latest: Dict, lead: Optiona
     if k["body"] not in st.session_state:
         st.session_state[k["body"]] = st.session_state.get(k["draft"], "")
     with st.container(key=f"ux_composer_{ns}"):
-        st.markdown(f"<style>{H.composer_open_css(ns, THREAD_HEIGHT - COMPOSER_HEIGHT - _note_extra(ctx, k, defaults))}</style>", unsafe_allow_html=True)
+        st.markdown(f"<style>{H.composer_open_css(ns)}</style>", unsafe_allow_html=True)
 
         field, hint = _field_row(ns, "from", "From")
         if senders is not None:
