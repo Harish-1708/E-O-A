@@ -128,12 +128,15 @@ def test_performance_page_renders_with_the_right_headline_numbers(fixture_repo):
     assert headline["Needs follow-up"] == "0"
     assert headline["Failed sends"] == "1"
     assert headline["Negotiating"] == "—"               # the Asana sync has not recorded stages: a dash, not a false zero
-    # the campaign card repeats the numbers, and must agree with the headline
-    assert (card["Contacted"], card["Sent"], card["Replies"], card["Reply rate"], card["Positive"]) == ("3", "4", "2", "66.7%", "1")
+    # the campaign's row in the table repeats the numbers, and must agree with the headline
+    table = _glance_markup(at)
+    assert '3 <span class="pg-of">of 4</span>' in table and '<div class="pg-num">4</div>' in table and "66.7%" in table
+    assert '<div class="pg-num">2</div><div class="pg-sub">replied · 1 positive</div>' in table
     titles = _card_titles(at) + [s.value for s in at.subheader]
     for expected in ("Activity", "What the replies say", "What worked best?", "Follow-up stage effectiveness",
-                     "Template variants", "Deliverability", "Campaigns"):
+                     "Template variants", "Deliverability"):
         assert expected in titles, (expected, titles)
+    assert "Campaigns" not in titles and not any(m.label == "Positive" for m in at.metric)       # the old duplicate list of campaign cards is gone: the table is the one place
 
 
 def test_the_page_shows_a_campaign_card_with_its_status(fixture_repo):
@@ -148,8 +151,8 @@ def test_choosing_one_campaign_in_the_filter_shows_that_campaigns_numbers(fixtur
 
     at = _run_page(_realistic_sheet(), interact=pick)
     assert list(at.exception) == []
-    headline, card = _headline_and_card_metrics(at)
-    assert headline["Contacted"] == "3" and headline["Reply rate"] == "66.7%" and card["Reply rate"] == "66.7%"
+    headline, _ = _headline_and_card_metrics(at)
+    assert headline["Contacted"] == "3" and headline["Reply rate"] == "66.7%" and "66.7%" in _glance_markup(at)
 
 
 def _chart_summary(at):
@@ -179,9 +182,9 @@ def test_the_chart_range_is_a_horizontal_choice_that_starts_on_30_days(fixture_r
 def test_the_page_says_so_plainly_for_a_campaign_with_no_activity(fixture_repo):
     at = _run_page(_sheet([], [], []))
     assert list(at.exception) == [] and list(at.error) == []
-    headline, card = _headline_and_card_metrics(at)
+    headline, _ = _headline_and_card_metrics(at)
     assert headline["Reply rate"] == "—" and headline["Contacted"] == "0"          # no data is a dash, never "0.0%"
-    assert card["Reply rate"] == "—"
+    assert '<div class="pg-num pg-rate">—</div>' in _glance_markup(at) and "0.0%" not in _glance_markup(at)
     infos = " ".join(i.value for i in at.info)
     assert "Nothing has been sent or replied to yet." in infos and "No genuine replies yet." in infos
 
