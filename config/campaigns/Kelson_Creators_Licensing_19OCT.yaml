@@ -19,7 +19,7 @@ asana:
   project_name: Creator Outreach
 tracker_sync:
   enabled: true
-status: draft
+status: active
 stage_wait_days:
   followup1: 2
   followup2: 2
