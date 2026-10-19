@@ -232,16 +232,56 @@ def _all_dataframes(at):
     return [df.value for df in at.dataframe]
 
 
-def test_every_figure_the_old_overview_page_showed_is_on_this_page_in_the_at_a_glance_table(fixture_repo):
+def _glance_markup(at):
+    return next(m.value for m in at.markdown if 'class="pg-table"' in m.value)
+
+
+def test_every_figure_the_old_overview_page_showed_is_still_in_the_at_a_glance_table(fixture_repo):
     at = _run_page(_realistic_sheet())
-    assert "All campaigns at a glance" in [s.value for s in at.subheader]
-    glance = next(df for df in _all_dataframes(at) if "Sequence completion" in df.columns)
-    row = glance.iloc[0]
-    assert row["Campaign"] == FIXTURE_CAMPAIGN
-    assert (row["Total leads"], row["Contacted"], row["Pending"], row["Emails sent"], row["Replies"], row["Reply rate"]) == \
-        ("4", "3", "1", "4", "2", "66.7%")
-    assert list(glance.columns) == ["Campaign", "Status", "Total leads", "Contacted", "Pending", "Emails sent", "Delivered (est.)",
-                                    "Hard bounces", "Soft bounces", "Replies", "Reply rate", "Sequence completion"]
+    assert list(at.exception) == [] and list(at.error) == []
+    assert any("All campaigns at a glance" in m.value for m in at.markdown)
+    assert not any("Sequence completion" in list(df.value.columns) for df in at.dataframe)                  # the old plain data table is gone
+    table = _glance_markup(at)
+    assert FIXTURE_CAMPAIGN in table and "3 <span class=\"pg-of\">of 4</span>" in table and "1 pending" in table                 # contacted of leads, pending
+    assert "<div class=\"pg-num\">4</div><div class=\"pg-sub\">4 delivered (est.)</div>" in table and "66.7%" in table and "All 1 campaign<" in table      # emails sent, delivered, reply rate, total row
+    assert "0 hard" in table and "0 soft" in table and "completed the sequence" in table
+
+
+def test_the_glance_csv_has_every_column_the_old_table_had_and_the_rows_in_the_order_shown(fixture_repo):
+    import csv
+    import io
+    import performance_logic
+    given = []
+    real = performance_logic.glance_csv
+
+    def spy(perfs, status_labels, sort):
+        data = real(perfs, status_labels, sort)
+        given.append((sort, data))
+        return data
+
+    with patch("performance_logic.glance_csv", spy):
+        at = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_glance_sort").set_value("Replies"))
+    assert any(b.proto.label == "⬇ CSV" for b in at.get("download_button"))
+    sort, data = given[-1]
+    rows = list(csv.reader(io.StringIO(data.decode("utf-8"))))
+    assert sort == "Replies" and rows[0] == ["Campaign", "Status", "Total leads", "Contacted", "Pending", "Emails sent", "Delivered (est.)", "Hard bounces", "Soft bounces", "Replies",
+                                            "Reply rate", "Sequence completion"]
+    assert rows[1][0] == FIXTURE_CAMPAIGN and dict(zip(rows[0], rows[1]))["Replies"] == "2" and dict(zip(rows[0], rows[1]))["Reply rate"] == "66.7%"
+
+
+def test_the_glance_table_has_a_sort_choice_that_starts_on_reply_rate(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    sort = at.selectbox(key="performance_glance_sort")
+    assert sort.options == ["Sort: Reply rate", "Sort: Replies", "Sort: Emails sent", "Sort: Name"] and sort.value == "Reply rate"
+    assert "Sorted by reply rate." in " ".join(m.value for m in at.markdown)
+    at2 = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_glance_sort").set_value("Name"))
+    assert "Sorted by name." in " ".join(m.value for m in at2.markdown) and list(at2.exception) == []
+
+
+def test_the_page_level_export_is_still_there_next_to_the_tables_csv(fixture_repo):
+    at = _run_page(_realistic_sheet())
+    labels = sorted(b.proto.label for b in at.get("download_button"))
+    assert labels == ["⤓ Export", "⬇ CSV"]
 
 
 def test_the_by_sender_and_errors_tables_the_old_analytics_tab_had_are_here(fixture_repo):
@@ -477,8 +517,8 @@ def test_with_no_failed_sends_there_is_no_most_common_errors_section(fixture_rep
 
 def test_the_performance_page_offers_an_export_of_what_it_shows(fixture_repo):
     at = _run_page(_realistic_sheet())
-    buttons = at.get("download_button")
-    assert len(buttons) == 1 and buttons[0].proto.label == "⤓ Export"
+    export = [b for b in at.get("download_button") if b.proto.label == "⤓ Export"]
+    assert len(export) == 1
 
 
 def test_the_sender_bars_are_scaled_to_the_best_account_and_an_account_with_no_replies_has_an_empty_bar(fixture_repo):
@@ -615,3 +655,17 @@ def test_the_change_is_hidden_when_either_week_has_too_few_emails_to_compare(fix
 def test_the_all_campaigns_page_total_never_shows_a_change(fixture_repo):
     at = _run_page(_realistic_sheet())
     assert '<div class="pf-kpi-trend' not in _markup(at)
+
+
+def test_the_chosen_sort_is_what_the_table_is_built_with(fixture_repo):
+    import performance_logic
+    seen = []
+    real = performance_logic.glance_rows
+
+    def spy(perfs, status_labels=lambda s: s, sort="Reply rate"):
+        seen.append(sort)
+        return real(perfs, status_labels, sort)
+
+    with patch("performance_logic.glance_rows", spy):
+        at = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_glance_sort").set_value("Emails sent"))
+    assert seen[0] == "Reply rate" and seen[-1] == "Emails sent" and list(at.exception) == []
