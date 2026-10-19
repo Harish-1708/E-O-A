@@ -259,3 +259,61 @@ def test_the_expanders_inside_the_cards_have_no_box_of_their_own_and_how_it_work
     assert "border: 0 !important" in rule and "background: transparent !important" in rule and rule.count("stExpander") == 3          # the wrapper AND the inner element, in all three cards
     assert "padding-left: 0 !important" in _rule('[class*="st-key-se_card_maint"] summary, [class*="st-key-se_card_asana"] summary, [class*="st-key-se_card_tracker"] summary {')
     assert "color: #1d4ed8" in _rule('\n[class*="st-key-se_card_asana"] summary, [class*="st-key-se_card_tracker"] summary {')       # (anchored on the line start: the three-card rule above ends with the same text)
+
+
+# ================================================================ the Asana card's lock, label, rules and spacing
+
+def _css_rule(start):
+    css = H.SETTINGS_CSS if hasattr(H, "SETTINGS_CSS") else H.SE_CSS
+    i = css.index(start)
+    return css[i:css.index("}", i)]
+
+
+def test_the_lock_help_says_whether_the_box_is_locked_and_what_the_padlock_does():
+    locked, unlocked = H.lock_help_html(True), H.lock_help_html(False)
+    assert "Locked, so it cannot be changed by accident. Press the lock to edit." in locked and "se-lock-open" not in locked
+    assert "Unlocked. Press the lock again, or Save, to lock it." in unlocked and "se-lock-open" in unlocked
+    _clean(locked)
+    _clean(unlocked)
+
+
+def test_the_field_label_has_a_bold_name_and_an_optional_quiet_hint():
+    assert H.field_label_html("Asana project name", "exact match") == '<div class="se-field-label">Asana project name <span>· exact match</span></div>'
+    assert "<span>" not in H.field_label_html("Asana project name")
+
+
+def test_hostile_text_in_the_field_label_is_escaped():
+    _clean(H.field_label_html(HOSTILE, HOSTILE))
+
+
+def test_the_rule_is_a_plain_line_with_nothing_in_it():
+    assert H.rule_html() == '<div class="se-rule"></div>'
+
+
+def test_the_cards_have_room_to_breathe_and_the_rule_runs_edge_to_edge():
+    card = _css_rule('[class*="st-key-se_card_"] {')
+    assert "padding: 22px 24px 18px" in card and "margin-bottom: 18px" in card
+    rule = _css_rule(".se-rule {")
+    assert "height: 1px" in rule and "margin: 16px -24px" in rule                        # -24px cancels the card's 24px side padding so the line reaches both edges
+
+
+def test_the_project_box_and_its_padlock_read_as_one_control():
+    box = _css_rule('[class*="st-key-se_asana_field"] [data-testid="stTextInputRootElement"] {')
+    lock = _css_rule('[class*="st-key-asana_name_lock"] button {')
+    assert "border-top-right-radius: 0 !important" in box and "border-bottom-right-radius: 0 !important" in box and "min-height: 42px" in box
+    assert "height: 42px" in lock and "border-radius: 0 10px 10px 0 !important" in lock and "border-left: 0" in lock
+    assert "gap: 0 !important" in _css_rule('[class*="st-key-se_asana_field"] [data-testid="stHorizontalBlock"] {')
+
+
+def test_a_locked_box_is_grey_and_an_unlocked_one_turns_the_padlock_blue():
+    assert "background: #f3f4f6 !important" in _css_rule('[class*="st-key-se_asana_field"] [data-testid="stTextInputRootElement"]:has(input:disabled) {')
+    open_state = _css_rule('[class*="st-key-se_card_asana"]:has(input:not(:disabled)[aria-label="Asana project name (exact match)"]) [class*="st-key-asana_name_lock"] button {')
+    assert "background: #eaf1ff" in open_state and "color: #1d4ed8" in open_state
+
+
+def test_the_explanation_and_the_button_row_are_spaced_apart_in_both_cards():
+    """REGRESSION (seen in a real browser): with no gap of its own the card put the label against the line and the note against the buttons."""
+    assert "margin: 14px 0 0" in _css_rule('[class*="st-key-se_card_asana"] .se-tool-note, [class*="st-key-se_card_tracker"] .se-tool-note {')
+    row = _css_rule('[class*="st-key-se_card_asana"] [data-testid="stHorizontalBlock"]:has([class*="st-key-asana_sync_save"]),')
+    assert "margin-top: 16px" in row and 'st-key-tracker_sync_save' in row
+    assert "margin: 0 0 6px" in _css_rule(".se-field-label {") and "margin: 6px 0 0" in _css_rule(".se-lock-help {")
