@@ -47,7 +47,7 @@ from settings_logic import (  # noqa: E402
 )
 from schedule_view import ScheduleContext, render_schedule_tab  # noqa: E402
 from settings_view import SettingsContext, render_settings_tab  # noqa: E402
-from settings_html import chip_html, section_label_html, tool_heading_html, tool_note_html  # noqa: E402
+from settings_html import chip_html, field_label_html, lock_help_html, rule_html, section_label_html, tool_heading_html, tool_note_html  # noqa: E402
 from launch_logic import build_status_override, build_delete_override, build_restore_override  # noqa: E402
 from responses_hub_logic import (  # noqa: E402
     group_responses_by_lead, sort_conversation_groups_newest_first, tag_responses_with_campaign, search_responses,
@@ -1008,6 +1008,16 @@ def _render_status_controls(campaign_cfg, leads, just_arrived: bool, send_log=()
                 st.rerun()
 
 
+def _flip_asana_lock(lock_key: str, currently_locked: bool) -> None:
+    st.session_state[lock_key] = not currently_locked
+
+
+def _lock_asana_name_after_save(lock_key: str) -> None:
+    """Pressing Save locks the project name again, unless the box is blank (then it stays open so the name can be filled in)."""
+    if str(st.session_state.get("asana_sync_project_name", "")).strip():
+        st.session_state[lock_key] = True
+
+
 def _render_asana_sync_section_in_settings(campaign_cfg):
     """Syncing this campaign's leads to an Asana project, and an on-demand sync. The sync itself (create or update tasks, decide a task's stage, never a duplicate)
     happens in sync_asana.yml / outreach.py; this is only the settings and the trigger. 'Saved' is what is in the settings file (or what was just saved, until
@@ -1015,6 +1025,7 @@ def _render_asana_sync_section_in_settings(campaign_cfg):
     campaign_name = campaign_cfg["_campaign_name"]
     asana_settings = campaign_cfg.get("asana") or {}
     snapshot_key = f"asana_saved_{campaign_name}"
+    lock_key = f"asana_name_locked_{campaign_name}"
     saved = st.session_state.get(snapshot_key) or {"enabled": bool(asana_settings.get("enabled")), "project_name": str(asana_settings.get("project_name", "")).strip()}
     st.markdown(section_label_html("Integrations"), unsafe_allow_html=True)
     with st.container(key="se_card_asana"):
@@ -1024,8 +1035,20 @@ def _render_asana_sync_section_in_settings(campaign_cfg):
         with switch_column:
             enabled = st.toggle("Enabled", value=saved["enabled"], key="asana_sync_enabled")
         project_name = saved["project_name"]
+        st.markdown(rule_html(), unsafe_allow_html=True)
         if enabled:
-            project_name = st.text_input("Asana project name (exact match)", value=saved["project_name"], key="asana_sync_project_name").strip()
+            # Locked by default once a name is saved, so it cannot be edited by accident; the padlock unlocks it, and saving locks it again.
+            locked = st.session_state.get(lock_key, bool(saved["project_name"]))
+            st.markdown(field_label_html("Asana project name", "exact match"), unsafe_allow_html=True)
+            with st.container(key="se_asana_field"):
+                field_column, lock_column = st.columns([14, 1.4], gap="small")
+                with field_column:
+                    project_name = st.text_input("Asana project name (exact match)", value=saved["project_name"], key="asana_sync_project_name", disabled=locked,
+                                                 label_visibility="collapsed").strip()
+                with lock_column:
+                    st.button("", key="asana_name_lock", icon=":material/lock:" if locked else ":material/lock_open:", on_click=_flip_asana_lock, args=(lock_key, locked),
+                              help="Locked. Press to edit the project name." if locked else "Unlocked. Press to lock it again.", width="stretch")
+            st.markdown(lock_help_html(locked), unsafe_allow_html=True)
             st.markdown(tool_note_html("A lead's stage (Sourced, Outreach Sent, Follow-up, Negotiating) follows its send and reply history. Rights Secured and Declined / Dead "
                                        "are only ever set by hand in Asana and are never overwritten by a sync."), unsafe_allow_html=True)
         else:
@@ -1034,7 +1057,7 @@ def _render_asana_sync_section_in_settings(campaign_cfg):
         changed = draft != saved
         save_column, sync_column, state_column = st.columns([1, 1.7, 2.3])
         with save_column:
-            save_clicked = st.button("💾 Save", key="asana_sync_save", type="primary", disabled=not changed)
+            save_clicked = st.button("💾 Save", key="asana_sync_save", type="primary", disabled=not changed, on_click=_lock_asana_name_after_save, args=(lock_key,))
         with sync_column:
             sync_clicked = st.button("🔄 Sync to Asana now", key="asana_sync_now", disabled=not (saved["enabled"] and not changed))
         with state_column:
@@ -1042,6 +1065,7 @@ def _render_asana_sync_section_in_settings(campaign_cfg):
                 st.markdown(chip_html("unsaved", "● Unsaved change"), unsafe_allow_html=True)
             elif not saved["enabled"]:
                 st.caption("Turn it on and save to enable syncing.")
+        st.markdown(rule_html(), unsafe_allow_html=True)
         with st.expander("How it works"):
             st.caption(
                 "Creates or updates one Asana task per lead — never a duplicate, since each lead's task is tracked once it's first created. A lead's stage "
@@ -1088,6 +1112,7 @@ def _render_tracker_sync_section_in_settings(campaign_cfg):
                                                "on" if saved["enabled"] else "off", "● On" if saved["enabled"] else "○ Off"), unsafe_allow_html=True)
         with switch_column:
             enabled = st.toggle("Enabled", value=saved["enabled"], key="tracker_sync_enabled")
+        st.markdown(rule_html(), unsafe_allow_html=True)
         st.markdown(tool_note_html("Nothing else in the tracker sheet is ever touched, and a creator matching more than one row is reported for review rather than guessed at. "
                                    "Rights Secured and Declined / Dead freeze the whole row, same as Asana." if enabled else "Turn this on and save to start syncing."), unsafe_allow_html=True)
         draft = {"enabled": bool(enabled)}
@@ -1102,6 +1127,7 @@ def _render_tracker_sync_section_in_settings(campaign_cfg):
                 st.markdown(chip_html("unsaved", "● Unsaved change"), unsafe_allow_html=True)
             elif not saved["enabled"]:
                 st.caption("Turn it on and save to enable syncing.")
+        st.markdown(rule_html(), unsafe_allow_html=True)
         with st.expander("How it works"):
             st.caption(
                 "A separate, shared spreadsheet (its ID and worksheet name are set once as GitHub secrets, not configured per campaign) that keeps its own 'Contact Status' "
