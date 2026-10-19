@@ -1614,23 +1614,20 @@ def test_with_no_thread_account_a_choice_is_required_and_the_page_says_why():
         assert _committed(captured)["sender_account"] == "sales1"
 
 
-def test_while_the_composer_is_open_the_thread_gives_up_exactly_the_height_it_takes():
-    """Measured in a real browser: the composer is COMPOSER_HEIGHT tall (NOTE_HEIGHT more with the amber note), and the thread's OUTER wrapper (the element Streamlit gives a fixed
-    height) shrinks by exactly that, so the pane stays the same size."""
-    from inbox_view import COMPOSER_HEIGHT, NOTE_HEIGHT, THREAD_HEIGHT
-
-    def thread_rule(at):
-        found = _re.findall(r'div:has\(> \[class\*="st-key-ux_threadbody_[^"]*"\]\) \{ height: (\d+)px !important; flex: 0 0 (\d+)px !important; \}', _markup(at))
-        return found[-1] if found else None
+def test_while_the_composer_is_open_the_reply_button_is_highlighted_and_no_height_is_forced_on_the_conversation():
+    """The conversation takes whatever height is left in the frame, so opening the composer needs no height rule (the old measured COMPOSER_HEIGHT / NOTE_HEIGHT are gone)."""
+    import inbox_view
+    assert not any(hasattr(inbox_view, name) for name in ("COMPOSER_HEIGHT", "NOTE_HEIGHT", "THREAD_HEIGHT", "_note_extra"))
+    highlight = '[class*="st-key-ux_reply_"] button { background: #eaf1ff !important;'
     with hub() as (at, _):
-        assert thread_rule(at) is None
+        assert highlight not in _markup(at)
         _compose(at, A1)
-        assert thread_rule(at) == (str(THREAD_HEIGHT - COMPOSER_HEIGHT),) * 2
-        at.selectbox(key=f"hub_from_{A1}").set_value("sales2")
+        assert highlight in _markup(at) and "ux_threadbody_hub" not in _markup(at)                  # the old rule named the conversation of THIS page and forced a height on it
+        at.selectbox(key=f"hub_from_{A1}").set_value("sales2")                                  # the amber 'different sender' note makes the composer taller: still nothing to compute
         at.run(timeout=25)
-        assert thread_rule(at) == (str(THREAD_HEIGHT - COMPOSER_HEIGHT - NOTE_HEIGHT),) * 2
+        assert highlight in _markup(at) and "ux_threadbody_hub" not in _markup(at)
         _compose(at, A1)
-        assert thread_rule(at) is None
+        assert highlight not in _markup(at)
 
 
 def test_the_accounts_are_only_looked_up_when_a_composer_is_opened():
