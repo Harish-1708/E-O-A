@@ -1,19 +1,19 @@
 """Pure logic for the sidebar and the Home page: the navigation, the greeting, and everything Home says about right now (what needs attention, the figures, the running
 campaigns). It works on data the pages already load; nothing here reads a Sheet. No Streamlit.
 """
+import re
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
-from campaign_header_logic import daily_limit, next_send_line, sent_today
 from campaign_status_logic import STATUS_RUNNING
 from email_accounts_view_logic import account_cards, summarize_accounts
 from responses_hub_logic import count_unread_conversations, tag_responses_with_campaign
+from work_queue_logic import NOT_IN_PLAY_LABELS, build_campaign_queue, summarize_queue
 from accounts_logic import build_account_rows
 
 # (key, label, page path, Material icon). The order is the order in the sidebar.
 NAV_ITEMS = [
     ("home", "Home", None, ":material/home:"),
-    ("today", "Today", "pages/today.py", ":material/calendar_today:"),
     ("performance", "Performance", "pages/performance.py", ":material/bar_chart:"),
     ("campaigns", "Campaigns", "pages/campaigns.py", ":material/folder:"),
     ("responses", "Responses", "pages/responses.py", ":material/chat_bubble:"),
@@ -84,20 +84,61 @@ def account_overview(directory: Dict[str, str], health: Dict[str, Dict]) -> Dict
     return {"total": summary["total"], "connected": summary["connected"], "bad": summary["bad"], "bad_accounts": bad, "last_checked": summary["last_checked"]}
 
 
-def running_rows(rows: List[Dict], details: Dict[str, Dict], now_utc: datetime, cron_minute: Optional[int], within_window: Callable) -> List[Dict]:
-    """One entry per running campaign: how many it has sent today against its daily limit, and when it next sends automatically."""
-    result = []
+def stage_label(name: str) -> str:
+    """'intro' -> 'Intro', 'followup4' -> 'Follow-up 4'; anything else is shown as it is."""
+    text = str(name or "")
+    if text == "intro":
+        return "Intro"
+    match = re.fullmatch(r"followup(\d+)", text)
+    return f"Follow-up {match.group(1)}" if match else text
+
+
+def window_pill(window: Dict) -> Tuple[str, str]:
+    """(kind, words) for a campaign's sending window: 'open' while it is open, 'shut' with when it next opens, 'unknown' when it could not be read."""
+    state = (window or {}).get("open")
+    if state is True:
+        return "open", "● Open now"
+    if state is False:
+        opens = (window or {}).get("next_open")
+        return "shut", f"○ Closed · opens {opens}" if opens else "○ Closed"
+    return "unknown", "Sending window unknown"
+
+
+def today_card(queue: Dict) -> Dict:
+    """One running campaign's Today card, from the queue the engine's own rule produces (the same numbers the next automatic run will act on)."""
+    window = queue.get("window") or {}
+    limit = queue.get("daily_limit")
+    sent = int(queue.get("sent_today") or 0)
+    kind, pill = window_pill(window)
+    stages = [dict(row, label=stage_label(row.get("stage"))) for row in queue.get("stages") or [] if row.get("due_now") or row.get("waiting")]
+    return {"name": queue.get("campaign", ""), "window_kind": kind, "window_pill": pill, "window_state": {True: "Open", False: "Closed"}.get(window.get("open"), "Unknown"),
+            "window_note": "" if window.get("open") is True else str(window.get("reason") or ""), "due": int(queue.get("due_total") or 0), "waiting": int(queue.get("waiting_total") or 0),
+            "next_due": queue.get("next_due_text") or "", "sent_today": sent, "limit": limit, "percent": min(100, round(sent / limit * 100)) if limit else 0,
+            "summary": summarize_queue(queue), "in_sequence": int(queue.get("in_sequence") or 0), "total_leads": int(queue.get("total_leads") or 0),
+            "out_of_play": [(label, queue["out_of_play"][label]) for label in NOT_IN_PLAY_LABELS if (queue.get("out_of_play") or {}).get(label)], "stages": stages}
+
+
+def today_section(rows: List[Dict], details: Dict[str, Dict], now_utc: datetime) -> Dict:
+    """The Today part of Home: one card per RUNNING campaign (built from the settings and leads already loaded, so it reads nothing extra) and the totals above them. A running
+    campaign whose data could not be read or whose queue could not be built is reported in `errors` rather than hiding the rest."""
+    cards, errors = [], []
     for row in rows:
         if row.get("status") != STATUS_RUNNING:
             continue
         data = (details or {}).get(row["name"]) or {}
-        cfg = data.get("cfg") or {}
-        sent = sent_today(data.get("send_log") or [], (cfg.get("schedule") or {}).get("timezone"), now_utc)
-        limit = daily_limit(cfg)
-        line = next_send_line(cfg, now_utc, cron_minute, within_window) if cfg else None
-        result.append({"name": row["name"], "sent_today": sent, "limit": limit, "percent": min(100, round(sent / limit * 100)) if limit else 0,
-                       "next_send": line.split(": ", 1)[1] if line and ": " in line else (line or "")})
-    return result
+        if not data.get("cfg"):
+            errors.append((row["name"], "its data could not be read"))
+            continue
+        try:
+            card = today_card(build_campaign_queue(data["cfg"], data.get("leads") or [], now_utc))
+            card["name"] = row["name"]                    # the name in the campaign list, whatever the settings happen to carry
+            cards.append(card)
+        except Exception as exc:  # noqa: BLE001 - one campaign's problem must not hide the others
+            errors.append((row["name"], str(exc)[:120]))
+    limits = [c["limit"] for c in cards if c["limit"]]
+    tiles = {"running": len(cards), "due": sum(c["due"] for c in cards), "waiting": sum(c["waiting"] for c in cards), "sent_today": sum(c["sent_today"] for c in cards),
+             "limit_total": sum(limits) if limits else None, "open": sum(1 for c in cards if c["window_kind"] == "open")}
+    return {"tiles": tiles, "cards": cards, "errors": errors, "not_running": [(r["name"], r.get("status")) for r in rows if r.get("status") != STATUS_RUNNING]}
 
 
 def attention_items(unread_counts: Dict[str, int], accounts: Dict, rows: List[Dict]) -> List[Dict]:
@@ -124,13 +165,9 @@ def attention_items(unread_counts: Dict[str, int], accounts: Dict, rows: List[Di
     return items
 
 
-def home_summary(rows: List[Dict], details: Dict[str, Dict], read_keys: Set[str], directory: Dict[str, str], health: Dict[str, Dict], now_utc: datetime,
-                 cron_minute: Optional[int], within_window: Callable) -> Dict:
+def home_summary(rows: List[Dict], details: Dict[str, Dict], read_keys: Set[str], directory: Dict[str, str], health: Dict[str, Dict], now_utc: datetime) -> Dict:
     """Everything the live part of Home shows, in one dict."""
     unread = unread_by_campaign(details, read_keys)
     accounts = account_overview(directory, health)
-    running = running_rows(rows, details, now_utc, cron_minute, within_window)
-    sent_all = sum(sent_today((d.get("send_log") or []), ((d.get("cfg") or {}).get("schedule") or {}).get("timezone"), now_utc) for d in (details or {}).values())
-    limits = [item["limit"] for item in running if item["limit"]]
-    return {"campaigns": len(rows), "running": len(running), "running_rows": running, "sent_today": sent_all, "limit_total": sum(limits) if limits else None,
-            "unread_total": sum(unread.values()), "unread_by_campaign": unread, "accounts": accounts, "attention": attention_items(unread, accounts, rows)}
+    return {"campaigns": len(rows), "unread_total": sum(unread.values()), "unread_by_campaign": unread, "accounts": accounts, "attention": attention_items(unread, accounts, rows),
+            "today": today_section(rows, details, now_utc)}
