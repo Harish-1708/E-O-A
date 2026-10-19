@@ -13,6 +13,7 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 import inbox_html
+import responses_page_html
 import inbox_view
 from github_client import GitHubActionsError
 from test_pages_smoke import (
@@ -347,8 +348,10 @@ def test_the_list_shows_the_date_an_email_was_really_sent_not_the_day_it_was_log
 
 def test_the_stylesheet_is_put_on_the_page_exactly_once():
     with hub() as (at, _):
-        styles = [m.value for m in at.markdown if m.value.lstrip().startswith("<style>")]
+        styles = [m.value for m in at.markdown if m.value.lstrip().startswith("<style>") and ".ux-row" in m.value]                  # the inbox's own stylesheet
         assert len(styles) == 1 and styles[0] == f"<style>{inbox_html.inbox_css(inbox_html.SIZES[inbox_html.DEFAULT_SIZE])}</style>"
+        page_styles = [m.value for m in at.markdown if m.value.lstrip().startswith("<style>") and ".rp-title" in m.value]            # and the Responses page's header stylesheet, also once
+        assert page_styles == [f"<style>{responses_page_html.RESPONSES_PAGE_CSS}</style>"]
 
 
 def test_the_panes_are_given_the_container_names_the_stylesheet_looks_for():
@@ -564,7 +567,7 @@ def test_the_rail_counts_include_the_keyword_readings():
 # ---- text size and fitting the screen
 
 def _font_sizes(at):
-    css = next(m.value for m in at.markdown if m.value.lstrip().startswith("<style>"))
+    css = next(m.value for m in at.markdown if m.value.lstrip().startswith("<style>") and ".ux-row" in m.value)          # the INBOX's stylesheet (the page has others)
     return [float(x) for x in __import__("re").findall(r"font-size: ([\d.]+)px", css)]
 
 
@@ -1679,3 +1682,106 @@ def test_the_campaign_tab_has_the_same_composer_with_the_same_from_choice():
         _compose(at, A1, namespace=key)
         assert next(sb for sb in at.selectbox if sb.key == f"{key}_from_{A1}").value == "sales1"
         assert _re.findall(r'ux-flabel">(.*?)<', _markup(at)) == ["From", "To", "Cc", "Bcc", "Subject"]
+
+
+# ================================================================ the redesigned standalone Responses page: header, Replies menu, one filter row
+
+def _page_text(at):
+    return " ".join(str(m.value) for m in at.markdown)
+
+
+def test_the_page_has_its_own_header_with_refresh_and_a_replies_menu_instead_of_a_plain_title():
+    with hub() as (at, _):
+        assert '<h1>Responses</h1>' in _page_text(at) and not at.title
+        refresh = next(b for b in at.button if b.key == "responses_refresh")
+        assert refresh.label == "🔄 Refresh" and [p.proto.popover.label for p in at.get("popover")][0] == "⋯ Replies"          # the page's own menu comes first (the inbox has its own after it)
+
+
+def test_check_replies_lives_in_the_replies_menu_and_nothing_sits_under_the_inbox_any_more():
+    with hub() as (at, _):
+        keys = [b.key for b in at.button]
+        assert "responses_check_replies" in keys and next(b for b in at.button if b.key == "responses_check_replies").label == "📥 Check replies now"
+        assert not any("Check Replies Now (all campaigns)" in b.label for b in at.button)                  # the old button under the inbox is gone
+        first_inbox_button = next(i for i, key in enumerate(keys) if str(key).startswith("ux_"))
+        assert keys.index("responses_check_replies") < first_inbox_button                                  # and the menu comes before the inbox in the page
+
+
+def test_checking_replies_says_what_it_did_right_under_the_header():
+    with hub() as (at, captured):
+        next(b for b in at.button if b.key == "responses_check_replies").click()
+        at.run(timeout=25)
+        assert any("Triggered a check for 2 campaign(s)." in s.value for s in at.success)
+        assert sorted(inputs.get("campaign") for workflow, inputs in captured["dispatches"] if workflow == "check_replies.yml") == sorted([FIXTURE_CAMPAIGN, OTHER])
+
+
+def test_if_a_check_cannot_be_triggered_the_menu_says_for_which_campaign():
+    from github_client import GitHubActionsError
+    with hub(dispatch_error=GitHubActionsError("nope")) as (at, _):
+        next(b for b in at.button if b.key == "responses_check_replies").click()
+        at.run(timeout=25)
+        assert any("Triggered a check for 0 campaign(s)." in s.value for s in at.success) and any("Failed to trigger for:" in w.value for w in at.warning)
+
+
+def test_with_nothing_to_save_the_menu_says_the_read_status_is_up_to_date_and_has_no_sync_button():
+    with hub() as (at, _):
+        assert not any(b.key == "responses_sync_read" for b in at.button) and any("up to date" in c.value for c in at.caption)
+
+
+def test_with_unread_changes_waiting_the_menu_offers_to_sync_them_with_the_count():
+    with hub() as (at, captured):
+        at.session_state["pending_sync_keys"] = {f"{FIXTURE_CAMPAIGN}:rA1", f"{FIXTURE_CAMPAIGN}:rA2"}
+        at.run(timeout=25)
+        sync = next(b for b in at.button if b.key == "responses_sync_read")
+        assert sync.label == "🔄 Sync read status (2 pending)"
+        sync.click()
+        at.run(timeout=25)
+        assert any("Synced read status for 1 campaign(s)." in s.value for s in at.success) and at.session_state["pending_sync_keys"] == set()
+
+
+def test_search_campaign_status_and_the_all_unread_switch_share_one_row_with_their_names_in_the_boxes():
+    with hub() as (at, _):
+        assert at.selectbox(key="responses_campaign_filter").options[0] == "Campaign: All" and at.selectbox(key="responses_status_filter").options[0] == "Status: All"
+        assert at.radio(key="responses_inbox_chip").options[0] == "All" and _re.fullmatch(r"Unread · \d+", at.radio(key="responses_inbox_chip").options[1])
+        assert at.text_input(key="responses_search_query").placeholder.startswith("🔍 Search responses")
+
+
+def test_the_filters_still_filter_when_chosen_by_value():
+    with hub() as (at, _):
+        at.selectbox(key="responses_campaign_filter").set_value(OTHER)
+        at.run(timeout=25)
+        assert list(at.exception) == [] and _row_keys(at) == [B5]
+        at.selectbox(key="responses_campaign_filter").set_value(FIXTURE_CAMPAIGN)
+        at.run(timeout=25)
+        assert set(_row_keys(at)) == {A1, A5}
+
+
+def test_refresh_reads_the_replies_again_and_an_ordinary_rerun_does_not():
+    import sheets_readonly
+    real = sheets_readonly.ReadOnlySheetsConnector.get_all_responses
+    calls = []
+
+    def counting(self, tab):
+        calls.append(tab)
+        return real(self, tab)
+
+    with patch.object(sheets_readonly.ReadOnlySheetsConnector, "get_all_responses", counting):
+        with hub() as (at, _):
+            first = len(calls)
+            assert first > 0
+            at.run(timeout=25)
+            assert len(calls) == first                                                           # a plain rerun uses what is already loaded
+            next(b for b in at.button if b.key == "responses_refresh").click()
+            at.run(timeout=25)
+            assert len(calls) > first                                                            # Refresh really goes back to the Sheet
+
+
+def test_a_sync_that_fails_says_for_which_campaign_and_keeps_the_changes_waiting():
+    from github_client import GitHubActionsError
+    with hub(dispatch_error=GitHubActionsError("nope")) as (at, _):
+        waiting = {f"{FIXTURE_CAMPAIGN}:rA1", f"{FIXTURE_CAMPAIGN}:rA2"}
+        at.session_state["pending_sync_keys"] = set(waiting)
+        at.run(timeout=25)
+        next(b for b in at.button if b.key == "responses_sync_read").click()
+        at.run(timeout=25)
+        assert any(f"Failed to sync: {FIXTURE_CAMPAIGN}" in w.value for w in at.warning)
+        assert at.session_state["pending_sync_keys"] == waiting                                  # nothing was lost, so it can be tried again
