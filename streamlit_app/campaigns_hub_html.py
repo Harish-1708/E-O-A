@@ -121,13 +121,15 @@ HUB_CSS = """
 /* ---- the Campaigns list */
 .hb-title { font-size: 32px; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; color: #111827; }
 .hb-subtitle { color: #6b7280; font-size: 14px; margin-top: 6px; }
-.hb-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 18px 0 16px; }
-.hb-stat { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px 18px; }
+.hb-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 20px 0 16px; }
+.hb-stat { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px 20px; }
 .hb-stat-l { font-size: 12.5px; color: #6b7280; font-weight: 600; }
 .hb-stat-v { font-size: 27px; font-weight: 800; letter-spacing: -.02em; margin-top: 4px; color: #111827; }
 .hb-stat-s { font-size: 12.5px; color: #6b7280; margin-top: 3px; }
 
-[class*="st-key-hub_card_"] { background: #fff; border: 1px solid #e5e7eb; border-left: 4px solid #d1d5db; border-radius: 14px; padding: 16px 18px 20px; margin-bottom: 4px; gap: 0 !important; }
+[class*="st-key-hub_card_"] { background: #fff; border: 1px solid #e5e7eb; border-left: 4px solid #d1d5db; border-radius: 14px; padding: 22px 24px; margin-bottom: 12px; min-height: 96px; gap: 0 !important; justify-content: center; }
+/* Streamlit puts a negative bottom margin under every Markdown block (to cancel a trailing paragraph); inside a card it pulled the content down toward the bottom edge */
+[class*="st-key-hub_card_"] [data-testid="stMarkdownContainer"], [class*="st-key-hub_card_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
 [class*="st-key-hub_card_running"] { border-left-color: #22c55e; }
 [class*="st-key-hub_card_attention"] { border-left-color: #f59e0b; }
 [class*="st-key-hub_card_draft"] { border-left: 4px dashed #93c5fd; }
