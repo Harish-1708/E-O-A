@@ -11,9 +11,10 @@ from preview_logic import list_campaigns, get_campaign_cfg  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
 from campaign_status_logic import status_label, STATUS_RUNNING, STATUS_PAUSED, STATUS_DRAFT, STATUS_COMPLETED  # noqa: E402
 from performance_logic import (  # noqa: E402
-    build_all_performance, combine_performance, build_best_performers, at_a_glance_rows, AT_A_GLANCE_COLUMNS,
-    format_rate,
+    build_all_performance, combine_performance, build_best_performers, format_rate,
+    GLANCE_SORT_OPTIONS, glance_rows, glance_totals, glance_csv,
 )
+from performance_html import glance_header_html, glance_table_html  # noqa: E402
 from performance_view import render_performance  # noqa: E402
 from campaign_html import CAMPAIGN_SKIN_CSS  # noqa: E402
 
@@ -111,10 +112,14 @@ else:
             m4.metric("Reply rate", format_rate(perf["reply_rate"]))
             m5.metric("Positive", perf["positive"])
 
-    st.subheader("All campaigns at a glance")
-    glance = at_a_glance_rows(perfs, status_label)
-    st.dataframe({col: [row[i] for row in glance] for i, col in enumerate(AT_A_GLANCE_COLUMNS)},
-                 width="stretch", hide_index=True)
+    # "All campaigns at a glance": a comparison table with its own header, a Sort choice and a CSV download (which keeps every column the old table had)
+    with st.container(key="pg_glance"):
+        head_column, sort_column, csv_column = st.columns([5, 1.7, 1], vertical_alignment="center")
+        sort_choice = sort_column.selectbox("Sort", GLANCE_SORT_OPTIONS, key="performance_glance_sort", label_visibility="collapsed", format_func=lambda v: f"Sort: {v}")
+        head_column.markdown(glance_header_html(sort_choice), unsafe_allow_html=True)
+        csv_column.download_button("⬇ CSV", data=glance_csv(perfs, status_label, sort_choice), file_name="all_campaigns_at_a_glance.csv", mime="text/csv",
+                                   key="performance_glance_csv", width="stretch")
+        st.markdown(glance_table_html(glance_rows(perfs, status_label, sort_choice), glance_totals(combined, len(perfs))), unsafe_allow_html=True)
 
 if errors:
     with st.expander(f"{len(errors)} campaign(s) not shown yet (no runs made for them)"):
