@@ -179,7 +179,7 @@ def test_the_filter_offers_the_same_options_as_before_each_with_its_count():
     leads = [lead(1, Status="Stopped - Replied"), lead(2, Status="Stopped - Bounced"), lead(3, Status="Removed"), lead(4, IntroSentAt="2026-10-01 10:00:00", Status="Intro Sent"), lead(5, Approval="")]
     with data_tab(leads) as (at, _):
         options = at.radio(key="data_filter").options
-        assert options == ["All · 5", "Pending Approval · 1", "In Progress · 1", "Replied · 1", "Bounced · 1", "Removed · 1"]
+        assert options == ["All · 5", "In Progress · 1", "Replied · 1", "Bounced · 1", "Removed · 1"]
 
 
 def test_the_filter_counts_ignore_the_search_but_follow_the_real_filter_rules():
