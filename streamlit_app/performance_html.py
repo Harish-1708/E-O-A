@@ -223,3 +223,77 @@ def area_chart_svg(series: Sequence[Dict]) -> str:
         f'<svg class="pf-chart" viewBox="0 0 {CHART_WIDTH} {CHART_HEIGHT}" role="img" aria-label="{esc(summary)}">'
         f'<defs><linearGradient id="pf-sent-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{SENT_COLOUR}" stop-opacity=".22"/>'
         f'<stop offset="1" stop-color="{SENT_COLOUR}" stop-opacity="0"/></linearGradient></defs>{grid}{labels}{shapes}</svg>')
+
+
+# ---------------------------------------------------------------- the "All campaigns at a glance" table
+
+GLANCE_CHIP = {"running": "live", "attention": "warn", "draft": "draft", "paused": "paused", "completed": "done"}
+
+
+def _pct(numerator, denominator) -> int:
+    try:
+        return max(0, min(100, round(float(numerator) / float(denominator) * 100))) if denominator else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bar(percent: int, kind: str = "") -> str:
+    return f'<div class="pg-bar"><i class="{kind}" style="width:{max(0, min(100, int(percent)))}%"></i></div>'
+
+
+def _bounce_chip(count: int, label: str, kind: str) -> str:
+    return f'<span class="pg-bc pg-bc-{"zero" if count == 0 else kind}">{int(count)} {label}</span>'
+
+
+def glance_header_html(sort: str) -> str:
+    return f'<div class="pg-gh"><div class="pg-gt">All campaigns at a glance</div><div class="pg-gs">Every campaign side by side. Sorted by {esc(str(sort).lower())}.</div></div>'
+
+
+def glance_table_html(rows: Sequence[dict], totals: dict) -> str:
+    """The comparison table: one row per campaign, then a total row. Numbers come with a small bar or a note where a comparison helps; zeros are quiet, and bounces are coloured
+    only when there are some."""
+    def row_html(r):
+        chip = f'<span class="pg-chip pg-chip-{GLANCE_CHIP.get(r["status"], "done")}">{esc(r["status_label"])}</span>'
+        pending = f'<span class="pg-pend">{r["pending"]} pending</span>' if r["pending"] else '<span class="pg-quiet">none pending</span>'
+        best = '<span class="pg-best">★ best rate</span>' if r["best"] else ""
+        rate = r["reply_rate"]
+        return (f'<tr><td><div class="pg-nm">{esc(r["name"])}</div>{chip}</td>'
+                f'<td><div class="pg-num">{r["contacted"]} <span class="pg-of">of {r["leads"]}</span></div>{_bar(_pct(r["contacted"], r["leads"]))}<div class="pg-sub">{pending}</div></td>'
+                f'<td><div class="pg-num">{r["sent"]}</div><div class="pg-sub">{r["delivered"]} delivered (est.)</div></td>'
+                f'<td><div class="pg-num">{r["replies"]}{best}</div><div class="pg-sub">replied</div></td>'
+                f'<td><div class="pg-num pg-rate">{esc(r["reply_rate_text"])}</div>{_bar(round(rate * 100) if rate is not None else 0)}</td>'
+                f'<td>{_bounce_chip(r["hard"], "hard", "bad")}{_bounce_chip(r["soft"], "soft", "warn")}</td>'
+                f'<td><div class="pg-num">{esc(r["completion_text"])}</div>{_bar(round((r["completion"] or 0) * 100), "g")}<div class="pg-sub">{r["completed"]} completed the sequence</div></td></tr>')
+    t = totals
+    total_row = (f'<tr class="pg-total"><td>All {t["campaigns"]} campaign{"" if t["campaigns"] == 1 else "s"}</td><td>{t["contacted"]} <span class="pg-of">of {t["leads"]}</span></td><td>{t["sent"]}</td>'
+                 f'<td>{t["replies"]}</td><td class="pg-rate">{esc(t["reply_rate_text"])}</td><td>{_bounce_chip(t["hard"], "hard", "bad")}{_bounce_chip(t["soft"], "soft", "warn")}</td>'
+                 f'<td>{esc(t["completion_text"])}</td></tr>')
+    head = "".join(f"<th>{label}</th>" for label in ("Campaign", "Contacted", "Emails sent", "Replies", "Reply rate", "Bounces", "Sequence completion"))
+    return _one_line(f'<div class="pg-scroll"><table class="pg-table"><tr>{head}</tr>{"".join(row_html(r) for r in rows)}{total_row}</table></div>')
+
+
+GLANCE_CSS = """
+[class*="st-key-pg_glance"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 0 !important; gap: 0 !important; overflow: hidden; margin-top: 8px; }
+[class*="st-key-pg_glance"] [data-testid="stMarkdownContainer"], [class*="st-key-pg_glance"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+[class*="st-key-pg_glance"] [data-testid="stHorizontalBlock"] { align-items: center; gap: .75rem; padding: 16px 22px 14px; }
+.pg-gt { font-size: 17px; font-weight: 800; color: #111827; } .pg-gs { font-size: 13px; color: #6b7280; margin-top: 2px; }
+.pg-scroll { overflow-x: auto; }
+.pg-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.pg-table th, .pg-table td { border-left: 0 !important; border-right: 0 !important; }   /* Streamlit draws lines between table cells; this table has only horizontal ones */
+.pg-table th { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: #6b7280; font-weight: 700; text-align: left; padding: 10px 14px; background: #fafbfc; border-top: 1px solid #eef0f3; border-bottom: 1px solid #eef0f3; white-space: nowrap; }
+.pg-table td { padding: 15px 14px; border-bottom: 1px solid #f1f2f4; vertical-align: middle; color: #111827; }
+.pg-table tr.pg-total td { background: #f8f9fb; font-weight: 700; border-bottom: 0; }
+.pg-nm { font-weight: 700; font-size: 14.5px; margin-bottom: 6px; word-break: break-word; }
+.pg-num { font-size: 16px; font-weight: 800; line-height: 1.2; } .pg-rate { color: #1d4ed8; } .pg-of { font-size: 13px; font-weight: 600; color: #6b7280; }
+.pg-sub { font-size: 12px; color: #6b7280; margin-top: 3px; } .pg-quiet { color: #9ca3af; font-weight: 600; }
+.pg-bar { height: 7px; background: #eef0f3; border-radius: 99px; overflow: hidden; margin-top: 7px; min-width: 110px; }
+.pg-bar i { display: block; height: 100%; border-radius: 99px; background: #2563eb; } .pg-bar i.g { background: #22c55e; }
+.pg-chip { display: inline-flex; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 10px; border: 1px solid #d1d5db; background: #fff; color: #374151; white-space: nowrap; }
+.pg-chip-live { color: #15803d; border-color: #bbe3c9; background: #f0fbf4; } .pg-chip-warn { color: #b45309; border-color: #f3d9a8; background: #fffaf0; }
+.pg-chip-draft { color: #1d4ed8; border-color: #c7d7fb; background: #f3f7ff; } .pg-chip-paused { color: #6b7280; background: #f9fafb; }
+.pg-best { display: inline-flex; align-items: center; border-radius: 999px; background: #fff7d6; color: #92400e; font-size: 11px; font-weight: 800; padding: 1px 8px; margin-left: 8px; }
+.pg-pend { display: inline-flex; border-radius: 999px; background: #eef2ff; color: #1d4ed8; font-size: 12px; font-weight: 700; padding: 2px 9px; }
+.pg-bc { display: inline-flex; border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 700; margin-right: 6px; white-space: nowrap; }
+.pg-bc-zero { background: #f3f4f6; color: #9ca3af; } .pg-bc-warn { background: #fff4e5; color: #b45309; } .pg-bc-bad { background: #fdecec; color: #b91c1c; }
+"""
+PERFORMANCE_CSS = PERFORMANCE_CSS + GLANCE_CSS
