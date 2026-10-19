@@ -626,3 +626,97 @@ def test_the_trend_never_appears_in_the_all_campaigns_total():
     log = _rows(6, "2026-03-16", 1) + _rows(6, "2026-03-09", 100)
     one = pl.build_campaign_performance(cfg(), [lead(1)], [], log, [], today=TODAY)
     assert one["reply_trend"] is not None and pl.combine_performance([one, one])["reply_trend"] is None
+
+
+# ================================================================ the "All campaigns at a glance" table: order, best rate, totals, CSV
+
+def _glance_perf(name, contacted, sent, replies, leads=None, hard=0, soft=0, completed=0, status="completed"):
+    leads = contacted if leads is None else leads
+    return {"campaign": name, "status": status, "total_leads": leads, "contacted": contacted, "pending": max(leads - contacted, 0), "sent": sent, "delivered_est": max(sent - hard, 0),
+            "bounced_hard": hard, "bounced_soft": soft, "replies": replies, "reply_rate": pl.rate(replies, contacted), "completed": completed,
+            "sequence_completion": pl.rate(completed, contacted)}
+
+
+GLANCE = [_glance_perf("Kelson_17SEP", 77, 262, 51, completed=8, status="running"), _glance_perf("Kelson_03SEP", 39, 235, 20, soft=2, completed=15), _glance_perf("Kelson_Old", 10, 28, 3, completed=7)]
+
+
+def test_the_table_is_ordered_best_reply_rate_first_by_default_and_by_the_chosen_measure_otherwise():
+    names = lambda sort: [r["name"] for r in pl.glance_rows(GLANCE, sort=sort)]                    # noqa: E731
+    assert names("Reply rate") == ["Kelson_17SEP", "Kelson_03SEP", "Kelson_Old"]                    # 66.2%, 51.3%, 30.0%
+    assert names("Replies") == ["Kelson_17SEP", "Kelson_03SEP", "Kelson_Old"] and names("Emails sent") == ["Kelson_17SEP", "Kelson_03SEP", "Kelson_Old"]
+    assert names("Name") == ["Kelson_03SEP", "Kelson_17SEP", "Kelson_Old"]
+    assert names("nonsense") == names("Reply rate")                                                  # an unknown choice falls back to the reply rate
+
+
+def test_each_sort_really_uses_its_own_measure():
+    perfs = [_glance_perf("A", 10, 500, 1), _glance_perf("B", 10, 20, 9), _glance_perf("C", 100, 100, 30)]
+    order = lambda sort: [p["campaign"] for p in pl.sort_perfs(perfs, sort)]                       # noqa: E731
+    assert order("Reply rate") == ["B", "C", "A"] and order("Replies") == ["C", "B", "A"] and order("Emails sent") == ["A", "C", "B"] and order("Name") == ["A", "B", "C"]
+
+
+def test_a_campaign_with_no_reply_rate_yet_goes_last_and_ties_are_broken_by_name():
+    perfs = [_glance_perf("Zed", 5, 5, 1), {**_glance_perf("Empty", 0, 0, 0), "reply_rate": None}, _glance_perf("Amy", 5, 5, 1)]
+    assert [p["campaign"] for p in pl.sort_perfs(perfs, "Reply rate")] == ["Amy", "Zed", "Empty"]
+
+
+def test_the_best_reply_rate_is_marked_only_when_one_campaign_is_clearly_ahead():
+    assert [r["best"] for r in pl.glance_rows(GLANCE)] == [True, False, False]
+    assert not any(r["best"] for r in pl.glance_rows([GLANCE[0]]))                                  # a star on the only campaign would mean nothing
+    tie = [_glance_perf("A", 10, 10, 5), _glance_perf("B", 20, 20, 10)]
+    assert not any(r["best"] for r in pl.glance_rows(tie))                                         # 50% each: no winner
+    assert [r["best"] for r in pl.glance_rows([GLANCE[0], {**_glance_perf("New", 0, 0, 0), "reply_rate": None}])] == [False, False]   # only one campaign has a rate
+
+
+def test_a_row_carries_every_figure_the_table_shows_and_chips_use_the_campaign_lists_words():
+    row = pl.glance_rows(GLANCE)[0]
+    assert (row["leads"], row["contacted"], row["pending"], row["sent"], row["delivered"], row["hard"], row["soft"], row["replies"], row["reply_rate_text"], row["completion_text"], row["completed"]) == \
+        (77, 77, 0, 262, 262, 0, 0, 51, "66.2%", "10.4%", 8)
+    assert [r["status_label"] for r in pl.glance_rows(GLANCE)][:2] == ["● Running", "✓ Completed"]
+    assert pl.glance_rows([{**GLANCE[0], "status": "mystery"}], status_labels=lambda s: s.upper())[0]["status_label"] == "MYSTERY"
+
+
+def _real_campaign(name, contacted, replied, uncontacted=0, sends_each=1):
+    leads = [lead(i, ReplyStatus="Replied" if i <= replied else "", **{sent_field(0): "2026-09-01 10:00:00"}) for i in range(1, contacted + 1)]
+    leads += [lead(contacted + j, **{}) for j in range(1, uncontacted + 1)]
+    sends = [send(i, "intro", "A", "2026-09-01 10:00:00") for i in range(1, contacted + 1) for _ in range(sends_each)]
+    campaign = perf(leads, [], sends)
+    campaign["campaign"] = name
+    return campaign
+
+
+def test_the_total_row_agrees_with_the_rows_the_same_way_the_campaigns_total_does():
+    """Real campaigns, not stand-in numbers: the total adds up the rows with the same rules, so replied-of-contacted can never disagree with the cards."""
+    perfs = [_real_campaign("A", 10, 6, sends_each=3), _real_campaign("B", 20, 4), _real_campaign("C", 3, 0, uncontacted=2)]
+    totals = pl.glance_totals(pl.combine_performance(perfs), len(perfs))
+    rows = pl.glance_rows(perfs)
+    assert totals["campaigns"] == 3 and totals["leads"] == sum(r["leads"] for r in rows) == 35 and totals["contacted"] == sum(r["contacted"] for r in rows) == 33
+    assert totals["sent"] == sum(r["sent"] for r in rows) == 53 and totals["replies"] == sum(r["replies"] for r in rows) == 10 and totals["pending"] == 2
+    assert totals["reply_rate_text"] == "30.3%"                                                      # 10 replied of 33 contacted, NOT 10 of 53 emails (18.9%)
+    assert pl.glance_totals(pl.combine_performance([perfs[0]]), 1)["reply_rate_text"] == pl.glance_rows([perfs[0]])[0]["reply_rate_text"] == "60.0%"       # one campaign: total == its own
+
+
+
+def test_the_csv_keeps_every_column_of_the_old_table_in_the_order_shown():
+    import csv
+    import io
+    rows = list(csv.reader(io.StringIO(pl.glance_csv(GLANCE, lambda s: s.title(), "Name").decode("utf-8"))))
+    assert rows[0] == pl.AT_A_GLANCE_COLUMNS and [r[0] for r in rows[1:]] == ["Kelson_03SEP", "Kelson_17SEP", "Kelson_Old"]          # sorted like the screen
+    assert dict(zip(rows[0], rows[2]))["Replies"] == "51" and dict(zip(rows[0], rows[2]))["Reply rate"] == "66.2%" and dict(zip(rows[0], rows[2]))["Status"] == "Running"
+
+
+def test_no_campaigns_gives_no_rows_and_a_csv_with_only_the_headings():
+    import csv
+    import io
+    assert pl.glance_rows([]) == [] and list(csv.reader(io.StringIO(pl.glance_csv([]).decode("utf-8")))) == [pl.AT_A_GLANCE_COLUMNS]
+
+
+def test_a_campaign_with_a_real_zero_percent_rate_comes_before_one_with_no_rate_at_all():
+    """0% is a result; 'no rate yet' is not. They must not tie (the second one would otherwise sort ahead by its name)."""
+    perfs = [{**_glance_perf("A_Nothing_yet", 0, 0, 0), "reply_rate": None}, _glance_perf("Z_Zero_percent", 5, 5, 0)]
+    assert [p["campaign"] for p in pl.sort_perfs(perfs, "Reply rate")] == ["Z_Zero_percent", "A_Nothing_yet"]
+    assert [r["name"] for r in pl.glance_rows(perfs)] == ["Z_Zero_percent", "A_Nothing_yet"]
+
+
+def test_delivered_is_emails_sent_less_hard_bounces_and_is_not_the_same_figure_as_sent():
+    row = pl.glance_rows([_glance_perf("Bouncy", 10, 20, 2, hard=3, soft=1)])[0]
+    assert (row["sent"], row["delivered"], row["hard"], row["soft"]) == (20, 17, 3, 1)
