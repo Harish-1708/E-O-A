@@ -105,6 +105,8 @@ import email_accounts_view_logic as EV  # noqa: E402
 def _open_dialog(kind, name=None) -> None:
     if kind == "add":
         _reset_add_form()                                   # a fresh, empty form every time (and never the result of the last add)
+    if kind == "bulk":
+        _reset_bulk_form()
     st.session_state["ea_dialog"] = {"kind": kind, "name": name}
 
 
@@ -245,90 +247,115 @@ def _add_account_dialog(current_mapping):
                 st.error(f"Failed to add account: {exc}")
 
 
-@st.dialog("Bulk add accounts (CSV)", width="large")
+def _reset_bulk_form() -> None:
+    """Start the Bulk add form empty again: forget the file, the confirmation and the result of the last run."""
+    st.session_state.pop("ea_bulk_result", None)
+    for key in ("bulk_accounts_csv_upload", "confirm_bulk_add_accounts"):
+        st.session_state.pop(key, None)
+
+
+def _bulk_add_more() -> None:
+    _reset_bulk_form()
+
+
+def _bulk_done() -> None:
+    _reset_bulk_form()
+    st.session_state["ea_dialog"] = None
+
+
+@st.dialog("Bulk add accounts", width="large")
 def _bulk_add_dialog(current_mapping):
-    st.markdown(EH.dialog_note_html(
-        "Add many accounts at once, from a plain Gmail list to a full custom-provider setup. Only Name, Email and Password are required; every other column is optional "
-        "and only needed for a non-Gmail provider (Hostinger, etc.)."), unsafe_allow_html=True)
-    with st.expander("Show the column layout"):
-        st.code(
-            "Name,Email,Password,IMAP Password,SMTP Host,SMTP Port,SMTP Username,IMAP Host,IMAP Port,IMAP Username\n"
-            "sales1,sales1@gmail.com,app-password-here,,,,,,,\n"
-            "hostinger1,sales@example.com,smtp-password-here,imap-password-if-different,"
-            "smtp.hostinger.com,465,,imap.hostinger.com,993,",
-            language="csv",
-        )
-    bulk_file = st.file_uploader("Upload CSV", type=["csv"], key="bulk_accounts_csv_upload")
-    if bulk_file is not None:
-        bulk_columns, bulk_rows = parse_csv_bytes(bulk_file.getvalue())
-        parsed_accounts, parse_errors = parse_bulk_accounts_csv(bulk_columns, bulk_rows)
-        for e in parse_errors:
-            st.warning(e)
+    result = st.session_state.get("ea_bulk_result")
+    if result:
+        st.markdown(EH.bulk_result_html(result["added"], result["skipped"]), unsafe_allow_html=True)
+        _spacer, more_column, done_column = st.columns([1, 1.3, 1])
+        with more_column:
+            st.button("＋ Add more", key="ea_bulk_more", width="stretch", on_click=_bulk_add_more)
+        with done_column:
+            st.button("Done", type="primary", key="ea_bulk_done", width="stretch", on_click=_bulk_done)
+        return
 
-        if parsed_accounts:
-            st.success(f"{len(parsed_accounts)} account(s) ready to add.")
-            st.dataframe(
-                {
-                    "Name": [r["name"] for r in parsed_accounts],
-                    "Email": [r["address"] for r in parsed_accounts],
-                    "Custom Provider": ["Yes" if r["smtp_host"] else "No" for r in parsed_accounts],
-                },
-                hide_index=True, width="stretch",
-            )
-            st.caption(f"This will make {len(parsed_accounts)} separate API call(s) to GitHub (one per "
-                       "account's secret) — a large upload may take a little while.")
-            confirm_bulk = st.checkbox(f"Add all {len(parsed_accounts)} account(s) now", key="confirm_bulk_add_accounts")
-            _spacer, cancel_column, go_column = st.columns([2, 1, 1.5])
-            with cancel_column:
-                cancelled = st.button("Cancel", key="cancel_bulk_accounts", width="stretch")
-            with go_column:
-                go_clicked = st.button("Add all accounts", type="primary", disabled=not confirm_bulk, key="bulk_add_accounts_button", width="stretch")
-            if cancelled:
-                _close_dialog()
-                st.rerun()
-            if go_clicked:
-                working_mapping = dict(current_mapping)
-                added_names = []
-                skipped = []
-                client = _get_github_client()
-                for row in parsed_accounts:
-                    try:
-                        working_mapping = add_account_to_mapping(working_mapping, row["name"], row["address"])
-                        slot = working_mapping[row["name"]]["slot"]
-                        secret_payload = build_account_secret_payload(
-                            row["name"], row["address"], row["password"],
-                            imap_password=row["imap_password"], smtp_host=row["smtp_host"],
-                            smtp_port=row["smtp_port"], smtp_username=row["smtp_username"],
-                            imap_host=row["imap_host"], imap_port=row["imap_port"],
-                            imap_username=row["imap_username"],
-                        )
-                        client.set_secret(f"EMAIL_ACCOUNT_SLOT_{slot}", secret_payload)
-                        added_names.append(row["name"])
-                    except (ValueError, GitHubActionsError) as exc:
-                        skipped.append(f"{row['name']}: {exc}")
+    st.markdown(EH.dialog_header_html("Add many mailboxes at once from a CSV file."), unsafe_allow_html=True)
+    st.markdown(EH.bulk_step_html(1, "Your file needs these columns"), unsafe_allow_html=True)
+    st.markdown(EH.column_chips_html(EV.BULK_REQUIRED_COLUMNS, EV.BULK_OPTIONAL_COLUMNS), unsafe_allow_html=True)
+    st.download_button("⬇ Download template", data=EV.bulk_template_csv(), file_name="email_accounts_template.csv", mime="text/csv", key="bulk_accounts_template")
+    with st.expander("See an example"):
+        st.code(EV.bulk_template_csv().decode("utf-8"), language="csv")
 
-                if added_names:
-                    # One mapping-file commit at the end, not one per account — the mapping is a
-                    # single small file; committing it 100 times for a 100-row CSV would be pure waste.
-                    client.create_file(
-                        SLOT_MAPPING_PATH, serialize_slot_mapping(working_mapping),
-                        message=f"Bulk-add {len(added_names)} email account(s) "
-                                f"(via Streamlit, by {current_user()})",
-                    )
-                    try:
-                        client.dispatch_workflow(WORKFLOW_CHECK_ACCOUNT_HEALTH, {})
-                    except GitHubActionsError:
-                        pass
-                    st.success(f"Added {len(added_names)} account(s): {', '.join(added_names)}. May take a "
-                               "minute to reflect here while the app redeploys.")
-                if skipped:
-                    st.warning(f"{len(skipped)} account(s) skipped:")
-                    for s in skipped:
-                        st.caption(f"- {s}")
-    else:
+    st.markdown(EH.bulk_step_html(2, "Upload it"), unsafe_allow_html=True)
+    bulk_file = st.file_uploader("Upload CSV", type=["csv"], key="bulk_accounts_csv_upload", label_visibility="collapsed")
+    if bulk_file is None:
         if st.button("Cancel", key="cancel_bulk_accounts_empty"):
             _close_dialog()
             st.rerun()
+        return
+
+    bulk_columns, bulk_rows = parse_csv_bytes(bulk_file.getvalue())
+    parsed_accounts, parse_errors = parse_bulk_accounts_csv(bulk_columns, bulk_rows)
+    counts = EV.bulk_counts(parsed_accounts, parse_errors)
+    st.markdown(EH.bulk_step_html(3, "Review"), unsafe_allow_html=True)
+    st.markdown(EH.bulk_summary_html(counts["ready"], counts["skipped"]), unsafe_allow_html=True)
+    if parsed_accounts:
+        st.dataframe(EV.bulk_review_rows(parsed_accounts), hide_index=True, width="stretch")
+    st.markdown(EH.bulk_skipped_html(parse_errors), unsafe_allow_html=True)
+
+    if not parsed_accounts:
+        if st.button("Cancel", key="cancel_bulk_accounts", width="stretch"):
+            _close_dialog()
+            st.rerun()
+        return
+
+    total = len(parsed_accounts)
+    st.caption(f"Adding makes {total} separate call(s) to GitHub (one per account's secret), so a long list can take a little while. Skipped rows are not added.")
+    confirm_bulk = st.checkbox(f"These accounts are right. Add all {total} now.", key="confirm_bulk_add_accounts")
+    _spacer, cancel_column, go_column = st.columns([2, 1, 1.8])
+    with cancel_column:
+        cancelled = st.button("Cancel", key="cancel_bulk_accounts", width="stretch")
+    with go_column:
+        go_clicked = st.button(f"Add all {total} accounts", type="primary", disabled=not confirm_bulk, key="bulk_add_accounts_button", width="stretch")
+    if cancelled:
+        _close_dialog()
+        st.rerun()
+    if go_clicked:
+        working_mapping = dict(current_mapping)
+        added = []
+        skipped = list(parse_errors)
+        client = _get_github_client()
+        progress = st.progress(0.0, text="Starting…")
+        listing = st.empty()
+        names = [row["name"] for row in parsed_accounts]
+        for index, row in enumerate(parsed_accounts):
+            progress.progress(index / total, text=f"Adding account {index + 1} of {total} · {row['name']}")
+            listing.markdown(EH.bulk_progress_html([n for n, _ in added], names[index:]), unsafe_allow_html=True)
+            try:
+                working_mapping = add_account_to_mapping(working_mapping, row["name"], row["address"])
+                slot = working_mapping[row["name"]]["slot"]
+                secret_payload = build_account_secret_payload(
+                    row["name"], row["address"], row["password"],
+                    imap_password=row["imap_password"], smtp_host=row["smtp_host"],
+                    smtp_port=row["smtp_port"], smtp_username=row["smtp_username"],
+                    imap_host=row["imap_host"], imap_port=row["imap_port"],
+                    imap_username=row["imap_username"],
+                )
+                client.set_secret(f"EMAIL_ACCOUNT_SLOT_{slot}", secret_payload)
+                added.append((row["name"], slot))
+            except (ValueError, GitHubActionsError) as exc:
+                skipped.append(f"{row['name']}: {exc}")
+        progress.progress(1.0, text="Finishing…")
+        if added:
+            # One mapping-file commit at the end, not one per account — the mapping is a
+            # single small file; committing it 100 times for a 100-row CSV would be pure waste.
+            client.create_file(
+                SLOT_MAPPING_PATH, serialize_slot_mapping(working_mapping),
+                message=f"Bulk-add {len(added)} email account(s) "
+                        f"(via Streamlit, by {current_user()})",
+            )
+            try:
+                client.dispatch_workflow(WORKFLOW_CHECK_ACCOUNT_HEALTH, {})
+            except GitHubActionsError:
+                pass
+        st.session_state["ea_bulk_result"] = {"added": added, "skipped": skipped}
+        st.rerun()
 
 
 def _edit_dialog(name):
