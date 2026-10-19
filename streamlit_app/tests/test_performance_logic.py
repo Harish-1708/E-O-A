@@ -720,3 +720,16 @@ def test_a_campaign_with_a_real_zero_percent_rate_comes_before_one_with_no_rate_
 def test_delivered_is_emails_sent_less_hard_bounces_and_is_not_the_same_figure_as_sent():
     row = pl.glance_rows([_glance_perf("Bouncy", 10, 20, 2, hard=3, soft=1)])[0]
     assert (row["sent"], row["delivered"], row["hard"], row["soft"]) == (20, 17, 3, 1)
+
+
+def test_a_row_carries_the_positive_replies_and_the_reasons_a_campaign_needs_attention():
+    row = pl.glance_rows([{**GLANCE[0], "positive": 17, "status_problems": ["No leads with an email address", 5]}])[0]
+    assert row["positive"] == 17 and row["problems"] == ["No leads with an email address", "5"]
+    plain = pl.glance_rows([GLANCE[0]])[0]
+    assert plain["positive"] == 0 and plain["problems"] == []
+    assert pl.glance_rows([{**GLANCE[0], "positive": None, "status_problems": None}])[0]["positive"] == 0 and pl.glance_rows([{**GLANCE[0], "status_problems": None}])[0]["problems"] == []
+
+
+def test_the_total_row_carries_the_positive_replies_too_and_has_no_problems_list():
+    totals = pl.glance_totals({"positive": 5, "replies": 9}, 2)
+    assert totals["positive"] == 5 and "problems" not in totals
