@@ -202,21 +202,18 @@ def payload_to_bytes(payload: Dict) -> bytes:
 # ---------- Lead table filtering ----------
 
 FILTER_ALL = "All"
-FILTER_PENDING_APPROVAL = "Pending Approval"
 FILTER_IN_PROGRESS = "In Progress"
 FILTER_REPLIED = "Replied"
 FILTER_BOUNCED = "Bounced"
 FILTER_REMOVED = "Removed"
 
-FILTER_OPTIONS = [FILTER_ALL, FILTER_PENDING_APPROVAL, FILTER_IN_PROGRESS, FILTER_REPLIED,
-                   FILTER_BOUNCED, FILTER_REMOVED]
+# (There used to be a "Pending Approval" filter here. Approval no longer gates sending and is not used any more, so it was removed.)
+FILTER_OPTIONS = [FILTER_ALL, FILTER_IN_PROGRESS, FILTER_REPLIED, FILTER_BOUNCED, FILTER_REMOVED]
 
 
 def filter_leads(leads: List[Dict], status_filter: str) -> List[Dict]:
     if status_filter == FILTER_ALL:
         return leads
-    if status_filter == FILTER_PENDING_APPROVAL:
-        return [l for l in leads if (l.get("Approval") or "") not in ("Yes",)]
     if status_filter == FILTER_REMOVED:
         return [l for l in leads if l.get("Status") == "Removed"]
     if status_filter == FILTER_REPLIED:
