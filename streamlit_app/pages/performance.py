@@ -9,9 +9,9 @@ from page_state import mark_active_page  # noqa: E402
 from auth import login_gate  # noqa: E402
 from preview_logic import list_campaigns, get_campaign_cfg  # noqa: E402
 from sheets_readonly import ReadOnlySheetsConnector  # noqa: E402
-from campaign_status_logic import status_label, STATUS_RUNNING, STATUS_PAUSED, STATUS_DRAFT, STATUS_COMPLETED  # noqa: E402
+from campaign_status_logic import status_label  # noqa: E402
 from performance_logic import (  # noqa: E402
-    build_all_performance, combine_performance, build_best_performers, format_rate,
+    build_all_performance, combine_performance, build_best_performers,
     GLANCE_SORT_OPTIONS, glance_rows, glance_totals, glance_csv,
 )
 from performance_html import glance_header_html, glance_table_html  # noqa: E402
@@ -37,7 +37,6 @@ st.caption(
 )
 
 ALL_CAMPAIGNS = "All campaigns"
-STATUS_CHIP = {STATUS_RUNNING: "🟢", STATUS_PAUSED: "🟡", STATUS_DRAFT: "⚪", STATUS_COMPLETED: "🔵"}
 
 
 @st.cache_resource(show_spinner=False)
@@ -95,22 +94,6 @@ else:
     selected = combined if choice == ALL_CAMPAIGNS else next(p for p in perfs if p["campaign"] == choice)
     render_performance(selected, key_prefix="performance", best=build_best_performers(perfs, combined),
                        show_campaign_ranking=choice == ALL_CAMPAIGNS)
-
-    # ---- campaign cards
-    st.divider()
-    st.subheader("Campaigns")
-    for perf in perfs:
-        with st.container(border=True):
-            chip = STATUS_CHIP.get(perf["status"], "🔴")
-            st.markdown(f"{chip} **{perf['campaign']}** — {status_label(perf['status'])}")
-            if perf["status_problems"]:
-                st.caption("Needs attention: " + "; ".join(perf["status_problems"]))
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Contacted", perf["contacted"])
-            m2.metric("Sent", perf["sent"])
-            m3.metric("Replies", perf["replies"])
-            m4.metric("Reply rate", format_rate(perf["reply_rate"]))
-            m5.metric("Positive", perf["positive"])
 
     # "All campaigns at a glance": a comparison table with its own header, a Sort choice and a CSV download (which keeps every column the old table had)
     with st.container(key="pg_glance"):
