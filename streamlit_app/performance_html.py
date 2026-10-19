@@ -256,11 +256,13 @@ def glance_table_html(rows: Sequence[dict], totals: dict) -> str:
         chip = f'<span class="pg-chip pg-chip-{GLANCE_CHIP.get(r["status"], "done")}">{esc(r["status_label"])}</span>'
         pending = f'<span class="pg-pend">{r["pending"]} pending</span>' if r["pending"] else '<span class="pg-quiet">none pending</span>'
         best = '<span class="pg-best">★ best rate</span>' if r["best"] else ""
+        problems = "".join(f'<span class="pg-problem">⚠ {esc(m)}</span>' for m in r.get("problems") or [])
+        problems = f'<div class="pg-problems">{problems}</div>' if problems else ""
         rate = r["reply_rate"]
-        return (f'<tr><td><div class="pg-nm">{esc(r["name"])}</div>{chip}</td>'
+        return (f'<tr><td><div class="pg-nm">{esc(r["name"])}</div>{chip}{problems}</td>'
                 f'<td><div class="pg-num">{r["contacted"]} <span class="pg-of">of {r["leads"]}</span></div>{_bar(_pct(r["contacted"], r["leads"]))}<div class="pg-sub">{pending}</div></td>'
                 f'<td><div class="pg-num">{r["sent"]}</div><div class="pg-sub">{r["delivered"]} delivered (est.)</div></td>'
-                f'<td><div class="pg-num">{r["replies"]}{best}</div><div class="pg-sub">replied</div></td>'
+                f'<td><div class="pg-num">{r["replies"]}{best}</div><div class="pg-sub">replied · {int(r.get("positive") or 0)} positive</div></td>'
                 f'<td><div class="pg-num pg-rate">{esc(r["reply_rate_text"])}</div>{_bar(round(rate * 100) if rate is not None else 0)}</td>'
                 f'<td>{_bounce_chip(r["hard"], "hard", "bad")}{_bounce_chip(r["soft"], "soft", "warn")}</td>'
                 f'<td><div class="pg-num">{esc(r["completion_text"])}</div>{_bar(round((r["completion"] or 0) * 100), "g")}<div class="pg-sub">{r["completed"]} completed the sequence</div></td></tr>')
@@ -292,6 +294,8 @@ GLANCE_CSS = """
 .pg-chip-live { color: #15803d; border-color: #bbe3c9; background: #f0fbf4; } .pg-chip-warn { color: #b45309; border-color: #f3d9a8; background: #fffaf0; }
 .pg-chip-draft { color: #1d4ed8; border-color: #c7d7fb; background: #f3f7ff; } .pg-chip-paused { color: #6b7280; background: #f9fafb; }
 .pg-best { display: inline-flex; align-items: center; border-radius: 999px; background: #fff7d6; color: #92400e; font-size: 11px; font-weight: 800; padding: 1px 8px; margin-left: 8px; }
+.pg-problems { margin-top: 7px; display: flex; gap: 6px; flex-wrap: wrap; }
+.pg-problem { font-size: 12px; font-weight: 600; color: #92400e; background: #fffaf0; border: 1px solid #f3d9a8; border-radius: 8px; padding: 2px 9px; }
 .pg-pend { display: inline-flex; border-radius: 999px; background: #eef2ff; color: #1d4ed8; font-size: 12px; font-weight: 700; padding: 2px 9px; }
 .pg-bc { display: inline-flex; border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 700; margin-right: 6px; white-space: nowrap; }
 .pg-bc-zero { background: #f3f4f6; color: #9ca3af; } .pg-bc-warn { background: #fff4e5; color: #b45309; } .pg-bc-bad { background: #fdecec; color: #b91c1c; }
