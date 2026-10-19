@@ -519,7 +519,7 @@ def sort_perfs(perfs: List[Dict], sort: str = "Reply rate") -> List[Dict]:
 def _glance_figures(p: Dict) -> Dict:
     return {"leads": int(p.get("total_leads") or 0), "contacted": int(p.get("contacted") or 0), "pending": int(p.get("pending") or 0), "sent": int(p.get("sent") or 0),
             "delivered": int(p.get("delivered_est") or 0), "hard": int(p.get("bounced_hard") or 0), "soft": int(p.get("bounced_soft") or 0), "replies": int(p.get("replies") or 0),
-            "reply_rate": p.get("reply_rate"), "reply_rate_text": format_rate(p.get("reply_rate")), "completion": p.get("sequence_completion"),
+            "positive": int(p.get("positive") or 0), "reply_rate": p.get("reply_rate"), "reply_rate_text": format_rate(p.get("reply_rate")), "completion": p.get("sequence_completion"),
             "completion_text": format_rate(p.get("sequence_completion")), "completed": int(p.get("completed") or 0)}
 
 
@@ -527,7 +527,8 @@ def glance_rows(perfs: List[Dict], status_labels: Callable[[str], str] = lambda 
     """One dict per campaign for the table, in the chosen order. `best` marks the campaign with the single highest reply rate, but only when two or more campaigns have a rate
     and one of them is strictly ahead (a star on a tie, or on the only campaign, would mean nothing)."""
     ordered = sort_perfs(perfs, sort)
-    rows = [{"name": p.get("campaign"), "status": p.get("status", ""), "status_label": GLANCE_STATUS_TEXT.get(p.get("status", "")) or status_labels(p.get("status", "")), "best": False, **_glance_figures(p)} for p in ordered]
+    rows = [{"name": p.get("campaign"), "status": p.get("status", ""), "status_label": GLANCE_STATUS_TEXT.get(p.get("status", "")) or status_labels(p.get("status", "")), "best": False,
+             "problems": [str(m) for m in (p.get("status_problems") or [])], **_glance_figures(p)} for p in ordered]
     rated = [r for r in rows if r["reply_rate"] is not None and r["contacted"] > 0]
     if len(rated) >= 2:
         top = max(r["reply_rate"] for r in rated)
