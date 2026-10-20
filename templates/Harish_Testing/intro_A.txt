@@ -1,0 +1,10 @@
+Subject: Write your subject here
+
+Hi {{ FirstName }},
+
+Write the same message here in plain words. This copy is sent together with the designed email.
+
+Thanks,
+Your name
+
+{{ footer }}
