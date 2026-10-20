@@ -207,9 +207,9 @@ def test_a_campaign_with_no_format_key_at_all_builds_exactly_as_before(tmp_path)
     assert plan[0]["html_body"] is None and plan[0]["body"].strip() == "Hi Ann"
 
 
-def test_missing_variables_from_the_html_are_added_to_the_ones_from_the_text_without_duplicates(tmp_path):
+def test_missing_variables_come_from_the_subject_and_the_design_without_duplicates_and_never_from_an_ignored_text_body(tmp_path):
     cfg = _batch_cfg(tmp_path, "html", html_text="{{ a }} {{ b }}{{ footer }}")
-    _write(tmp_path, "intro_A.txt", "Subject: Hi\n\n{{ b }} {{ c }} {{ footer }}\n")
+    _write(tmp_path, "intro_A.txt", "Subject: Hi {{ b }} {{ c }}\n\nIGNORED {{ ignored }} {{ footer }}\n")
     assert outreach.build_batch(cfg, [make_lead(_row=2)], "intro", 10, forced_variant="A")[0]["missing_variables"] == ["b", "c", "a"]
 
 
@@ -412,15 +412,15 @@ def test_an_unsubscribe_request_never_touches_another_lead(monkeypatch):
 # ================================================================ the starter layouts really work in the engine
 
 @pytest.mark.parametrize("key", list(hc.STARTER_LAYOUTS))
-def test_every_starter_layout_and_its_plain_text_copy_render_with_a_real_lead_and_no_unknown_placeholder(tmp_path, key):
+def test_every_starter_layout_renders_with_a_real_lead_and_no_unknown_placeholder_and_gives_a_text_half(tmp_path, key):
     """REGRESSION: the layouts once used {{ first_name }}, which the engine does not know (it is {{ FirstName }}), and the layout test hid it by declaring that name valid."""
     _write(tmp_path, "intro_A.html", hc.starter_html(key))
-    _write(tmp_path, "intro_A.txt", hc.starter_plain_text("Spring news"))
+    _write(tmp_path, "intro_A.txt", "Subject: Spring news\n\n")
     cfg = dict(CFG_WITH_FOOTER, templates_dir=str(tmp_path))
     rendered_html = outreach.render_email_html(str(tmp_path), "intro", "A", LEAD, cfg)
-    text = outreach.render_email(str(tmp_path), "intro", "A", LEAD, is_first_stage=True, reserved_text=outreach.footer_reserved(cfg, [hc.starter_plain_text()], as_html=False))
-    assert rendered_html["missing_variables"] == [] and text["missing_variables"] == [] and "{{" not in rendered_html["html"] and "{{" not in text["body"]
-    assert "Hi Ann" in text["body"] and "Ann" in rendered_html["html"] and "Kelson Agency" in rendered_html["html"] and text["subject"] == "Spring news"
+    subject = outreach.render_email(str(tmp_path), "intro", "A", LEAD, is_first_stage=True, ignore_body=True)
+    assert rendered_html["missing_variables"] == [] and subject["missing_variables"] == [] and "{{" not in rendered_html["html"]
+    assert "Ann" in rendered_html["html"] and "Kelson Agency" in rendered_html["html"] and subject["subject"] == "Spring news" and "Ann" in hc.html_to_text(rendered_html["html"])
 
 
 def test_a_lead_with_no_first_name_gets_the_default_in_the_starter_layouts(tmp_path):
@@ -431,7 +431,7 @@ def test_a_lead_with_no_first_name_gets_the_default_in_the_starter_layouts(tmp_p
 @pytest.mark.parametrize("key", list(hc.STARTER_LAYOUTS))
 def test_the_starter_layouts_pass_the_checks_with_the_engines_own_variable_names(key):
     known = list(outreach.TEMPLATE_VARIABLE_MAP)
-    assert hc.html_checks(hc.starter_html(key), hc.starter_plain_text(), known, CFG_WITH_FOOTER["footer"]) == {"errors": [], "warnings": []}
+    assert hc.html_checks(hc.starter_html(key), "", known, CFG_WITH_FOOTER["footer"]) == {"errors": [], "warnings": []}
 
 
 def test_a_reply_to_our_email_whose_subject_says_unsubscribe_is_still_a_normal_reply(monkeypatch):
@@ -645,12 +645,12 @@ def test_the_plain_text_copy_is_never_tagged(tmp_path):
     assert "utm_" not in outreach.render_email(str(tmp_path), "intro", "A", LEAD, is_first_stage=True, reserved_text=text_reserved)["body"]
 
 
-def test_a_batch_carries_the_tagged_html_and_an_untagged_text_copy(tmp_path):
+def test_a_batch_carries_the_tagged_html_and_a_plain_text_half_made_from_it_with_the_same_tagged_links(tmp_path):
     cfg = _batch_cfg(tmp_path, "html", html_text=LINK_DESIGN)
     cfg["tracking"] = {"utm": True}
     cfg["_campaign_name"] = "Spring_Launch"
     plan = outreach.build_batch(cfg, [make_lead(_row=2, FirstName="Ann")], "intro", 10, forced_variant="A")
-    assert "utm_campaign=Spring_Launch" in plan[0]["html_body"] and "utm_" not in plan[0]["body"]
+    assert "utm_campaign=Spring_Launch" in plan[0]["html_body"] and "https://shop.example.com/offer?ref=a&utm_source=email&utm_medium=outreach&utm_campaign=Spring_Launch&utm_content=intro_A" in plan[0]["body"]
 
 
 def test_a_test_email_is_tagged_exactly_like_a_real_one(tmp_path, monkeypatch):
@@ -736,3 +736,66 @@ def test_the_round_loop_waits_a_random_time_between_the_two_chosen_numbers_in_mi
     monkeypatch.setattr(outreach, "smtp_send", lambda *a, **k: {"message_id": "<m@x>"})
     outreach.send_batch(cfg, FakeSheets([make_lead(_row=2, LeadID="L1", Email="john@abc.com"), make_lead(_row=3, LeadID="L2", Email="mary@abc.com")]), ACCOUNTS, "intro", 10)
     assert waits and all(seconds == 180 for seconds in waits)                 # the middle of 2 and 4 minutes, in seconds
+
+
+
+# ================================================================ the plain-text half is made from the design
+
+def test_the_plain_text_half_of_an_html_email_is_made_from_its_design_and_the_hand_written_text_body_is_ignored(tmp_path):
+    cfg = _batch_cfg(tmp_path, "html", html_text='<h1>Big news, {{ FirstName }}</h1><p>See <a href="https://x.com/a">the offer</a> today.</p>{{ footer }}')
+    _write(tmp_path, "intro_A.txt", "Subject: News\n\nOLD HAND-WRITTEN TEXT {{ nope }} {{ footer }}\n")
+    item = outreach.build_batch(cfg, [make_lead(_row=2, FirstName="Ann")], "intro", 10, forced_variant="A")[0]
+    assert item["subject"] == "News" and "OLD HAND-WRITTEN" not in item["body"] and item["missing_variables"] == []
+    assert item["body"].startswith("Big news, Ann\n\nSee the offer (https://x.com/a) today.") and "Kelson Agency" in item["body"] and "12 Example Street" in item["body"] and "<" not in item["body"]
+
+
+def test_an_html_campaigns_txt_file_may_hold_only_the_subject(tmp_path):
+    cfg = _batch_cfg(tmp_path, "html")
+    _write(tmp_path, "intro_A.txt", "Subject: Just a subject for {{ FirstName }}\n\n")
+    item = outreach.build_batch(cfg, [make_lead(_row=2, FirstName="Ann")], "intro", 10, forced_variant="A")[0]
+    assert item["subject"] == "Just a subject for Ann" and item["body"].startswith("Hi Ann") and item["html_body"].startswith("<p>Hi Ann")
+
+
+def test_values_from_a_leads_sheet_row_are_unescaped_again_in_the_plain_text_half(tmp_path):
+    cfg = _batch_cfg(tmp_path, "html", html_text="<p>Hello {{ FirstName }} from {{ CompanyName }}</p>{{ footer }}")
+    item = outreach.build_batch(cfg, [make_lead(_row=2, FirstName="Tom & Jerry", Company="A <B> Co")], "intro", 10, forced_variant="A")[0]
+    assert "Tom &amp; Jerry" in item["html_body"] and "Hello Tom & Jerry from A <B> Co" in item["body"]
+
+
+def test_a_test_email_of_an_html_campaign_also_gets_its_plain_text_half_from_the_design(tmp_path, monkeypatch):
+    _capture_smtp(monkeypatch)
+    cfg = _test_cfg(tmp_path, "html")
+    _write(tmp_path, "intro_A.txt", "Subject: Hello {{ FirstName }}\n\nOLD TEXT\n")
+    outreach.send_test_email(cfg, ACCOUNTS, "intro", "A", "team@kelson.agency")
+    assert _Sent.calls[0]["body"].startswith("Hi Test from Your Company") and "OLD TEXT" not in _Sent.calls[0]["body"] and "Kelson Agency" in _Sent.calls[0]["body"]
+
+
+def test_a_plain_text_campaign_still_uses_its_hand_written_body_exactly_as_before(tmp_path):
+    cfg = _batch_cfg(tmp_path, "text", html_text="<p>ignored</p>")
+    _write(tmp_path, "intro_A.txt", "Subject: Hello {{ FirstName }}\n\nHand written {{ FirstName }}\n")
+    item = outreach.build_batch(cfg, [make_lead(_row=2, FirstName="Ann")], "intro", 10, forced_variant="A")[0]
+    assert item["body"].strip() == "Hand written Ann" and item["html_body"] is None
+
+
+def test_the_ignore_body_option_renders_only_the_subject_and_leaves_everything_else_as_it_was(tmp_path):
+    _write(tmp_path, "intro_A.txt", "Subject: Hi {{ FirstName }}\n\nBody {{ nope }}\n")
+    only_subject = outreach.render_email(str(tmp_path), "intro", "A", LEAD, is_first_stage=True, ignore_body=True)
+    assert only_subject["subject"] == "Hi Ann" and only_subject["body"] == "" and only_subject["missing_variables"] == []
+    full = outreach.render_email(str(tmp_path), "intro", "A", LEAD, is_first_stage=True)
+    assert full["body"].strip() == "Body" and full["missing_variables"] == ["nope"]
+
+
+@pytest.mark.parametrize("key", list(hc.STARTER_LAYOUTS))
+def test_every_starter_layout_makes_a_readable_plain_text_half(tmp_path, key):
+    cfg = _batch_cfg(tmp_path, "html", html_text=hc.starter_html(key))
+    body = outreach.build_batch(cfg, [make_lead(_row=2, FirstName="Ann")], "intro", 10, forced_variant="A")[0]["body"]
+    assert "Ann" in body and "Kelson Agency" in body and "<" not in body and ">" not in body and "{{" not in body and "\n\n\n" not in body and 20 < len(body) < 1500
+
+
+def test_a_test_email_reports_unknown_placeholders_from_the_subject_and_the_design_but_never_from_an_ignored_text_body(tmp_path, monkeypatch):
+    _capture_smtp(monkeypatch)
+    cfg = _test_cfg(tmp_path, "html")
+    _write(tmp_path, "intro_A.txt", "Subject: Hi {{ in_subject }}\n\nOLD TEXT {{ in_old_body }}\n")
+    _write(tmp_path, "intro_A.html", "<p>Hi {{ in_design }} {{ in_design }}</p>{{ footer }}")
+    sent = outreach.send_test_email(cfg, ACCOUNTS, "intro", "A", "team@kelson.agency")
+    assert sent["missing_variables"] == ["in_subject", "in_design"] and "in_old_body" not in sent["missing_variables"]
