@@ -660,6 +660,7 @@ def test_a_test_email_is_tagged_exactly_like_a_real_one(tmp_path, monkeypatch):
 
 
 def test_the_preview_in_the_editor_is_tagged_exactly_like_the_send(tmp_path):
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "streamlit_app"))          # this file must work on its own, not only after other test files set the path
     import html_editor_logic as EL
     cfg = _tag_cfg(tmp_path, {"utm": True})
     preview = EL.render_preview(LINK_DESIGN, LEAD, cfg, utm_content="intro_A")
@@ -684,3 +685,54 @@ def test_a_tracking_setting_of_the_wrong_kind_is_refused(tmp_path, tracking, mes
 def test_a_valid_tracking_setting_is_accepted(tmp_path):
     cfg = outreach.get_campaign("camp", **_campaign(tmp_path, "tracking:\n  utm: true\n  source: kelson\n  medium: newsletter\n"))
     assert cfg["tracking"] == {"utm": True, "source": "kelson", "medium": "newsletter"}
+
+
+# ================================================================ the wait between sends (chosen per campaign)
+
+def _pace(tmp_path, low, high):
+    return outreach.get_campaign("camp", **_campaign(tmp_path, f"sending:\n  delay_min_minutes: {low}\n  delay_max_minutes: {high}\n"))
+
+
+@pytest.mark.parametrize("low, high", [(3, 7), (0, 0), (5, 5), (0.5, 2.5), (1, 120), (0, 10)])
+def test_any_sensible_wait_including_a_fixed_one_and_zero_is_accepted_and_reaches_the_sending_settings(tmp_path, low, high):
+    cfg = _pace(tmp_path, low, high)
+    assert cfg["sending"]["delay_min_minutes"] == low and cfg["sending"]["delay_max_minutes"] == high
+
+
+def test_the_campaign_with_no_wait_of_its_own_keeps_the_shared_default(tmp_path):
+    kw = _campaign(tmp_path, None)
+    shared = outreach.load_settings(kw["settings_path"])["default_campaign_settings"]["sending"]
+    cfg = outreach.get_campaign("camp", **kw)
+    assert (cfg["sending"]["delay_min_minutes"], cfg["sending"]["delay_max_minutes"]) == (shared["delay_min_minutes"], shared["delay_max_minutes"])
+
+
+def test_one_end_can_be_set_without_the_other_and_the_rest_comes_from_the_shared_default(tmp_path):
+    kw = _campaign(tmp_path, "sending:\n  delay_max_minutes: 12\n")
+    shared = outreach.load_settings(kw["settings_path"])["default_campaign_settings"]["sending"]
+    cfg = outreach.get_campaign("camp", **kw)
+    assert (cfg["sending"]["delay_min_minutes"], cfg["sending"]["delay_max_minutes"]) == (shared["delay_min_minutes"], 12)
+
+
+@pytest.mark.parametrize("low, high", [(-1, 5), (3, -2), ("'3'", 7), (3, "'soon'"), ("true", 7), (3, "false"), (".nan", 7), (3, ".nan"), ("[1]", 7), ("null", 7)])
+def test_a_wait_that_is_not_a_number_of_minutes_zero_or_more_is_refused(tmp_path, low, high):
+    with pytest.raises(outreach.ConfigError, match=r"sending\.delay_(min|max)_minutes must be a number of minutes"):
+        _pace(tmp_path, low, high)
+
+
+@pytest.mark.parametrize("low, high", [(8, 7), (5, 4.5), (120, 1), (0.6, 0.5)])
+def test_a_wait_whose_start_is_after_its_end_is_refused_and_both_numbers_are_named(tmp_path, low, high):
+    with pytest.raises(outreach.ConfigError, match=rf"delay_min_minutes \({low}\) cannot be more than sending\.delay_max_minutes \({high}\)"):
+        _pace(tmp_path, low, high)
+
+
+def test_the_round_loop_waits_a_random_time_between_the_two_chosen_numbers_in_minutes(monkeypatch):
+    waits = []
+    monkeypatch.setattr(outreach.time, "sleep", lambda seconds: waits.append(seconds))
+    monkeypatch.setattr(outreach.random, "uniform", lambda a, b: (a + b) / 2)
+    cfg = _base_campaign_cfg()
+    cfg["sending"].update({"delay_min_minutes": 2, "delay_max_minutes": 4})
+    items = [_plan_item(None), dict(_plan_item(None), lead=make_lead(_row=3, LeadID="L2", Email="mary@abc.com"))]
+    monkeypatch.setattr(outreach, "build_batch", lambda *a, **k: items)
+    monkeypatch.setattr(outreach, "smtp_send", lambda *a, **k: {"message_id": "<m@x>"})
+    outreach.send_batch(cfg, FakeSheets([make_lead(_row=2, LeadID="L1", Email="john@abc.com"), make_lead(_row=3, LeadID="L2", Email="mary@abc.com")]), ACCOUNTS, "intro", 10)
+    assert waits and all(seconds == 180 for seconds in waits)                 # the middle of 2 and 4 minutes, in seconds
