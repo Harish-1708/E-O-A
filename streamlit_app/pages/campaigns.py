@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timezone
 
 import streamlit as st
@@ -47,7 +48,7 @@ from campaign_builder import (  # noqa: E402
 from settings_logic import (  # noqa: E402
     load_raw_override_live, merge_live_override_into_cfg,
     override_to_yaml_bytes, override_file_path,
-    build_asana_settings_override, build_tracker_sync_settings_override, build_footer_settings_override,
+    build_asana_settings_override, build_tracker_sync_settings_override, build_footer_settings_override, build_tracking_settings_override,
 )
 from schedule_view import ScheduleContext, render_schedule_tab  # noqa: E402
 from settings_view import SettingsContext, render_settings_tab  # noqa: E402
@@ -820,6 +821,7 @@ def _render_settings_tab(campaign_cfg, leads, send_log=None):
         # maintenance tools last, as in the design.
         if campaign_cfg.get("format") == hc.FORMAT_HTML:
             _render_footer_section_in_settings(campaign_cfg)
+            _render_link_tagging_section_in_settings(campaign_cfg)
         _render_asana_sync_section_in_settings(campaign_cfg)
         _render_tracker_sync_section_in_settings(campaign_cfg)
         _render_maintenance_section_in_settings(campaign_cfg)
@@ -1145,6 +1147,52 @@ def _render_footer_section_in_settings(campaign_cfg):
                     st.rerun()                                                 # redraw the card as saved (the Save button and the unsaved chip were drawn before the save ran)
                 except GitHubActionsError as exc:
                     st.error(f"Failed to save: {exc}")
+
+
+def _render_link_tagging_section_in_settings(campaign_cfg):
+    """An HTML campaign's link tagging: when on, every web link in its designed emails gets standard utm_ labels (which campaign, which email), so clicks show up in the analytics
+    of the site the link goes to. It does NOT record clicks in this tool. Shown only for HTML campaigns; the switch is a draft until Save is pressed."""
+    campaign_name = campaign_cfg["_campaign_name"]
+    tracking = campaign_cfg.get("tracking") if isinstance(campaign_cfg.get("tracking"), dict) else {}
+    snapshot_key = f"tracking_saved_{campaign_name}"
+    flash_key = f"tracking_flash_{campaign_name}"
+    flash = st.session_state.pop(flash_key, None)
+    saved = st.session_state.get(snapshot_key) or {"enabled": bool(tracking.get("utm"))}
+    with st.container(key="se_card_tracking"):
+        head_column, switch_column = st.columns([4.2, 1.1])
+        head_column.markdown(tool_heading_html("🔗", "Link tagging", "Labels every web link so clicks show up in the analytics of the site it goes to.",
+                                               "on" if saved["enabled"] else "off", "● On" if saved["enabled"] else "○ Off"), unsafe_allow_html=True)
+        with switch_column:
+            enabled = st.toggle("Enabled", value=saved["enabled"], key=f"tracking_utm_{campaign_name}")
+        st.markdown(rule_html(), unsafe_allow_html=True)
+        example = "?" + urllib.parse.urlencode(hc.utm_params(campaign_name, {**tracking, "utm": True}, "intro_A"))
+        st.markdown(tool_note_html(f"A link to your shop becomes …{example} (the last label says which email: here, the intro, variant A). Look for these labels in Google Analytics or "
+                                   "Shopify. This does not record clicks inside this tool, and the plain-text copy is not tagged." if enabled else
+                                   "Turn this on and save to label the links. Links that already carry utm_ labels, and mailto: or phone links, are never changed."), unsafe_allow_html=True)
+        draft = {"enabled": bool(enabled)}
+        changed = draft != saved
+        save_column, state_column = st.columns([1, 3])
+        with save_column:
+            save_clicked = st.button("💾 Save", key="tracking_save", type="primary", disabled=not changed)
+        with state_column:
+            if changed:
+                st.markdown(chip_html("unsaved", "● Unsaved change"), unsafe_allow_html=True)
+        if flash:
+            st.success(flash)
+        if save_clicked:
+            try:
+                client = _get_github_client()
+                raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)             # the LIVE file, not a possibly stale local copy
+                updated = build_tracking_settings_override(raw_override, draft["enabled"])
+                client.create_file(
+                    override_file_path(campaign_name), override_to_yaml_bytes(updated),
+                    message=f"Update link tagging for {campaign_name} (via Streamlit, by {current_user()})",
+                )
+                st.session_state[snapshot_key] = draft
+                st.session_state[flash_key] = "Link tagging saved. May take a minute to reflect here while the app redeploys."
+                st.rerun()
+            except GitHubActionsError as exc:
+                st.error(f"Failed to save: {exc}")
 
 
 def _render_asana_sync_section_in_settings(campaign_cfg):
