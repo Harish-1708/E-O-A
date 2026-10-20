@@ -21,7 +21,8 @@ import sequences_view_logic as L
 from html_editor_view import render_html_designs
 from campaign_builder import TOTAL_STAGE_COUNT, build_campaign_files, next_stage_from_stages, validate_variant_content
 from github_client import GitHubActionsError
-from html_sequences_logic import VIEW_DESIGN, VIEW_TEXT, is_html_campaign, with_html_companions, with_html_deletions
+from html_sequences_logic import is_html_campaign, with_html_deletions
+from html_structure_view import render_html_add_stage, render_html_add_variant
 from leads_logic import humanize_stage
 from sequences_logic import (
     build_new_variant_files_for_all_stages, build_stage_deletion_paths, build_variant_deletion_paths, build_variant_edit_file, can_delete_stage,
@@ -98,15 +99,23 @@ def render_sequences_tab(ctx: SequencesContext) -> None:
         warm += [f"templates/{campaign_name}/{s['template_prefix']}_{v}.html" for s in stages for v in variants]
     client.warm_file_cache(warm)
 
-    if is_html_campaign(ctx.campaign_cfg):
-        # An HTML campaign has two things to edit for each email: its subject and plain-text copy (the editor below) and its design (full width, with the preview).
-        view = st.radio("What to edit", [VIEW_TEXT, VIEW_DESIGN], horizontal=True, key=f"seq_view_{campaign_name}", label_visibility="collapsed")
-        if view == VIEW_DESIGN:
-            render_html_designs(ctx, client, campaign_name, stages, variants)
-            return
-
     state = _campaign_state(campaign_name)
     state["stage"] = max(0, min(int(state.get("stage") or 0), len(stages) - 1))
+    if is_html_campaign(ctx.campaign_cfg):
+        # An HTML campaign has one workspace for each email: its subject and its design together (the plain-text half is made from the design), full width beside the stage list.
+        left, workspace = st.columns([1.05, 4.3], gap="large")
+        with left:
+            _render_stage_list(ctx, client, campaign_name, stages, variants, state)
+        with workspace:
+            if state["mode"] == "add_variant":
+                render_html_add_variant(ctx, client, campaign_name, stages, variants, _set_mode)
+            elif state["mode"] == "add_stage":
+                render_html_add_stage(ctx, client, campaign_name, stages, variants, _set_mode)
+            else:
+                render_html_designs(ctx, client, campaign_name, stages, variants, state["stage"], _set_mode,
+                                    lambda chosen: _render_delete_variant(ctx, campaign_name, stages, variants, chosen))
+        return
+
     left, middle, right = st.columns([1.05, 2.15, 1.65], gap="large")
     with left:
         _render_stage_list(ctx, client, campaign_name, stages, variants, state)
@@ -137,8 +146,8 @@ def _render_stage_list(ctx, client, campaign_name, stages, variants, state) -> N
         new_prefix, new_letters = next_stage
         wait = ctx.wait_days_for(new_prefix) if ctx.wait_days_for else None
         done = sum(_add_stage_ready(campaign_name, new_prefix, new_letters))
-        st.markdown(H.new_stage_card_html(humanize_stage(new_prefix), L.new_stage_badge(wait),
-                                          f"New · {done} of {len(new_letters)} variants ready"), unsafe_allow_html=True)
+        progress = f"New · {len(new_letters)} variants" if is_html_campaign(ctx.campaign_cfg) else f"New · {done} of {len(new_letters)} variants ready"
+        st.markdown(H.new_stage_card_html(humanize_stage(new_prefix), L.new_stage_badge(wait), progress), unsafe_allow_html=True)
     with st.container(key="sq_add_stage"):
         st.button("＋ Add a follow-up stage" if next_stage else "＋ Add a follow-up stage (none left)", key="sq_add_stage_button", use_container_width=True,
                   disabled=next_stage is None, on_click=_set_mode, args=(campaign_name, "add_stage"))
@@ -383,8 +392,6 @@ def _render_add_variant(ctx, campaign_name, stages, variants, state) -> Optional
         st.markdown(H.editor_title_html(f"Add variant {next_letter}" if next_letter else "Add variant"), unsafe_allow_html=True)
         with st.container(key="sq_cancel_variant"):
             st.button("Cancel", key="sq_cancel_variant_button", on_click=_set_mode, args=(campaign_name, "edit"))
-        if is_html_campaign(ctx.campaign_cfg):
-            st.caption(H.HTML_ADD_NOTE)
         if not next_letter:
             st.info("Every stage already has all 4 variants (A–D) — that's the maximum.")
             return None
@@ -420,8 +427,6 @@ def _render_add_variant(ctx, campaign_name, stages, variants, state) -> Optional
             else:
                 try:
                     files = build_new_variant_files_for_all_stages(campaign_name, stages, next_letter, contents_by_stage)
-                    if is_html_campaign(ctx.campaign_cfg):
-                        files = with_html_companions(files)                 # the designed version beside every new text file, in the same save
                     client = ctx.get_client()
                     client.commit_campaign_files_directly(
                         files=files,
@@ -448,8 +453,6 @@ def _render_add_stage(ctx, campaign_name, stages, variants, state) -> Optional[D
         st.markdown(H.editor_title_html("Add a follow-up stage"), unsafe_allow_html=True)
         with st.container(key="sq_cancel_stage"):
             st.button("Cancel", key="sq_cancel_stage_button", on_click=_set_mode, args=(campaign_name, "edit"))
-        if is_html_campaign(ctx.campaign_cfg):
-            st.caption(H.HTML_ADD_NOTE)
         if next_stage is None:
             st.info(f"This campaign already has all {TOTAL_STAGE_COUNT} stages.")
             return None
@@ -485,7 +488,7 @@ def _render_add_stage(ctx, campaign_name, stages, variants, state) -> Optional[D
                     st.error(message)
             else:
                 try:
-                    files = build_campaign_files(campaign_name, stage_prefix, variant_inputs, fmt="html" if is_html_campaign(ctx.campaign_cfg) else "text")
+                    files = build_campaign_files(campaign_name, stage_prefix, variant_inputs)
                     client = ctx.get_client()
                     client.commit_campaign_files_directly(
                         files=files,
