@@ -6,7 +6,7 @@ so saving here can never undo something saved a moment earlier on this page or t
 (`rotation_accounts`, in the same order), and the rotation switch saves `sender_rotation`.
 """
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import streamlit as st
 
@@ -14,7 +14,8 @@ import outreach
 import settings_html as H
 import settings_view_logic as L
 from github_client import GitHubActionsError
-from settings_logic import build_updated_override, load_raw_override_live, override_file_path, override_to_yaml_bytes, validate_settings
+from settings_logic import (PACING_FALLBACK, clamp_pacing, PACING_MAX, PACING_MIN, PACING_PRESETS, PACING_STEP, build_pacing_override, build_updated_override, format_minutes, load_raw_override_live,
+                            override_file_path, override_to_yaml_bytes, pacing_notes, preset_for, validate_pacing, validate_settings)
 
 
 @dataclass
@@ -38,6 +39,7 @@ class SettingsContext:
     name_matches: Callable[[str, str], bool]      # (typed, campaign name) -> is the confirmation right
     extras: Callable[[], None]                    # Maintenance, Asana Sync and Creator Tracker Sync, as they always were
     default_account: str = ""
+    default_pacing: Tuple[float, float] = PACING_FALLBACK        # the wait between sends every campaign starts with (config/settings.yaml)
 
 
 def render_settings_tab(ctx: SettingsContext) -> None:
@@ -45,7 +47,8 @@ def render_settings_tab(ctx: SettingsContext) -> None:
     left, right = st.columns([1.55, 1], gap="large")
     with left:
         form = _render_accounts(ctx)
-        _render_limits(ctx, form)
+        limits = _render_limits(ctx, form)
+        _render_pacing(ctx, limits)
         ctx.extras()
     with right:
         _render_status(ctx)
@@ -149,7 +152,7 @@ def _render_accounts(ctx: SettingsContext) -> Dict:
 
 # ---------------------------------------------------------------- left: sending limits
 
-def _render_limits(ctx: SettingsContext, form: Dict) -> None:
+def _render_limits(ctx: SettingsContext, form: Dict) -> Dict:
     cfg = ctx.campaign_cfg
     name = cfg["_campaign_name"]
     sending = cfg.get("sending") or {}
@@ -193,6 +196,97 @@ def _render_limits(ctx: SettingsContext, form: Dict) -> None:
                                "redeploys — it's in effect for sending immediately either way.")
                 except GitHubActionsError as exc:
                     st.error(f"Save failed: {exc}")
+    return {"daily_limit": int(daily_limit), "mailboxes": len(pool) or 1}
+
+
+# ---------------------------------------------------------------- left: the time between sends
+
+def _pacing_keys(name: str) -> Dict[str, str]:
+    return {"low": f"se_pace_low_{name}", "high": f"se_pace_high_{name}", "preset": f"se_pace_preset_{name}", "saved": f"pacing_saved_{name}", "flash": f"pacing_flash_{name}",
+            "error": f"pacing_error_{name}"}
+
+
+def _apply_preset(name: str) -> None:
+    """The preset choice puts its two numbers in the boxes (the choice 'Custom' leaves them as they are)."""
+    keys = _pacing_keys(name)
+    chosen = st.session_state.get(keys["preset"])
+    for key, _label, low, high in PACING_PRESETS:
+        if key == chosen:
+            st.session_state[keys["low"]], st.session_state[keys["high"]] = low, high
+
+
+def _save_pacing(ctx: SettingsContext, name: str, reset: bool) -> None:
+    """Writes the two numbers (or, for 'use the default', removes the campaign's own wait) to the campaign's settings file, read live first so nothing else in it is lost.
+    Runs as the button's callback, before the page redraws, so the boxes can be updated to what was saved."""
+    keys = _pacing_keys(name)
+    low, high = (ctx.default_pacing if reset else (float(st.session_state[keys["low"]]), float(st.session_state[keys["high"]])))
+    errors = [] if reset else validate_pacing(low, high)                       # "use the default" removes the campaign's own wait, so the default's numbers are not the screen's to judge
+    if errors:
+        st.session_state[keys["error"]] = " ".join(errors)
+        return
+    try:
+        client = ctx.get_client()
+        raw_override = load_raw_override_live(name, client, ctx.campaigns_dir)                      # the LIVE file, not a possibly stale local copy
+        updated = build_pacing_override(raw_override, None, None) if reset else build_pacing_override(raw_override, low, high)
+        client.create_file(override_file_path(name), override_to_yaml_bytes(updated),
+                           message=f"Update time between sends for {name} (via Streamlit, by {ctx.current_user()})")
+    except GitHubActionsError as exc:
+        st.session_state[keys["error"]] = f"Save failed: {exc}"
+        return
+    st.session_state[keys["error"]] = ""
+    shown_low, shown_high = clamp_pacing(low), clamp_pacing(high)             # the boxes can only show their own range
+    st.session_state[keys["saved"]] = {"low": shown_low, "high": shown_high}
+    st.session_state[keys["low"]], st.session_state[keys["high"]] = shown_low, shown_high
+    st.session_state[keys["flash"]] = (f"Saved: each mailbox now waits between {format_minutes(low)} and {format_minutes(high)} before its next email. It applies to the next send run "
+                                       "straight away; the rest of the app may take a minute to show it while it redeploys.")
+
+
+def _render_pacing(ctx: SettingsContext, limits: Dict) -> None:
+    """Time between sends: how long each mailbox waits before its next email, a random time between the two numbers each round. Per campaign; the boxes are a draft until Save."""
+    cfg = ctx.campaign_cfg
+    name = cfg["_campaign_name"]
+    sending = cfg.get("sending") or {}
+    keys = _pacing_keys(name)
+    default_low, default_high = clamp_pacing(ctx.default_pacing[0]), clamp_pacing(ctx.default_pacing[1])
+    saved = st.session_state.get(keys["saved"]) or {"low": clamp_pacing(sending.get("delay_min_minutes", default_low)), "high": clamp_pacing(sending.get("delay_max_minutes", default_high))}
+    st.session_state.setdefault(keys["low"], saved["low"])
+    st.session_state.setdefault(keys["high"], saved["high"])
+    flash = st.session_state.pop(keys["flash"], None)
+    custom = (saved["low"], saved["high"]) != (default_low, default_high)
+    options = [key for key, *_ in PACING_PRESETS] + ["custom"]
+    labels = {key: f"{label} · {format_minutes(low).replace(' minutes', '').replace(' minute', '')} to {format_minutes(high)}" for key, label, low, high in PACING_PRESETS}
+    labels["custom"] = "Custom"
+    st.session_state[keys["preset"]] = preset_for(float(st.session_state[keys["low"]]), float(st.session_state[keys["high"]]))        # the choice always tells the truth about the boxes
+    with st.container(key="se_card_pacing"):
+        st.markdown(H.card_heading_html("Time between sends", "How long each mailbox waits before its next email: a random time between the two numbers each time, so sending does not look machine-regular."),
+                    unsafe_allow_html=True)
+        st.markdown(H.chip_html("on" if custom else "off", "● Custom for this campaign" if custom else f"○ Default for all campaigns ({format_minutes(default_low).replace(' minutes', '')} to {format_minutes(default_high)})"),
+                    unsafe_allow_html=True)
+        st.radio("Speed", options, format_func=labels.get, horizontal=True, key=keys["preset"], on_change=_apply_preset, args=(name,), label_visibility="collapsed")
+        low_column, high_column = st.columns(2, gap="large")
+        with low_column:
+            low = st.number_input("Wait at least (minutes)", min_value=PACING_MIN, max_value=PACING_MAX, step=PACING_STEP, format="%.1f", key=keys["low"])
+        with high_column:
+            high = st.number_input("and at most (minutes)", min_value=PACING_MIN, max_value=PACING_MAX, step=PACING_STEP, format="%.1f", key=keys["high"])
+        errors = validate_pacing(float(low), float(high))
+        if errors:
+            st.markdown(H.note_html(" ".join(errors), "warn"), unsafe_allow_html=True)
+        else:
+            for kind, text in pacing_notes(limits["daily_limit"], limits["mailboxes"], float(low), float(high)):
+                st.markdown(H.note_html(text, kind), unsafe_allow_html=True)
+        changed = (float(low), float(high)) != (saved["low"], saved["high"])
+        save_column, default_column, state_column = st.columns([1.1, 1.7, 2], vertical_alignment="center")
+        with save_column:
+            st.button("💾 Save", type="primary", key=f"se_pace_save_{name}", disabled=not changed or bool(errors), on_click=_save_pacing, args=(ctx, name, False))
+        with default_column:
+            st.button("Use the default", key=f"se_pace_reset_{name}", disabled=not custom and not changed, on_click=_save_pacing, args=(ctx, name, True))
+        with state_column:
+            if changed:
+                st.markdown(H.chip_html("unsaved", "● Unsaved change"), unsafe_allow_html=True)
+        if flash:
+            st.success(flash)
+        if st.session_state.get(keys["error"]):
+            st.error(st.session_state[keys["error"]])
 
 
 # ---------------------------------------------------------------- right: status, readiness, danger zone
