@@ -109,3 +109,40 @@ def test_a_footer_saved_a_moment_ago_counts_at_once_at_launch_before_the_app_cat
         assert confirm(at).disabled is False and blocked_message(at) == ""
     with launching(footer=False) as (at, _):                                      # without it the same campaign is still held
         assert confirm(at).disabled is True and "footer is incomplete" in blocked_message(at)
+
+
+def test_an_empty_subject_on_the_first_email_of_any_variant_blocks_the_launch_and_names_it():
+    world = html_world()
+    world.write("intro_B.txt", "", "body")
+    with launching(world=world) as (at, _):
+        message = blocked_message(at)
+        assert confirm(at).disabled is True and "Intro · Variant B: the subject is empty. The first email of a sequence needs one." in message and message.count("\n- ") == 1
+
+
+def test_follow_ups_with_a_blank_subject_never_block_the_launch_because_a_blank_subject_means_continue_the_thread():
+    with launching() as (at, _):                                              # the fake campaign's follow-ups all have blank subjects
+        assert confirm(at).disabled is False and blocked_message(at) == ""
+
+
+def test_a_subject_file_that_cannot_be_read_blocks_the_launch_with_its_own_reason():
+    from github_client import GitHubClient
+
+    def selective(self, path, ref="main"):
+        if path.endswith("followup1_C.txt"):
+            raise GitHubActionsError("Failed to read: 500 server error")
+        return original(self, path, ref)
+
+    with patch.object(outreach, "get_campaign", _draft_cfg()):
+        with seq_page(world=html_world()) as (at, _):
+            original = GitHubClient.get_file_content
+            with patch("github_client.GitHubClient.get_file_content", selective):
+                next(b for b in at.button if b.label == "🚀 Launch").click()
+                go(at)
+                assert confirm(at).disabled is True and "Follow-up 1 · Variant C: could not be read (its subject file could not be read" in blocked_message(at)
+
+
+def test_the_launch_check_no_longer_cares_what_an_old_hand_written_text_body_says():
+    world = html_world()
+    world.write("intro_A.txt", "A subject", "")                               # no text body at all: fine, the text half is made from the design
+    with launching(world=world) as (at, _):
+        assert confirm(at).disabled is False and blocked_message(at) == ""
