@@ -129,7 +129,8 @@ def has_opt_out(markup: str) -> bool:
 
 
 def html_checks(markup: str, plain_text: str, known_variables: Optional[Iterable[str]], footer: Optional[Dict] = None) -> Dict[str, List[str]]:
-    """The checks for one HTML email. `known_variables` are the placeholder names that mean something (the template variables and the Sheet's own columns); None means the
+    """The checks for one HTML email. (`plain_text` is no longer used: the plain-text half of an HTML email is made from its design when it is sent, so there is nothing to
+    check; the argument stays so callers need not change.) `known_variables` are the placeholder names that mean something (the template variables and the Sheet's own columns); None means the
     Sheet's columns are not known yet (a campaign with no leads), so placeholders are not checked rather than wrongly reported. Returns {"errors": [...], "warnings": [...]}:
     errors stop a campaign launching, warnings only advise."""
     errors: List[str] = []
@@ -153,9 +154,6 @@ def html_checks(markup: str, plain_text: str, known_variables: Optional[Iterable
     if unknown:
         errors.append("These placeholders match no Sheet column: " + ", ".join("{{ " + n + " }}" for n in unknown) + ".")
 
-    if not (plain_text or "").strip():
-        errors.append("The plain-text copy is empty. Every HTML email needs one (it is sent together with the design).")
-
     if not has_opt_out(markup):
         errors.append("There is no way to opt out. Add {{ footer }} where the footer should go, or write your own unsubscribe line.")
     if "footer" in placeholders_in(markup):
@@ -174,8 +172,6 @@ def html_checks(markup: str, plain_text: str, known_variables: Optional[Iterable
         warnings.append("There is very little text in the email. Messages that are mostly pictures are more often marked as spam.")
     if scan.style_blocks:
         warnings.append("The email uses a <style> block. Some mail apps (older Outlook in particular) ignore it, so inline styles are safer.")
-    if plain_text and "footer" not in placeholders_in(plain_text) and not re.search(r"unsubscribe|opt[ -]?out", plain_text, re.I):
-        warnings.append("The plain-text copy has no opt-out line. Add {{ footer }} to it as well.")
     return {"errors": errors, "warnings": warnings}
 
 
@@ -293,6 +289,18 @@ def remove_footer_placeholder(markup: str) -> str:
     return _FOOTER_TOKEN_RE.sub("", text)
 
 
+# ---------------------------------------------------------------- the subject line
+
+def subject_line(subject) -> str:
+    """A subject as one clean line: any line breaks or runs of spaces become a single space, so what is typed can never add a line to the file it is saved in."""
+    return re.sub(r"\s+", " ", str(subject or "")).strip()
+
+
+def build_subject_file(subject, existing_body: str = "") -> str:
+    """The content of an email's .txt file: the Subject line, a blank line, then whatever body it already had (an HTML campaign ignores the body; it is kept, not lost)."""
+    return f"Subject: {subject_line(subject)}\n\n{existing_body or ''}"
+
+
 # ---------------------------------------------------------------- a plain-text copy of an HTML email
 
 _BLOCK_BREAK_TAGS = ("br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "table")
@@ -373,13 +381,3 @@ DEFAULT_LAYOUT = "simple_letter"
 def starter_html(layout_key: str) -> str:
     """The HTML of a starter layout. An unknown key gives the default layout rather than an error."""
     return STARTER_LAYOUTS.get(layout_key, STARTER_LAYOUTS[DEFAULT_LAYOUT])["html"]
-
-
-def starter_plain_body() -> str:
-    """The message part of the starter plain-text copy (no Subject line): the same words as the designed starter, in plain form, ending with the footer placeholder."""
-    return "Hi {{ FirstName }},\n\nWrite the same message here in plain words. This copy is sent together with the designed email.\n\nThanks,\nYour name\n\n{{ footer }}"
-
-
-def starter_plain_text(subject: str = "Your subject here") -> str:
-    """The starter plain-text copy that goes with every starter layout: a Subject line, a blank line, the message and the footer placeholder."""
-    return f"Subject: {subject.strip() or 'Your subject here'}\n\n{starter_plain_body()}\n"
