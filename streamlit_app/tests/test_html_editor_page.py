@@ -328,3 +328,152 @@ def test_the_checks_read_the_plain_text_copy_of_the_email_on_screen():
     with editor(world=world) as (at, _):
         assert "plain-text copy has no opt-out line" not in all_text(at)
         assert "Subject: Hello" in all_text(at)                                       # and its subject is shown beside it
+
+
+# ================================================================ the footer panel under the design
+
+FOOT = {"business_name": "Kelson Agency", "address": "12 Example Street", "opt_out": 'Reply "unsubscribe".'}
+YAML_PATH = f"config/campaigns/{FIXTURE_CAMPAIGN}.yaml"
+NO_FOOTER_DESIGN = "<p>Hi {{ FirstName }}, here is a longer paragraph so that the email has plenty of readable text. You can unsubscribe by replying to this email.</p>"
+
+
+def foot_box(at, name):
+    return next(t for t in at.text_input if t.key == f"footer_{name}_{FIXTURE_CAMPAIGN}")
+
+
+def fill_foot(at, business_name=None, address=None, opt_out=None):
+    for name, value in (("business_name", business_name), ("address", address), ("opt_out", opt_out)):
+        if value is not None:
+            foot_box(at, name).set_value(value)
+    go(at)
+
+
+def foot_save(at):
+    return next(b for b in at.button if b.key == "footer_save")
+
+
+def test_the_footer_panel_is_under_the_design_of_every_email_and_a_plain_text_campaign_has_none():
+    with editor() as (at, _):
+        assert "Email footer" in all_text(at) and "shared by every email in this campaign" in " ".join(e.label for e in at.expander) and foot_save(at).disabled is True
+        next(s for s in at.selectbox if s.key == f"html_pick_{FIXTURE_CAMPAIGN}").set_value("followup3|D")
+        go(at)
+        assert "Email footer" in all_text(at) and any(b.key == "footer_save" for b in at.button)             # the same panel under every stage and variant
+    with seq_page() as (at, _):
+        assert not any(b.key == "footer_save" for b in at.button) and "Email footer" not in all_text(at)
+
+
+def test_an_email_that_has_the_footer_says_so_and_offers_to_remove_it():
+    with editor() as (at, _):
+        assert "This email has the footer" in all_text(at) and any((b.key or "").startswith("html_footer_remove_") for b in at.button) and not any((b.key or "").startswith("html_footer_add_") for b in at.button)
+
+
+def test_an_email_with_no_footer_says_it_is_optional_and_offers_to_add_it():
+    with editor(world=html_world(design=NO_FOOTER_DESIGN)) as (at, _):
+        assert "This email has no footer" in all_text(at) and "optional" in all_text(at) and any((b.key or "").startswith("html_footer_add_") for b in at.button)
+
+
+def test_adding_the_footer_puts_the_placeholder_in_the_box_changes_nothing_on_github_and_turns_save_on():
+    with editor(world=html_world(design=NO_FOOTER_DESIGN)) as (at, world):
+        next(b for b in at.button if (b.key or "").startswith("html_footer_add_")).click()
+        go(at)
+        assert area(at).value == NO_FOOTER_DESIGN + "\n{{ footer }}\n" and world.created == [] and button(at, "html_save_").disabled is False
+        assert "This email has the footer" in all_text(at) and any((b.key or "").startswith("html_footer_remove_") for b in at.button)
+
+
+def test_removing_the_footer_takes_the_placeholder_out_of_the_box_without_saving():
+    with editor() as (at, world):
+        next(b for b in at.button if (b.key or "").startswith("html_footer_remove_")).click()
+        go(at)
+        assert "{{ footer }}" not in area(at).value and world.created == [] and button(at, "html_save_").disabled is False and "This email has no footer" in all_text(at)
+
+
+def test_adding_the_footer_to_one_email_leaves_every_other_email_alone():
+    with editor(world=html_world(design=NO_FOOTER_DESIGN)) as (at, world):
+        next(b for b in at.button if (b.key or "").startswith("html_footer_add_")).click()
+        go(at)
+        next(b for b in at.button if b.key == f"html_save_html_saved_{FIXTURE_CAMPAIGN}_intro_A").click()
+        go(at)
+        assert [c["path"] for c in world.created] == [f"templates/{FIXTURE_CAMPAIGN}/intro_A.html"] and world.created[0]["content"].decode().endswith("{{ footer }}\n")
+
+
+def test_the_footer_details_start_open_only_when_the_email_uses_the_footer_and_they_are_incomplete():
+    with editor(footer=False) as (at, _):
+        assert next(e for e in at.expander if e.label.startswith("Footer details")).proto.expanded is True
+    with editor(footer=True) as (at, _):
+        assert next(e for e in at.expander if e.label.startswith("Footer details")).proto.expanded is False
+    with editor(footer=False, world=html_world(design=NO_FOOTER_DESIGN)) as (at, _):
+        assert next(e for e in at.expander if e.label.startswith("Footer details")).proto.expanded is False
+
+
+def test_typing_in_the_footer_details_shows_the_preview_only_once_the_name_and_address_are_both_there():
+    with editor(footer=False) as (at, _):
+        fill_foot(at, business_name="Kelson Agency")
+        assert 'class="he-footer-preview"' not in all_text(at) and foot_save(at).disabled is False and "Unsaved change" in all_text(at)
+        fill_foot(at, address="12 Example Street")
+        assert 'class="he-footer-preview"' in all_text(at) and hc.DEFAULT_OPT_OUT.replace('"', "&quot;") in all_text(at)
+
+
+def test_nothing_typed_into_the_footer_can_become_markup_in_its_preview():
+    import html
+    for hostile in ('<script>alert(1)</script>', '"><img src=x onerror=alert(1)>'):
+        with editor(footer=False) as (at, _):
+            fill_foot(at, business_name=hostile, address=hostile, opt_out=hostile)
+            text = all_text(at)
+            assert "<script>alert" not in text and "<img src=x" not in text and html.escape(hostile) in text
+
+
+def test_saving_the_footer_writes_it_once_for_the_campaign_and_keeps_every_other_setting():
+    import yaml
+    live_yaml = yaml.safe_dump({"format": "html", "status": "draft", "sending": {"daily_limit": 40}}).encode()
+    with editor(footer=False) as (at, world):
+        fill_foot(at, business_name="  Kelson Agency ", address=" 12 Example Street ", opt_out="")
+        with patch("html_editor_view.load_raw_override_live", lambda name, client, d, branch="main": yaml.safe_load(live_yaml)):
+            foot_save(at).click()
+            go(at)
+        assert list(at.exception) == [] and list(at.error) == [] and len(world.created) == 1
+        written = world.created[0]
+        assert written["path"] == YAML_PATH and written["message"].startswith(f"Update email footer for {FIXTURE_CAMPAIGN} (via Streamlit, by ")
+        assert yaml.safe_load(written["content"]) == {"format": "html", "status": "draft", "sending": {"daily_limit": 40}, "footer": {"business_name": "Kelson Agency", "address": "12 Example Street"}}
+        assert any("Footer saved for every email in this campaign" in s.value for s in at.success)
+
+
+def test_a_footer_saved_a_moment_ago_counts_at_once_in_the_preview_and_the_checks():
+    with editor(footer=False) as (at, _):
+        assert "footer is incomplete" in all_text(at)
+        fill_foot(at, business_name="Kelson Agency", address="12 Example Street")
+        foot_save(at).click()
+        go(at)
+        text = all_text(at)
+        assert "footer is incomplete" not in text and foot_save(at).disabled is True and "Unsaved change" not in text and "Kelson Agency" in text
+
+
+def _preview_page(at):
+    frames = at.get("iframe")
+    return getattr(frames[0].proto, "srcdoc", "") if frames else ""
+
+
+def test_the_preview_frame_itself_shows_the_footer_in_force_a_marker_before_it_is_complete_and_the_real_one_after_saving():
+    with editor(footer=False) as (at, _):
+        before = _preview_page(at)
+        assert "Your footer will appear here" in before and "Kelson Agency" not in before
+        fill_foot(at, business_name="Kelson Agency", address="12 Example Street")
+        foot_save(at).click()
+        go(at)
+        after = _preview_page(at)
+        assert "Your footer will appear here" not in after and "Kelson Agency" in after and "12 Example Street" in after
+
+
+def test_saving_the_footer_without_an_address_is_refused_and_writes_nothing():
+    with editor(footer=False) as (at, world):
+        fill_foot(at, business_name="Kelson Agency")
+        foot_save(at).click()
+        go(at)
+        assert world.created == [] and any("Enter the business name and the postal address" in e.value for e in at.error)
+
+
+def test_a_failed_footer_save_says_so_and_does_not_count_the_footer_as_saved():
+    with editor(footer=False, commit_error=GitHubActionsError("boom")) as (at, _):
+        fill_foot(at, business_name="Kelson Agency", address="12 Example Street")
+        foot_save(at).click()
+        go(at)
+        assert any("Failed to save" in e.value for e in at.error) and not any("Footer saved" in s.value for s in at.success) and "footer is incomplete" in all_text(at)
