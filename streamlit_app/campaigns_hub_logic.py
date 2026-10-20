@@ -70,6 +70,11 @@ def series_caption(series: Dict) -> str:
     return f"Sends per {series['unit']} · {start.strftime('%b')} {start.day} – {end.strftime('%b')} {end.day}"
 
 
+def _format_field(campaign_cfg: Dict) -> Dict:
+    """{"format": "html"} for an HTML campaign and nothing at all for any other, so every plain-text campaign's row is exactly what it always was."""
+    return {"format": "html"} if campaign_cfg.get("format") == "html" else {}
+
+
 def build_draft_campaign_row(campaign_cfg: Dict) -> Dict:
     """A brand new Draft campaign may not have any Sheet tabs yet (they're
     created on first real activity) — its status is fully knowable from
@@ -78,7 +83,7 @@ def build_draft_campaign_row(campaign_cfg: Dict) -> Dict:
         "name": campaign_cfg["_campaign_name"], "status": "draft",
         "status_label": status_label("draft"), "problems": [],
         "total_leads": 0, "contacted": 0, "sent": 0, "replies": 0, "reply_rate": "—",
-        "last_activity": "", "series": dict(EMPTY_SERIES),
+        "last_activity": "", "series": dict(EMPTY_SERIES), **_format_field(campaign_cfg),
     }
 
 
@@ -91,7 +96,7 @@ def build_deleted_campaign_row(campaign_cfg: Dict) -> Dict:
         "name": campaign_cfg["_campaign_name"], "status": "deleted",
         "status_label": status_label("deleted"), "problems": [],
         "total_leads": 0, "contacted": 0, "sent": 0, "replies": 0, "reply_rate": "—",
-        "last_activity": "", "series": dict(EMPTY_SERIES),
+        "last_activity": "", "series": dict(EMPTY_SERIES), **_format_field(campaign_cfg),
     }
 
 
@@ -108,6 +113,7 @@ def build_campaign_hub_row(campaign_cfg: Dict, leads: List[Dict], responses: Lis
         "replies": int(base_row[7]), "reply_rate": base_row[8],
         "last_activity": compute_last_activity_timestamp(send_log),
         "series": send_series(send_log, today or date.today(), through_today=(status == STATUS_RUNNING)),
+        **_format_field(campaign_cfg),
     }
 
 
@@ -232,6 +238,29 @@ def status_filter_options(rows: List[Dict]) -> List[Tuple[str, str]]:
         count = len(rows) if key == "all" else sum(1 for r in rows if r.get("status") == key)
         options.append((key, f"{label} {count}"))
     return options
+
+
+FORMAT_FILTERS = [("all", "All formats"), ("text", "Text"), ("html", "HTML")]
+
+
+def format_filter_options(rows: List[Dict]) -> List[Tuple[str, str]]:
+    """[(filter key, 'HTML 1'), ...] — but ONLY once at least one campaign is an HTML campaign (until then there is nothing to tell apart, so no filter is shown)."""
+    if not any(r.get("format") == "html" for r in rows):
+        return []
+    options = []
+    for key, label in FORMAT_FILTERS:
+        count = len(rows) if key == "all" else sum(1 for r in rows if (r.get("format") == "html") == (key == "html"))
+        options.append((key, f"{label} {count}"))
+    return options
+
+
+def filter_campaigns_by_format(rows: List[Dict], fmt: str) -> List[Dict]:
+    """'html' keeps the HTML campaigns, 'text' keeps every other one (a campaign with no format is plain text), anything else keeps all."""
+    if fmt == "html":
+        return [r for r in rows if r.get("format") == "html"]
+    if fmt == "text":
+        return [r for r in rows if r.get("format") != "html"]
+    return list(rows)
 
 
 def filter_campaigns_by_status(rows: List[Dict], status: str) -> List[Dict]:
