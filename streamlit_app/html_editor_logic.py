@@ -67,14 +67,14 @@ def decode_upload(data: bytes) -> Tuple[Optional[str], Optional[str]]:
         return None, "The file is not saved as UTF-8 text. Save it again from your editor as UTF-8 and upload it again."
 
 
-def render_preview(raw: str, lead: Dict, campaign_cfg: Dict) -> Dict:
+def render_preview(raw: str, lead: Dict, campaign_cfg: Dict, utm_content: str = "") -> Dict:
     """{"html": the email as one lead would receive it (None when it must not be shown), "errors": [...], "missing": [placeholders that match no column]}. Unsafe HTML is never
     rendered at all. An incomplete footer is reported (a real send would refuse) while the preview still shows the layout, with a marker where the footer goes."""
     unsafe = hc.unsafe_problems(raw)
     if unsafe:
         return {"html": None, "errors": unsafe, "missing": []}
     try:
-        result = outreach.render_html_text(raw, lead, campaign_cfg)
+        result = outreach.render_html_text(raw, lead, campaign_cfg, utm_content=utm_content)
         return {"html": result["html"], "errors": [], "missing": result["missing_variables"]}
     except outreach.TemplateError as exc:
         if "footer is incomplete" not in str(exc):
