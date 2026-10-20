@@ -445,3 +445,12 @@ def test_reading_campaigns_at_the_same_time_gives_the_same_answer_as_one_by_one(
     sequential = w.build_all_queues(names, _cfg_for, leads_for, max_workers=1, now_utc=now)
     parallel = w.build_all_queues(names, _cfg_for, leads_for, max_workers=4, now_utc=now)
     assert sequential == parallel
+
+
+def test_an_unsubscribed_lead_is_out_of_play_with_its_own_label_and_is_never_due_or_waiting(at):
+    """REGRESSION (caught by the guard above): the unsubscribed status had no label, so such a lead would have counted as still in the sequence."""
+    now = at("2026-10-09 13:00")
+    leads = [make_lead(1, Status=outreach.STATUS_STOPPED_UNSUBSCRIBED, **_intro_sent("2026-10-07 14:00:00")), make_lead(2, **_intro_sent("2026-10-07 14:00:00"))]
+    queue = w.build_campaign_queue(make_cfg(), leads, now_utc=now)
+    assert queue["out_of_play"]["Unsubscribed"] == 1 and queue["due_total"] == 1 and queue["waiting_total"] == 0
+    assert "Unsubscribed" in w.NOT_IN_PLAY_LABELS and w.NOT_IN_PLAY_LABELS.index("Unsubscribed") < w.NOT_IN_PLAY_LABELS.index("Stopped by hand")
