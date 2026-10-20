@@ -471,3 +471,36 @@ def test_with_the_real_engine_calculation_the_row_and_the_total_agree_and_neithe
     assert (row["total_leads"], row["contacted"], row["sent"], row["replies"], row["reply_rate"]) == (5, 4, 9, 1, "25.0%")
     summary = HL.summarize_campaigns([row])
     assert summary["reply_rate"] == "25.0%" and summary["contacted"] == 4                      # not 1 of 9 emails (11.1%)
+
+
+# ================================================================ HTML campaigns in the hub's rows and filters
+
+def _hub_cfg(fmt=None):
+    cfg = {"_campaign_name": "C", "stages": [{"name": "intro", "template_prefix": "intro", "wait_days": 0}], "status": "draft"}
+    if fmt is not None:
+        cfg["format"] = fmt
+    return cfg
+
+
+def test_only_an_html_campaigns_row_carries_a_format_and_every_other_row_is_exactly_as_before():
+    import campaigns_hub_logic as HL2
+    assert HL2.build_draft_campaign_row(_hub_cfg("html"))["format"] == "html" and HL2.build_deleted_campaign_row(_hub_cfg("html"))["format"] == "html"
+    for cfg in (_hub_cfg(), _hub_cfg("text"), _hub_cfg("nonsense")):
+        assert "format" not in HL2.build_draft_campaign_row(cfg) and "format" not in HL2.build_deleted_campaign_row(cfg)
+
+
+def test_the_format_filter_is_offered_only_once_a_campaign_is_html_and_counts_each_kind():
+    import campaigns_hub_logic as HL2
+    text_rows = [{"name": "a"}, {"name": "b", "format": "text"}]
+    assert HL2.format_filter_options([]) == [] and HL2.format_filter_options(text_rows) == []
+    assert HL2.format_filter_options(text_rows + [{"name": "c", "format": "html"}]) == [("all", "All formats 3"), ("text", "Text 2"), ("html", "HTML 1")]
+
+
+def test_filtering_by_format_keeps_html_campaigns_or_every_other_one_and_anything_else_keeps_all():
+    import campaigns_hub_logic as HL2
+    rows = [{"name": "a"}, {"name": "b", "format": "text"}, {"name": "c", "format": "html"}]
+    assert [r["name"] for r in HL2.filter_campaigns_by_format(rows, "html")] == ["c"]
+    assert [r["name"] for r in HL2.filter_campaigns_by_format(rows, "text")] == ["a", "b"]
+    for key in ("all", "", None, "nonsense"):
+        assert [r["name"] for r in HL2.filter_campaigns_by_format(rows, key)] == ["a", "b", "c"]
+    assert HL2.filter_campaigns_by_format([], "html") == []
