@@ -764,7 +764,7 @@ def test_every_card_name_in_the_page_and_the_settings_view_is_unique_and_none_co
     keys = []
     for name in ("settings_view.py", os.path.join("pages", "campaigns.py")):
         keys += re.findall(r'key=f?"(se_card_[^"]+)"', open(os.path.join(root, name), encoding="utf-8").read())
-    assert sorted(keys) == ["se_card_accounts", "se_card_asana", "se_card_danger", "se_card_limits", "se_card_maint", "se_card_readiness", "se_card_status", "se_card_tracker"]
+    assert sorted(keys) == ["se_card_accounts", "se_card_asana", "se_card_danger", "se_card_footer", "se_card_limits", "se_card_maint", "se_card_readiness", "se_card_status", "se_card_tracker", "se_card_tracking"]
 
 
 def test_just_after_saving_the_page_shows_it_as_saved_even_while_its_own_copy_of_the_settings_is_still_old():
