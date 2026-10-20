@@ -4,7 +4,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import outreach
-from config import WORKFLOW_SEND_TEST
+from config import CAMPAIGNS_DIR, WORKFLOW_SEND_TEST
 
 import html_campaign_logic as hc
 import html_editor_html as EH
@@ -12,6 +12,7 @@ import html_editor_logic as EL
 import sequences_html as H
 from github_client import GitHubActionsError
 from leads_logic import humanize_stage
+from settings_logic import build_footer_settings_override, load_raw_override_live, override_file_path, override_to_yaml_bytes
 
 
 def _keys(campaign_name: str, prefix: str, variant: str) -> dict:
@@ -35,6 +36,14 @@ def _apply_upload(upload_key: str, text_key: str, error_key: str) -> None:
 
 def _use_layout(layout_key: str, text_key: str) -> None:
     st.session_state[text_key] = hc.starter_html(st.session_state.get(layout_key) or hc.DEFAULT_LAYOUT)
+
+
+def _add_footer(text_key: str) -> None:
+    st.session_state[text_key] = hc.add_footer_placeholder(st.session_state.get(text_key, ""))
+
+
+def _remove_footer(text_key: str) -> None:
+    st.session_state[text_key] = hc.remove_footer_placeholder(st.session_state.get(text_key, ""))
 
 
 def _reload(keys: dict) -> None:
@@ -64,6 +73,8 @@ def render_html_designs(ctx, client, campaign_name: str, stages, variants) -> No
     prefix, variant = choice.split("|")
     keys = _keys(campaign_name, prefix, variant)
     path = EL.design_path(campaign_name, prefix, variant)
+    footer_now = EL.effective_footer(ctx.campaign_cfg, st.session_state.get(EL.footer_snapshot_key(campaign_name)))
+    cfg_now = {**ctx.campaign_cfg, "footer": footer_now}                       # a footer saved a moment ago counts at once, before the app's own copy catches up
 
     if keys["saved"] not in st.session_state:
         st.session_state[keys["saved"]] = _read_design(client, path)
@@ -153,7 +164,7 @@ def render_html_designs(ctx, client, campaign_name: str, stages, variants) -> No
         lead_labels = dict(lead_choices)
         picked = st.selectbox("Preview as", [k for k, _ in lead_choices], format_func=lead_labels.get, key=keys["lead"], label_visibility="collapsed")
         width_name = st.radio("Width", list(EL.PREVIEW_WIDTHS), horizontal=True, key=keys["width"], label_visibility="collapsed")
-        preview = EL.render_preview(text, EL.pick_lead(ctx.leads, picked), ctx.campaign_cfg, utm_content=f"{prefix}_{variant}")
+        preview = EL.render_preview(text, EL.pick_lead(ctx.leads, picked), cfg_now, utm_content=f"{prefix}_{variant}")
         if preview["html"] is not None:
             components.html(EL.preview_document(preview["html"]), width=EL.PREVIEW_WIDTHS[width_name], height=EL.PREVIEW_HEIGHT, scrolling=True)
         else:
@@ -162,8 +173,69 @@ def render_html_designs(ctx, client, campaign_name: str, stages, variants) -> No
             st.warning("These placeholders match no column for this lead: " + ", ".join("{{ " + n + " }}" for n in preview["missing"]))
         with st.container(key="he_checks"):
             st.markdown(EH.title_html("Checks", "Errors stop the campaign launching; the rest are suggestions."), unsafe_allow_html=True)
-            result = hc.html_checks(text, plain.get("body", ""), EL.known_variables(ctx.leads), ctx.campaign_cfg.get("footer"))
+            result = hc.html_checks(text, plain.get("body", ""), EL.known_variables(ctx.leads), footer_now)
             st.markdown(EH.checks_html(result), unsafe_allow_html=True)
         with st.expander("Plain-text copy and subject (edit them under \"Subject & plain text\")"):
             st.caption(f"Subject: {plain.get('subject') or '(blank: continues the thread)'}")
             st.code(plain.get("body", "") or "(empty)", language=None)
+
+    _render_footer_panel(client, campaign_name, ctx, keys["text"], text, footer_now)
+
+
+def _render_footer_panel(client, campaign_name: str, ctx, text_key: str, text: str, footer_now: dict) -> None:
+    """Under the design of the email on screen: does THIS email have the footer (one button adds or removes it), and the footer's details, which are written once and shared by
+    every email of the campaign. A footer is optional; the only rule is that an email gives some way to opt out (its footer, or the designer's own unsubscribe line)."""
+    snapshot_key = EL.footer_snapshot_key(campaign_name)
+    flash_key = f"footer_flash_{campaign_name}"
+    flash = st.session_state.pop(flash_key, None)
+    included = hc.footer_in_design(text)
+    problems = hc.footer_problems(footer_now)
+    st.markdown(H.section_label_html("Email footer"), unsafe_allow_html=True)
+    with st.container(key="he_footer"):
+        status_column, button_column = st.columns([3, 1.3], vertical_alignment="center")
+        with status_column:
+            if included:
+                st.markdown(EH.title_html("This email has the footer", "It appears where {{ footer }} stands in the design. Remove it if the design has its own address and unsubscribe line."), unsafe_allow_html=True)
+            else:
+                st.markdown(EH.title_html("This email has no footer", "A footer is optional. Add one for the campaign's business name, address and opt-out line, "
+                                          "or give the design its own unsubscribe line."), unsafe_allow_html=True)
+        with button_column:
+            if included:
+                st.button("Remove from this email", key=f"html_footer_remove_{text_key}", on_click=_remove_footer, args=(text_key,), width="stretch")
+            else:
+                st.button("Add the footer", key=f"html_footer_add_{text_key}", type="primary", on_click=_add_footer, args=(text_key,), width="stretch")
+        st.caption("Adding or removing it changes this email only (press Save design to keep it). The footer's details below are the same for every email in the campaign: every stage and every variant.")
+        with st.expander("Footer details (shared by every email in this campaign)", expanded=included and bool(problems)):
+            business_name = st.text_input("Business name", value=footer_now["business_name"], key=f"footer_business_name_{campaign_name}", placeholder="e.g. Kelson Agency")
+            address = st.text_input("Postal address (required for marketing email in many countries)", value=footer_now["address"], key=f"footer_address_{campaign_name}",
+                                    placeholder="e.g. 12 Example Street, New York, NY 10001")
+            opt_out = st.text_input("How people opt out (leave blank for the standard wording)", value=footer_now["opt_out"], key=f"footer_opt_out_{campaign_name}", placeholder=hc.DEFAULT_OPT_OUT)
+            draft = {"business_name": business_name.strip(), "address": address.strip(), "opt_out": opt_out.strip()}
+            changed = draft != footer_now
+            if not hc.footer_problems(draft):
+                st.markdown(EH.title_html("How it will look"), unsafe_allow_html=True)
+                st.markdown(f'<div class="he-footer-preview">{hc.build_footer_html(draft)}</div>', unsafe_allow_html=True)
+            save_column, state_column = st.columns([1, 3])
+            with save_column:
+                save_clicked = st.button("💾 Save footer", key="footer_save", type="primary", disabled=not changed)
+            with state_column:
+                if changed:
+                    st.caption("● Unsaved change")
+                elif problems:
+                    st.caption("Needs the " + " and the ".join(p.replace(" is missing", "") for p in problems) + ".")
+        if flash:
+            st.success(flash)
+        if save_clicked:
+            if hc.footer_problems(draft):
+                st.error("Enter the business name and the postal address.")
+            else:
+                try:
+                    raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)               # the LIVE file, not a possibly stale local copy
+                    updated = build_footer_settings_override(raw_override, draft["business_name"], draft["address"], draft["opt_out"])
+                    client.create_file(override_file_path(campaign_name), override_to_yaml_bytes(updated),
+                                       f"Update email footer for {campaign_name} (via Streamlit, by {ctx.current_user()})")
+                    st.session_state[snapshot_key] = draft
+                    st.session_state[flash_key] = "Footer saved for every email in this campaign. May take a minute to reach the rest of the app while it redeploys."
+                    st.rerun()
+                except GitHubActionsError as exc:
+                    st.error(f"Failed to save: {exc}")
