@@ -7,7 +7,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-import html_campaign_logic as hc  # noqa: E402
 import html_sequences_logic as HS  # noqa: E402
 
 
@@ -19,24 +18,6 @@ def test_only_a_campaign_whose_format_is_exactly_html_is_an_html_campaign(cfg, e
 def test_the_html_path_is_the_txt_path_with_the_other_ending():
     assert HS.html_path_for("templates/C/intro_A.txt") == "templates/C/intro_A.html"
     assert HS.html_path_for("templates/C/intro_A.html") == "templates/C/intro_A.html" and HS.html_path_for("config/campaigns/C.yaml") == "config/campaigns/C.yaml"
-
-
-def test_every_new_txt_gets_a_starter_html_beside_it_in_the_same_save():
-    files = [{"path": "templates/C/intro_B.txt", "content": b"t"}, {"path": "templates/C/followup1_B.txt", "content": b"t2"}]
-    out = HS.with_html_companions(files)
-    assert [f["path"] for f in out] == ["templates/C/intro_B.txt", "templates/C/followup1_B.txt", "templates/C/intro_B.html", "templates/C/followup1_B.html"]
-    assert out[:2] == files and out[2]["content"] == hc.starter_html(hc.DEFAULT_LAYOUT).encode("utf-8")
-
-
-def test_a_design_already_in_the_list_is_kept_and_not_duplicated_and_other_files_are_untouched():
-    files = [{"path": "t/intro_A.txt", "content": b"t"}, {"path": "t/intro_A.html", "content": b"mine"}, {"path": "config/c.yaml", "content": b"y"}]
-    out = HS.with_html_companions(files)
-    assert out == files
-
-
-def test_the_layout_can_be_chosen_and_an_empty_list_stays_empty():
-    assert HS.with_html_companions([{"path": "t/a.txt", "content": b"x"}], layout="announcement")[1]["content"] == hc.starter_html("announcement").encode("utf-8")
-    assert HS.with_html_companions([]) == []
 
 
 def test_deleting_removes_every_text_file_first_and_then_every_design():
@@ -55,18 +36,14 @@ GOOD_DESIGN = "<p>Hi {{ FirstName }}, there is plenty of readable text in this p
 GOOD_FOOTER = {"business_name": "K", "address": "A"}
 
 
-def _email(label="Intro · Variant A", html=GOOD_DESIGN, body="Hello {{ footer }}", problem=None):
-    return {"label": label, "html": html, "body": body, "problem": problem}
+def _email(label="Intro · Variant A", html=GOOD_DESIGN, subject="Hello", first=False, problem=None):
+    return {"label": label, "html": html, "subject": subject, "first": first, "problem": problem}
 
 
 def test_nothing_blocks_a_launch_when_every_email_passes_and_warnings_never_block():
-    assert HS.launch_blockers([_email(), _email("Follow-up 1 · Variant A", body="Just some plain words here")], ["FirstName"], GOOD_FOOTER) == []         # the second only earns a warning
+    styled = "<style>p{color:red}</style>" + GOOD_DESIGN                                         # earns only a warning
+    assert HS.launch_blockers([_email(first=True), _email("Follow-up 1 · Variant A", html=styled, subject="")], ["FirstName"], GOOD_FOOTER) == []
     assert HS.launch_blockers([], ["FirstName"], GOOD_FOOTER) == []
-
-
-def test_the_plain_text_sample_used_for_the_warning_case_really_does_produce_a_warning():
-    import html_campaign_logic as hc2
-    assert any("no opt-out line" in w for w in hc2.html_checks(GOOD_DESIGN, "Just some plain words here", ["FirstName"], GOOD_FOOTER)["warnings"])
 
 
 def test_every_error_is_listed_against_the_email_it_belongs_to():
@@ -74,9 +51,25 @@ def test_every_error_is_listed_against_the_email_it_belongs_to():
     assert len(out) == 2 and out[0].startswith("Intro · Variant A: It contains <script>") and out[1].startswith("Follow-up 1 · Variant B: These placeholders match no Sheet column")
 
 
+def test_the_first_email_must_have_a_subject_but_a_follow_up_may_leave_it_blank_to_continue_the_thread():
+    assert HS.launch_blockers([_email(first=True, subject="")], ["FirstName"], GOOD_FOOTER) == ["Intro · Variant A: the subject is empty. The first email of a sequence needs one."]
+    assert HS.launch_blockers([_email(first=True, subject="   ")], ["FirstName"], GOOD_FOOTER) == ["Intro · Variant A: the subject is empty. The first email of a sequence needs one."]
+    assert HS.launch_blockers([_email(first=False, subject="")], ["FirstName"], GOOD_FOOTER) == []
+    assert HS.launch_blockers([_email(first=True, subject=None)], ["FirstName"], GOOD_FOOTER)[0].endswith("needs one.")
+
+
+def test_an_empty_subject_and_a_design_problem_on_the_same_email_are_both_listed_subject_first():
+    out = HS.launch_blockers([_email(first=True, subject="", html=GOOD_DESIGN + "<form></form>")], ["FirstName"], GOOD_FOOTER)
+    assert len(out) == 2 and "subject is empty" in out[0] and "must not have" in out[1]
+
+
 def test_a_missing_design_and_an_unreadable_one_block_with_their_own_wording():
     out = HS.launch_blockers([_email(html=None), _email("B", problem="500 server error")], ["FirstName"], GOOD_FOOTER)
     assert out == ["Intro · Variant A: has no designed (.html) file yet.", "B: could not be read (500 server error)."]
+
+
+def test_an_unreadable_email_is_reported_once_and_not_also_as_a_missing_subject():
+    assert HS.launch_blockers([_email(first=True, subject="", html=None, problem="boom")], None, None) == ["Intro · Variant A: could not be read (boom)."]
 
 
 def test_an_incomplete_footer_blocks_every_email_that_uses_it_and_none_that_do_not():
