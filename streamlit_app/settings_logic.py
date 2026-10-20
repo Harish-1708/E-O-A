@@ -7,7 +7,7 @@ anything else already in that file are preserved exactly as they were.
 """
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -178,6 +178,116 @@ def build_footer_settings_override(raw_override: Dict, business_name: str, addre
         footer["opt_out"] = opt_out.strip()
     updated["footer"] = footer
     return updated
+
+
+# ---------------------------------------------------------------- time between sends (the wait between sending rounds)
+
+PACING_PRESETS = [("careful", "Careful", 5.0, 10.0), ("standard", "Standard", 3.0, 7.0), ("faster", "Faster", 1.0, 3.0)]
+PACING_FALLBACK = (3.0, 7.0)         # the shared default if config/settings.yaml cannot be read
+PACING_MIN, PACING_MAX, PACING_STEP = 0.5, 120.0, 0.5
+SHORT_GAP_WARNING_MINUTES = 2.0       # gaps shorter than this at the longest look like bulk sending to mail providers
+RUN_TIME_WARNING_MINUTES = 300.0      # a send run is stopped by GitHub at 360 minutes; a run stopped mid-way can repeat an email
+RUN_TIME_LIMIT_MINUTES = 360.0
+
+
+def clamp_pacing(minutes: float) -> float:
+    """A wait as the card can SHOW it: pulled into the range its boxes offer (the engine also accepts 0 and values above 120, which the boxes cannot display)."""
+    return min(PACING_MAX, max(PACING_MIN, float(minutes)))
+
+
+def format_minutes(minutes: float) -> str:
+    """'30 seconds', '1 minute', '3 minutes', '2.5 minutes': a gap, in plain words."""
+    if minutes < 1:
+        return f"{round(minutes * 60)} seconds"
+    shown = int(minutes) if float(minutes).is_integer() else round(minutes, 1)
+    return f"{shown} minute" + ("" if shown == 1 else "s")
+
+
+def format_duration(minutes: float) -> str:
+    """'45 min', '2 h', '2 h 5 min': how long a whole run takes."""
+    total = int(round(minutes))
+    hours, rest = divmod(total, 60)
+    if hours == 0:
+        return f"{rest} min"
+    return f"{hours} h" + (f" {rest} min" if rest else "")
+
+
+def global_default_pacing(settings: Optional[Dict]) -> Tuple[float, float]:
+    """The wait every campaign starts with (config/settings.yaml), or the standard 3 to 7 minutes if it cannot be read."""
+    try:
+        sending = settings["default_campaign_settings"]["sending"]
+        low, high = float(sending["delay_min_minutes"]), float(sending["delay_max_minutes"])
+        return (low, high) if 0 <= low <= high else PACING_FALLBACK
+    except (KeyError, TypeError, ValueError):
+        return PACING_FALLBACK
+
+
+def preset_for(low: float, high: float) -> str:
+    """The key of the preset these two numbers are, or 'custom'."""
+    for key, _label, preset_low, preset_high in PACING_PRESETS:
+        if abs(low - preset_low) < 1e-9 and abs(high - preset_high) < 1e-9:
+            return key
+    return "custom"
+
+
+def validate_pacing(low: float, high: float) -> List[str]:
+    """The same rules the engine applies when it loads the campaign, plus the limits the screen offers, so Settings can never save what would not load."""
+    errors = []
+    for label, value in (("The shortest wait", low), ("The longest wait", high)):
+        if value is None or value != value or isinstance(value, bool):
+            errors.append(f"{label} must be a number of minutes.")
+        elif value < PACING_MIN or value > PACING_MAX:
+            errors.append(f"{label} must be between {format_minutes(PACING_MIN)} and {int(PACING_MAX)} minutes.")
+    if not errors and low > high:
+        errors.append("The shortest wait cannot be longer than the longest wait.")
+    return errors
+
+
+def build_pacing_override(raw_override: Dict, low: Optional[float], high: Optional[float]) -> Dict:
+    """The campaign's settings with its own wait between sends set. Passing None, None removes the campaign's own wait, so it goes back to the shared default. Only the two
+    wait keys under `sending` are touched; every other setting (daily limit, accounts, schedule, ...) is carried over untouched."""
+    updated = dict(raw_override or {})
+    sending = dict(updated.get("sending") or {}) if isinstance(updated.get("sending"), dict) else {}
+    if low is None or high is None:
+        sending.pop("delay_min_minutes", None)
+        sending.pop("delay_max_minutes", None)
+    else:
+        sending["delay_min_minutes"] = _plain_number(low)
+        sending["delay_max_minutes"] = _plain_number(high)
+    if sending:
+        updated["sending"] = sending
+    else:
+        updated.pop("sending", None)
+    return updated
+
+
+def _plain_number(value: float):
+    """3.0 is saved as 3 and 2.5 as 2.5, so the settings file stays tidy."""
+    return int(value) if float(value).is_integer() else float(value)
+
+
+def pacing_notes(daily_limit: int, mailboxes: int, low: float, high: float) -> List[Tuple[str, str]]:
+    """[(kind, sentence)] telling what these two numbers mean in practice: how often each mailbox sends, how long the whole daily limit takes, and any danger. Kinds are the
+    note styles 'info', 'ok' and 'warn'. A run waits between rounds (one email per mailbox per round), so n emails over m mailboxes take (rounds - 1) waits."""
+    mailboxes = max(1, int(mailboxes))
+    average = (low + high) / 2
+    notes: List[Tuple[str, str]] = []
+    if average > 0:
+        per_hour = 60 / average
+        notes.append(("info", f"Each mailbox sends about one email every {format_minutes(average)} (around {per_hour:.0f} an hour)."))
+    rounds = -(-max(1, int(daily_limit)) // mailboxes)
+    typical, longest = (rounds - 1) * average, (rounds - 1) * high
+    if rounds > 1:
+        notes.append(("info", f"Sending the whole daily limit of {int(daily_limit)} across {mailboxes} mailbox{'es' if mailboxes != 1 else ''} takes about {format_duration(typical)}"
+                              f" (at most {format_duration(longest)})."))
+    if longest > RUN_TIME_WARNING_MINUTES:
+        notes.append(("warn", f"A run this long ({format_duration(longest)} at most) can be cut off by GitHub's {int(RUN_TIME_LIMIT_MINUTES // 60)}-hour limit, and a run cut off part-way can repeat "
+                              "an email. Use more mailboxes, a lower daily limit or shorter waits."))
+    if 0 < high < SHORT_GAP_WARNING_MINUTES:
+        notes.append(("warn", "Gaps this short look like bulk sending to mail providers and can hurt delivery. A few minutes is safer."))
+    if high == low and high > 0:
+        notes.append(("info", "The wait is exactly the same every time. A range (for example 3 to 7) looks more natural to mail providers."))
+    return notes
 
 
 def build_tracking_settings_override(raw_override: Dict, enabled: bool) -> Dict:
