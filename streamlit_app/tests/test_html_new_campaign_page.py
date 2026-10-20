@@ -133,7 +133,7 @@ def test_creating_an_html_campaign_commits_the_pair_of_files_and_the_settings_fi
         assert files["templates/Spring_Launch/intro_A.html"].decode() == hc.starter_html("announcement")
         assert yaml.safe_load(files["config/campaigns/Spring_Launch.yaml"]) == {"format": "html"}
         txt = files["templates/Spring_Launch/intro_A.txt"].decode()
-        assert txt.startswith("Subject: Write your subject here\n\n") and txt.rstrip().endswith("{{ footer }}") and "{{ FirstName }}" in txt
+        assert txt.startswith("Subject: Write your subject here\n\n") and txt.split("\n\n", 1)[1].strip() == ""          # only the subject: the text half is made from the design
         assert record["workflows"] and record["workflows"][0][1] == {"campaign": "Spring_Launch"}
         assert any("created as an HTML campaign" in s.value and "footer" in s.value for s in at.success)
 
