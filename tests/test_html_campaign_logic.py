@@ -109,8 +109,9 @@ def test_the_footer_placeholder_is_always_known():
     assert H.html_checks(GOOD, TEXT, [], FOOTER)["errors"] == ["These placeholders match no Sheet column: {{ FirstName }}, {{ CompanyName }}."]
 
 
-def test_an_empty_plain_text_copy_is_an_error():
-    assert any("plain-text copy is empty" in e for e in H.html_checks(GOOD, "  ", KNOWN, FOOTER)["errors"])
+def test_the_plain_text_argument_no_longer_matters_because_the_plain_text_half_is_made_from_the_design():
+    for plain in ("", "  ", None, "anything at all", TEXT):
+        assert H.html_checks(GOOD, plain, KNOWN, FOOTER) == {"errors": [], "warnings": []}
 
 
 def test_no_way_to_opt_out_is_an_error_but_the_designers_own_unsubscribe_line_is_enough():
@@ -147,9 +148,9 @@ def test_many_links_a_thin_email_and_a_style_block_are_warnings_only():
     assert any("<style> block" in w for w in H.html_checks(styled, TEXT, KNOWN, FOOTER)["warnings"])
 
 
-def test_a_plain_text_copy_without_an_opt_out_gets_a_warning_not_an_error():
+def test_a_missing_opt_out_in_an_old_hand_written_copy_is_not_reported_because_that_copy_is_never_sent():
     result = H.html_checks(GOOD, "Subject: Hi\n\nJust text.", KNOWN, FOOTER)
-    assert any("no opt-out line" in w for w in result["warnings"]) and result["errors"] == []
+    assert result == {"errors": [], "warnings": []}
 
 
 # ================================================================ the footer
@@ -190,7 +191,7 @@ def test_html_to_text_unescapes_entities():
 def test_every_starter_layout_passes_every_check_with_a_complete_footer(key):
     layout = H.STARTER_LAYOUTS[key]
     assert layout["label"] and layout["description"]
-    result = H.html_checks(layout["html"], H.starter_plain_text(), ["FirstName"], FOOTER)
+    result = H.html_checks(layout["html"], "", ["FirstName"], FOOTER)
     assert result == {"errors": [], "warnings": []}, (key, result)
     assert "{{ footer }}" in layout["html"] and "{{ FirstName }}" in layout["html"] and H.unsafe_problems(layout["html"]) == []
 
@@ -200,19 +201,9 @@ def test_there_are_at_least_three_layouts_and_an_unknown_key_gives_the_default()
     assert H.starter_html("nonsense") == H.starter_html(H.DEFAULT_LAYOUT) == H.STARTER_LAYOUTS[H.DEFAULT_LAYOUT]["html"]
 
 
-def test_the_starter_plain_text_has_a_subject_line_a_blank_line_and_the_footer_placeholder():
-    text = H.starter_plain_text("Spring news")
-    assert text.startswith("Subject: Spring news\n\n") and text.rstrip().endswith("{{ footer }}") and "{{ FirstName }}" in text
-    assert H.starter_plain_text("   ").startswith("Subject: Your subject here\n\n")
-
-
 def test_the_starter_layouts_are_small_enough_for_gmail_and_use_the_safe_table_style():
     for layout in H.STARTER_LAYOUTS.values():
         assert len(layout["html"].encode("utf-8")) < 8 * 1024 and "<table" in layout["html"] and "max-width:600px" in layout["html"]
-
-
-def test_the_starter_plain_text_is_the_subject_line_then_the_starter_body():
-    assert H.starter_plain_text("Hi") == "Subject: Hi\n\n" + H.starter_plain_body() + "\n" and H.starter_plain_body().rstrip().endswith("{{ footer }}") and "Subject:" not in H.starter_plain_body()
 
 
 def test_when_the_sheets_columns_are_not_known_placeholders_are_not_checked_instead_of_wrongly_reported():
@@ -302,7 +293,7 @@ def test_a_hostile_or_broken_address_never_crashes_and_tagging_never_adds_markup
 def test_the_starter_layouts_keep_passing_every_check_when_their_links_are_tagged():
     for layout in H.STARTER_LAYOUTS.values():
         tagged = H.tag_links(layout["html"], TAGS)
-        assert H.html_checks(tagged, H.starter_plain_text(), ["FirstName"], FOOTER) == {"errors": [], "warnings": []}
+        assert H.html_checks(tagged, "", ["FirstName"], FOOTER) == {"errors": [], "warnings": []}
 
 
 # ================================================================ adding and removing the footer in a design
@@ -363,3 +354,27 @@ def test_removing_a_footer_that_is_not_there_changes_nothing_and_adding_then_rem
 def test_a_footer_row_written_in_capitals_is_removed_as_a_row_too():
     assert H.remove_footer_placeholder("<TABLE><TR><TD>{{ footer }}</TD></TR><TR><TD>x</TD></TR></TABLE>") == "<TABLE><TR><TD>x</TD></TR></TABLE>"
     assert H.remove_footer_placeholder("<tr class='f'>\n  <td style='x'>\n {{footer}}\n </td>\n</tr>\n<tr><td>y</td></tr>") == "<tr><td>y</td></tr>"
+
+
+# ================================================================ the subject line
+
+@pytest.mark.parametrize("typed, line", [("Hello", "Hello"), ("  Hello   world  ", "Hello world"), ("Line one\nLine two", "Line one Line two"), ("a\r\n\r\nb\tc", "a b c"), ("", ""), (None, ""), ("{{ FirstName }}, news", "{{ FirstName }}, news")])
+def test_a_subject_is_always_one_clean_line(typed, line):
+    assert H.subject_line(typed) == line
+
+
+def test_the_subject_file_is_the_subject_line_a_blank_line_and_the_body_that_was_already_there():
+    assert H.build_subject_file("Spring news") == "Subject: Spring news\n\n"
+    assert H.build_subject_file("Spring news", "old body\n") == "Subject: Spring news\n\nold body\n"
+    assert H.build_subject_file("", "x") == "Subject: \n\nx"
+
+
+def test_a_typed_subject_can_never_add_a_line_or_a_header_to_the_file():
+    out = H.build_subject_file("Hi\nBcc: boss@x.com\n\nInjected body")
+    assert out.split("\n")[0] == "Subject: Hi Bcc: boss@x.com Injected body" and out.count("\n") == 2
+
+
+def test_a_subject_file_is_read_back_exactly_by_the_engines_own_parser():
+    import outreach
+    for subject in ("Spring news", "{{ FirstName }}, a note", "", "Ünïcode ☕ subject"):
+        assert outreach.parse_template_content(H.build_subject_file(subject))["subject"] == subject
