@@ -109,6 +109,9 @@ def seq_page(world=None, leads=None, send_log=None, responses=None, preset=None,
         world.files.add(name)
         if name.endswith(".html"):
             world.html[name] = content.decode("utf-8")
+        elif name.endswith(".txt"):                                           # a saved subject file is what the next read returns
+            head, _, body = content.decode("utf-8").partition("\n\n")
+            world.content[name] = (head[len("Subject:"):].strip(), body)
 
     def delete(self, path, message=""):
         if delete_error:
