@@ -12,15 +12,18 @@ import outreach  # noqa: E402
 SAMPLE_LEAD = {"FirstName": "Ann", "LastName": "Lee", "Company": "Acme Studio", "Email": "ann@example.com"}
 UPLOAD_LIMIT_BYTES = 1_000_000                      # far more than Gmail will show (it cuts at about 102 KB), but a sane ceiling for an upload
 PREVIEW_WIDTHS = {"Desktop": None, "Mobile": 375}
-PREVIEW_HEIGHT = 380                  # where the preview frame starts; the page inside then resizes the frame to fit the email (see FIT_SCRIPT)
-PREVIEW_MAX_HEIGHT = 1400             # a very long email scrolls inside the frame beyond this
-# Added to the PREVIEW only (never saved, never sent, and only after the design itself has passed the safety check, which refuses any script of the designer's own): it sets
-# the height of the preview's frame to the height of the email, so a short email does not leave an empty gap under it and a long one is not cut off.
-FIT_SCRIPT = ("<script>(function(){var cap=%d;function fit(){try{var d=document.documentElement,b=document.body;var h=Math.max(d.scrollHeight,b?b.scrollHeight:0);"
-              "window.frameElement.style.height=Math.min(h,cap)+'px';}catch(e){}}window.addEventListener('load',fit);window.addEventListener('resize',fit);"
-              "setTimeout(fit,120);setTimeout(fit,700);})();</script>") % PREVIEW_MAX_HEIGHT
+PREVIEW_HEIGHT = 380                  # where the preview frame starts; the page inside then resizes the frame AND the box around it to fit the email (see FIT_SCRIPT)
+PREVIEW_MAX_HEIGHT = 900              # a longer email scrolls inside the preview from here, so a big template never pushes everything else off the screen
+# Added to the PREVIEW only (never saved, never sent, and only after the design itself has passed the safety check, which refuses any script of the designer's own). It sets the
+# height of the preview's frame AND of the element Streamlit wraps it in to the height of the email: sizing the frame alone left the wrapper at its starting height, so a tall
+# email spilled out over whatever was drawn below it. The frame is never made taller than the wrapper actually accepted, so if the wrapper cannot be resized the preview
+# simply scrolls inside itself: it can never overlap what is below.
+FIT_SCRIPT = ("<script>(function(){var cap=%d;function fit(){try{var d=document.documentElement,b=document.body;var h=Math.min(Math.max(d.scrollHeight,b?b.scrollHeight:0),cap);"
+              "var f=window.frameElement,w=f.parentElement,t=h;if(w){w.style.setProperty('height',h+'px','important');t=Math.min(h,w.getBoundingClientRect().height||h);}"
+              "f.style.setProperty('height',t+'px','important');}catch(e){}}"
+              "window.addEventListener('load',fit);window.addEventListener('resize',fit);setTimeout(fit,120);setTimeout(fit,700);})();</script>") % PREVIEW_MAX_HEIGHT
 FOOTER_PLACEHOLDER = ('<div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#92400e;background:#fffaf0;border:1px dashed #f3d9a8;padding:10px;margin:8px;'
-                      'text-align:center;">Your footer will appear here. Add the business name and the postal address under Settings.</div>')
+                      'text-align:center;">Your footer will appear here. Add the business name and the postal address in the Email footer panel below.</div>')
 
 
 def footer_snapshot_key(campaign_name: str) -> str:
