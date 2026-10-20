@@ -188,3 +188,54 @@ def test_streamlits_negative_margin_under_markdown_does_not_drag_the_cards_conte
 def test_the_tiles_and_the_list_follow_one_spacing_rhythm():
     stats = _hub_rule(".hb-stats {")
     assert "gap: 16px" in stats and "margin: 20px 0 16px" in stats and "padding: 16px 20px" in _hub_rule(".hb-stat {")
+
+
+# ================================================================ HTML campaigns: the badge, the preview of what is created, the option cards
+
+ROW = {"name": "Spring", "status": "draft", "status_label": "Draft", "problems": [], "total_leads": 0, "sent": 0, "replies": 0, "reply_rate": "—", "last_activity": "", "series": {"bars": []}}
+
+
+def test_a_plain_text_card_is_exactly_what_it_was_until_the_page_asks_for_badges():
+    assert "hb-fmt" not in H.campaign_card_html(ROW).replace(".hb-fmt", "") and H.campaign_card_html(ROW) == H.campaign_card_html(ROW, show_format=False)
+    assert H.campaign_card_html({**ROW, "format": "text"}) == H.campaign_card_html(ROW)
+
+
+def test_an_html_card_always_carries_its_badge_beside_the_name_and_a_text_card_only_when_asked():
+    html_card = H.campaign_card_html({**ROW, "format": "html"})
+    assert '<div class="hb-name">Spring<span class="hb-fmt hb-fmt-html">HTML</span></div>' in html_card
+    assert '<span class="hb-fmt hb-fmt-text">Text</span>' in H.campaign_card_html(ROW, show_format=True) and "hb-fmt-html" not in H.campaign_card_html(ROW, show_format=True)
+    assert "hb-fmt-text" not in H.campaign_card_html({**ROW, "format": "html"}, show_format=True)
+
+
+def test_the_badge_cannot_change_how_a_hostile_name_is_shown():
+    for hostile in HOSTILE:
+        _safe(H.campaign_card_html({**ROW, "name": hostile, "format": "html"}))
+
+
+def test_the_preview_of_what_is_created_lists_one_file_for_text_and_the_pair_and_the_settings_for_html():
+    text = H.created_files_html("text", "Spring")
+    assert "intro_A.txt" in text and "intro_A.html" not in text and "yaml" not in text and "templates/Spring/" in text
+    html_preview = H.created_files_html("html", "Spring")
+    assert "intro_A.txt" in html_preview and "intro_A.html" in html_preview and "Spring.yaml" in html_preview and "format: html" in html_preview
+
+
+def test_the_preview_of_what_is_created_uses_a_stand_in_name_until_one_is_typed():
+    assert "Your_Campaign" in H.created_files_html("text", "") and "Your_Campaign.yaml" in H.created_files_html("html", "")
+
+
+@pytest.mark.parametrize("hostile", HOSTILE)
+def test_a_hostile_name_can_never_become_markup_in_the_preview_of_what_is_created(hostile):
+    out = H.created_files_html("html", hostile)
+    assert "<script" not in out and "<img" not in out and out.count("<div") == 1 and out.count("</div>") == 1
+
+
+def test_both_formats_have_a_label_and_a_caption_that_says_who_it_is_for():
+    assert set(H.FORMAT_LABELS) == set(H.FORMAT_CAPTIONS) == {"text", "html"} and "first contact" in H.FORMAT_CAPTIONS["text"] and "opted in" in H.FORMAT_CAPTIONS["html"]
+
+
+def test_the_format_and_layout_options_are_cards_with_the_chosen_one_outlined():
+    card = _rule('[class*="st-key-hub_new_campaign_format"] [data-testid="stRadioGroup"] > div, ')
+    assert "border: 1.5px solid #d1d5db" in card and "border-radius: 12px" in card
+    chosen = _rule('[class*="st-key-hub_new_campaign_format"] [data-testid="stRadioGroup"] > div[data-selected="true"]')
+    assert "border-color: #2563eb" in chosen and "background: #f3f7ff" in chosen
+    assert 'st-key-hub_new_campaign_layout' in H.HUB_CSS
