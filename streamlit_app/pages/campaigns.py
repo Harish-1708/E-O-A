@@ -26,6 +26,10 @@ from shell_data import (  # noqa: E402
 )
 import campaigns_hub_html as HH  # noqa: E402
 import campaigns_hub_logic as HL  # noqa: E402
+import html_campaign_logic as hc  # noqa: E402
+import html_editor_logic  # noqa: E402
+from html_sequences_logic import launch_blockers  # noqa: E402
+from leads_logic import humanize_stage  # noqa: E402
 from campaigns_hub_logic import filter_campaigns_by_search  # noqa: E402
 from performance_logic import build_campaign_performance, build_best_performers  # noqa: E402
 from performance_view import render_performance  # noqa: E402
@@ -36,14 +40,14 @@ from data_import_logic import (  # noqa: E402
     NEW_CUSTOM_FIELD_OPTION, validate_custom_field_name, find_duplicate_columns, build_full_lead_table,
 )
 from campaign_builder import (  # noqa: E402
-    build_campaign_files,
+    build_campaign_files, new_campaign_override_file,
     validate_campaign_name, commit_message_for_campaign, confirmation_matches_campaign_name,
     list_campaign_files_to_delete, build_campaign_duplication_files,
 )
 from settings_logic import (  # noqa: E402
     load_raw_override_live, merge_live_override_into_cfg,
     override_to_yaml_bytes, override_file_path,
-    build_asana_settings_override, build_tracker_sync_settings_override,
+    build_asana_settings_override, build_tracker_sync_settings_override, build_footer_settings_override,
 )
 from schedule_view import ScheduleContext, render_schedule_tab  # noqa: E402
 from settings_view import SettingsContext, render_settings_tab  # noqa: E402
@@ -209,17 +213,19 @@ def _duplicate_campaign_dialog(source_campaign_name, existing_campaigns):
                 # finishes, and reading it here previously produced a
                 # duplicate with ZERO template files whenever that lag
                 # was in effect, with no error at all.
-                filenames = client.list_directory_files(f"templates/{source_campaign_name}")
-                source_template_files = {
-                    filename: client.get_file_content(f"templates/{source_campaign_name}/{filename}")
-                    for filename in filenames if filename.endswith(".txt")
-                }
-
                 override_path = f"config/campaigns/{source_campaign_name}.yaml"
                 source_raw_override = None
                 if client.get_file_sha(override_path) is not None:
                     override_bytes = client.get_file_content(override_path)
                     source_raw_override = yaml.safe_load(override_bytes.decode("utf-8")) or {}
+                # An HTML campaign's emails are two files each: the .txt and the designed .html. Both are copied (and only for an HTML campaign, so a plain-text one is unchanged).
+                copy_html = (source_raw_override or {}).get("format") == hc.FORMAT_HTML
+
+                filenames = client.list_directory_files(f"templates/{source_campaign_name}")
+                source_template_files = {
+                    filename: client.get_file_content(f"templates/{source_campaign_name}/{filename}")
+                    for filename in filenames if filename.endswith(".txt") or (copy_html and filename.endswith(".html"))
+                }
 
                 files = build_campaign_duplication_files(new_name, source_template_files, source_raw_override)
                 client.commit_campaign_files_directly(
@@ -241,10 +247,20 @@ def _duplicate_campaign_dialog(source_campaign_name, existing_campaigns):
 
 @st.dialog("New campaign")
 def _new_campaign_dialog(existing_campaigns):
-    st.markdown(HH.dialog_intro_html("Just the name. You write the actual email in the Sequences tab once the campaign exists (a placeholder Intro is created for you to edit there)."),
+    st.markdown(HH.dialog_intro_html("A name and a format. You write the real emails in the Sequences tab once the campaign exists (a placeholder Intro is created for you to edit there)."),
                 unsafe_allow_html=True)
     campaign_name = st.text_input("Campaign name", key="new_campaign_name", placeholder="e.g. Spring_Launch")
     st.markdown(HH.name_feedback_html(*HL.name_feedback(campaign_name, existing_campaigns)), unsafe_allow_html=True)
+    formats = [hc.FORMAT_TEXT, hc.FORMAT_HTML]
+    fmt = st.radio("Email format (chosen once, for the whole campaign)", formats, key="hub_new_campaign_format", format_func=HH.FORMAT_LABELS.get,
+                   captions=[HH.FORMAT_CAPTIONS[f] for f in formats])
+    layout = hc.DEFAULT_LAYOUT
+    if fmt == hc.FORMAT_HTML:
+        layouts = list(hc.STARTER_LAYOUTS)
+        layout = st.radio("Starting layout (you can edit everything afterwards)", layouts, key="hub_new_campaign_layout", format_func=lambda key: hc.STARTER_LAYOUTS[key]["label"],
+                          captions=[hc.STARTER_LAYOUTS[key]["description"] for key in layouts])
+    st.markdown(HH.created_files_html(fmt, campaign_name.strip()), unsafe_allow_html=True)
+    st.caption("The format cannot be changed later (a duplicate keeps it). To switch, create a new campaign.")
     confirm = st.checkbox("Create now — it's live immediately, no approval step", key="new_campaign_confirm")
 
     _spacer, cancel_column, go_column = st.columns([2, 1, 1.5])
@@ -264,8 +280,12 @@ def _new_campaign_dialog(existing_campaigns):
             try:
                 files = build_campaign_files(
                     campaign_name, "intro",
-                    {"A": {"subject": PLACEHOLDER_INTRO_SUBJECT, "body": PLACEHOLDER_INTRO_BODY}},
+                    {"A": {"subject": PLACEHOLDER_INTRO_SUBJECT, "body": PLACEHOLDER_INTRO_BODY if fmt != hc.FORMAT_HTML else hc.starter_plain_body()}},
+                    fmt=fmt, layout=layout,
                 )
+                settings_file = new_campaign_override_file(campaign_name, fmt)     # only an HTML campaign needs one: it says format: html
+                if settings_file:
+                    files.append(settings_file)
                 client = _get_github_client()
                 client.commit_campaign_files_directly(
                     files=files,
@@ -284,11 +304,17 @@ def _new_campaign_dialog(existing_campaigns):
                 # still-stale local checkout. Staying on the hub and saying
                 # so plainly is the honest version of this UX.
                 st.session_state["show_new_campaign_dialog"] = False
-                st.success(
-                    f"'{campaign_name}' created with a placeholder Intro. It'll appear in the list below "
-                    "within a minute or so, once the app finishes redeploying — open it and go to "
-                    "Sequences to write the real email."
-                )
+                if fmt == hc.FORMAT_HTML:
+                    st.success(
+                        f"'{campaign_name}' created as an HTML campaign, with a starter design and a placeholder Intro. It'll appear in the list below within a minute or so, once the "
+                        "app finishes redeploying. Open it, fill in its email footer under Settings, then go to Sequences to edit the design (or upload your designer's HTML)."
+                    )
+                else:
+                    st.success(
+                        f"'{campaign_name}' created with a placeholder Intro. It'll appear in the list below "
+                        "within a minute or so, once the app finishes redeploying — open it and go to "
+                        "Sequences to write the real email."
+                    )
             except GitHubActionsError as exc:
                 st.error(f"Failed to create campaign: {exc}")
 
@@ -299,10 +325,13 @@ def _new_campaign_dialog(existing_campaigns):
 def _clear_hub_filters() -> None:
     st.session_state["hub_search"] = ""
     st.session_state["hub_filter"] = "all"
+    st.session_state["hub_format"] = "all"
 
 
 def _open_new_campaign_dialog() -> None:
     st.session_state["show_new_campaign_dialog"] = True
+    st.session_state["hub_new_campaign_format"] = hc.FORMAT_TEXT                  # every visit starts on plain text, the safe default
+    st.session_state["hub_new_campaign_layout"] = hc.DEFAULT_LAYOUT
 
 
 def _render_hub(just_arrived: bool):
@@ -375,14 +404,19 @@ def _render_hub(just_arrived: bool):
         labels = dict(options)
         if st.session_state.get("hub_filter") not in labels:
             st.session_state["hub_filter"] = "all"
+        format_options = HL.format_filter_options(rows)                   # empty until some campaign is an HTML campaign
+        format_labels = dict(format_options)
+        if format_options and st.session_state.get("hub_format") not in format_labels:
+            st.session_state["hub_format"] = "all"
         with filter_column:
             chosen = st.pills("Status", [key for key, _ in options], format_func=lambda key: labels[key], selection_mode="single", key="hub_filter", label_visibility="collapsed")
+            chosen_format = st.pills("Format", [key for key, _ in format_options], format_func=lambda key: format_labels[key], selection_mode="single", key="hub_format", label_visibility="collapsed") if format_options else "all"
         with search_column:
             search = st.text_input("Search campaigns", key="hub_search", label_visibility="collapsed", placeholder="🔍 Search campaigns…")
         with sort_column:
             sort = st.selectbox("Sort", HL.SORT_OPTIONS, key="hub_sort", label_visibility="collapsed", format_func=lambda option: f"Sort: {option}")
 
-    visible = HL.sort_campaigns(HL.filter_campaigns_by_status(filter_campaigns_by_search(rows, search), chosen or "all"), sort)
+    visible = HL.sort_campaigns(HL.filter_campaigns_by_format(HL.filter_campaigns_by_status(filter_campaigns_by_search(rows, search), chosen or "all"), chosen_format or "all"), sort)
 
     if not rows:
         st.markdown(HH.empty_state_html("📣", "Create your first campaign", "It only needs a name. You write the emails in the Sequences tab afterwards."), unsafe_allow_html=True)
@@ -396,7 +430,7 @@ def _render_hub(just_arrived: bool):
         for index, row in enumerate(visible):
             with st.container(key=f"hub_card_{row['status']}_{index}"):
                 body_column, action_column = st.columns([5.4, 2.1], vertical_alignment="center")
-                body_column.markdown(HH.campaign_card_html(row), unsafe_allow_html=True)
+                body_column.markdown(HH.campaign_card_html(row, show_format=bool(format_options)), unsafe_allow_html=True)
                 with action_column:
                     open_column, duplicate_column = st.columns(2)
                     with open_column:
@@ -782,7 +816,10 @@ def _render_settings_tab(campaign_cfg, leads, send_log=None):
     status, _problems = compute_campaign_status(campaign_cfg, leads)
 
     def extras():
-        # The integrations first, then the rarely needed maintenance tools last, as in the design.
+        # An HTML campaign's own settings first (its email footer: nothing of it shows in a plain-text campaign), then the integrations, then the rarely needed
+        # maintenance tools last, as in the design.
+        if campaign_cfg.get("format") == hc.FORMAT_HTML:
+            _render_footer_section_in_settings(campaign_cfg)
         _render_asana_sync_section_in_settings(campaign_cfg)
         _render_tracker_sync_section_in_settings(campaign_cfg)
         _render_maintenance_section_in_settings(campaign_cfg)
@@ -987,6 +1024,7 @@ def _render_status_controls(campaign_cfg, leads, just_arrived: bool, send_log=()
 
     if status == STATUS_DRAFT and st.session_state[launch_confirm_key]:
         ready, launch_problems = compute_campaign_readiness(campaign_cfg, leads)
+        blockers = _html_launch_blockers(campaign_cfg, leads) if campaign_cfg.get("format") == hc.FORMAT_HTML else []
         st.warning(
             "**Launch this campaign?** This makes it active and allows Send Batch to run for it "
             "(still respecting its schedule and daily limits, if any)."
@@ -996,9 +1034,11 @@ def _render_status_controls(campaign_cfg, leads, just_arrived: bool, send_log=()
                 "Heads up, not a blocker: " + ", ".join(launch_problems) +
                 " — Send simply won't do anything until this is resolved."
             )
+        if blockers:
+            st.error("**This HTML campaign cannot launch yet.** Fix these first (each is shown in the editor under Sequences → Designed (HTML) emails):\n\n" + "\n".join(f"- {b}" for b in blockers))
         confirm_col1, confirm_col2 = st.columns(2)
         with confirm_col1:
-            if st.button("Confirm Launch", type="primary", key="confirm_launch_button"):
+            if st.button("Confirm Launch", type="primary", key="confirm_launch_button", disabled=bool(blockers)):
                 if _update_campaign_status(campaign_name, "active"):
                     st.session_state[launch_confirm_key] = False
                     st.success("Launched. May take a minute to reflect here while the app redeploys.")
@@ -1006,6 +1046,35 @@ def _render_status_controls(campaign_cfg, leads, just_arrived: bool, send_log=()
             if st.button("Cancel", key="cancel_launch_button"):
                 st.session_state[launch_confirm_key] = False
                 st.rerun()
+
+
+def _html_launch_blockers(campaign_cfg, leads):
+    """For an HTML campaign: everything that must be fixed before it can launch, read LIVE from GitHub (every email's design and plain-text copy, run through the same
+    checks the editor shows). A campaign whose emails cannot be read at all is also blocked, never waved through."""
+    name = campaign_cfg["_campaign_name"]
+    try:
+        client = _get_github_client()
+        stages, variants = _fetch_live_stages_and_variants(client, name)
+    except Exception as exc:  # noqa: BLE001
+        return [f"The campaign's emails could not be read to check them ({exc})."]
+    emails = []
+    for stage in stages:
+        for variant in variants:
+            prefix = stage["template_prefix"]
+            entry = {"label": f"{humanize_stage(prefix)} · Variant {variant}", "html": None, "body": "", "problem": None}
+            try:
+                entry["html"] = client.get_file_content(html_editor_logic.design_path(name, prefix, variant)).decode("utf-8")
+            except GitHubActionsError as exc:
+                if "404" not in str(exc):
+                    entry["problem"] = str(exc)
+            except UnicodeDecodeError:
+                entry["problem"] = "the file is not UTF-8 text"
+            try:
+                entry["body"] = _fetch_live_template_content(client, name, prefix, variant)["body"]
+            except Exception:  # noqa: BLE001 - an unreadable plain-text copy is reported by the checks as an empty one
+                entry["body"] = ""
+            emails.append(entry)
+    return launch_blockers(emails, html_editor_logic.known_variables(leads), campaign_cfg.get("footer"))
 
 
 def _flip_asana_lock(lock_key: str, currently_locked: bool) -> None:
@@ -1016,6 +1085,66 @@ def _lock_asana_name_after_save(lock_key: str) -> None:
     """Pressing Save locks the project name again, unless the box is blank (then it stays open so the name can be filled in)."""
     if str(st.session_state.get("asana_sync_project_name", "")).strip():
         st.session_state[lock_key] = True
+
+
+def _render_footer_section_in_settings(campaign_cfg):
+    """An HTML campaign's email footer: business name, postal address and how people opt out. It is put wherever a design (and its plain-text copy) has {{ footer }}.
+    Shown only for HTML campaigns. The three boxes are a draft until Save is pressed; Save writes them to the campaign's settings file (read live first, so nothing else in it is lost)."""
+    campaign_name = campaign_cfg["_campaign_name"]
+    footer = campaign_cfg.get("footer") or {}
+    snapshot_key = f"footer_saved_{campaign_name}"
+    flash_key = f"footer_flash_{campaign_name}"
+    flash = st.session_state.pop(flash_key, None)                              # the message from a save that just redrew this card as saved
+    saved = st.session_state.get(snapshot_key) or {"business_name": str(footer.get("business_name") or "").strip(), "address": str(footer.get("address") or "").strip(),
+                                                   "opt_out": str(footer.get("opt_out") or "").strip()}
+    st.markdown(section_label_html("HTML email"), unsafe_allow_html=True)
+    with st.container(key="se_card_footer"):
+        complete = not hc.footer_problems(saved)
+        st.markdown(tool_heading_html("✉", "Email footer", "Added wherever the design (and its plain-text copy) has {{ footer }}. A campaign cannot send an email that uses it until this is filled in.",
+                                      "on" if complete else "off", "● Complete" if complete else "○ Needs details"), unsafe_allow_html=True)
+        st.markdown(rule_html(), unsafe_allow_html=True)
+        st.markdown(field_label_html("Business name"), unsafe_allow_html=True)
+        business_name = st.text_input("Business name", value=saved["business_name"], key=f"footer_business_name_{campaign_name}", label_visibility="collapsed", placeholder="e.g. Kelson Agency")
+        st.markdown(field_label_html("Postal address", "required for marketing email in many countries"), unsafe_allow_html=True)
+        address = st.text_input("Postal address", value=saved["address"], key=f"footer_address_{campaign_name}", label_visibility="collapsed", placeholder="e.g. 12 Example Street, New York, NY 10001")
+        st.markdown(field_label_html("How people opt out", "leave blank to use the standard wording"), unsafe_allow_html=True)
+        opt_out = st.text_input("How people opt out", value=saved["opt_out"], key=f"footer_opt_out_{campaign_name}", label_visibility="collapsed", placeholder=hc.DEFAULT_OPT_OUT)
+        draft = {"business_name": business_name.strip(), "address": address.strip(), "opt_out": opt_out.strip()}
+        changed = draft != saved
+        if not hc.footer_problems(draft):
+            st.markdown(field_label_html("How it will look"), unsafe_allow_html=True)
+            st.markdown(f'<div class="se-footer-preview">{hc.build_footer_html(draft)}</div>', unsafe_allow_html=True)
+        st.markdown(rule_html(), unsafe_allow_html=True)
+        save_column, state_column = st.columns([1, 3])
+        with save_column:
+            save_clicked = st.button("💾 Save", key="footer_save", type="primary", disabled=not changed)
+        with state_column:
+            if changed:
+                st.markdown(chip_html("unsaved", "● Unsaved change"), unsafe_allow_html=True)
+        if flash:
+            st.success(flash)
+        with st.expander("How it works"):
+            st.caption(
+                "Write {{ footer }} in the design where the footer should go, and again at the end of the plain-text copy. If your designer's HTML already has its own address and "
+                "unsubscribe line, you do not need it: the checks only ask that every email has some way to opt out. Whatever is typed here is made safe before it is used."
+            )
+        if save_clicked:
+            if hc.footer_problems(draft):
+                st.error("Enter the business name and the postal address.")
+            else:
+                try:
+                    client = _get_github_client()
+                    raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)             # the LIVE file, not a possibly stale local copy
+                    updated = build_footer_settings_override(raw_override, draft["business_name"], draft["address"], draft["opt_out"])
+                    client.create_file(
+                        override_file_path(campaign_name), override_to_yaml_bytes(updated),
+                        message=f"Update email footer for {campaign_name} (via Streamlit, by {current_user()})",
+                    )
+                    st.session_state[snapshot_key] = draft
+                    st.session_state[flash_key] = "Footer saved. May take a minute to reflect here while the app redeploys."
+                    st.rerun()                                                 # redraw the card as saved (the Save button and the unsaved chip were drawn before the save ran)
+                except GitHubActionsError as exc:
+                    st.error(f"Failed to save: {exc}")
 
 
 def _render_asana_sync_section_in_settings(campaign_cfg):
