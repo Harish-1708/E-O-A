@@ -5,6 +5,7 @@ Placeholders are written {{ FirstName }} (double braces, named like the Sheet's 
 """
 import html
 import re
+import urllib.parse
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -176,6 +177,53 @@ def html_checks(markup: str, plain_text: str, known_variables: Optional[Iterable
     if plain_text and "footer" not in placeholders_in(plain_text) and not re.search(r"unsubscribe|opt[ -]?out", plain_text, re.I):
         warnings.append("The plain-text copy has no opt-out line. Add {{ footer }} to it as well.")
     return {"errors": errors, "warnings": warnings}
+
+
+# ---------------------------------------------------------------- link tagging (UTM)
+
+DEFAULT_UTM_SOURCE = "email"
+DEFAULT_UTM_MEDIUM = "outreach"
+_A_HREF_RE = re.compile(r'(<a\b[^>]*?\bhref\s*=\s*)(["\'])(.*?)\2', re.I | re.S)
+
+
+def utm_params(campaign_name: str, tracking: Optional[Dict], content: str = "") -> Optional[Dict[str, str]]:
+    """The labels to add to links, or None when link tagging is off for the campaign. `tracking` is the campaign's settings mapping, e.g. {"utm": True}; source and medium may be
+    set there, otherwise "email" and "outreach". The campaign name and the email (stage and variant, e.g. intro_A) say which campaign and which email a click came from."""
+    if not isinstance(tracking, dict) or not tracking.get("utm"):
+        return None
+    params = {"utm_source": str(tracking.get("source") or DEFAULT_UTM_SOURCE).strip() or DEFAULT_UTM_SOURCE,
+              "utm_medium": str(tracking.get("medium") or DEFAULT_UTM_MEDIUM).strip() or DEFAULT_UTM_MEDIUM}
+    if campaign_name:
+        params["utm_campaign"] = campaign_name
+    if content:
+        params["utm_content"] = content
+    return params
+
+
+def tag_links(markup: str, params: Optional[Dict[str, str]]) -> str:
+    """Adds `params` to every web link (http or https) in an <a href="..."> of the email. A label the link already has is never overwritten or repeated, so tagging twice is the
+    same as tagging once, and a link the designer already tagged is left as designed. Links that are not web links (mailto:, tel:, #anchor, relative) are never touched, and the
+    rest of the markup is unchanged byte for byte. The address is written back safely escaped for an attribute."""
+    if not params or not markup:
+        return markup
+
+    def _one(match):
+        prefix, quote, raw = match.group(1), match.group(2), match.group(3)
+        try:
+            parts = urllib.parse.urlsplit(html.unescape(raw).strip())
+            if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+                return match.group(0)
+            present = {key.lower() for key, _ in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)}
+            extra = [(key, value) for key, value in params.items() if key.lower() not in present]
+            if not extra:
+                return match.group(0)
+            query = parts.query + ("&" if parts.query else "") + urllib.parse.urlencode(extra)
+            tagged = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path or "/", query, parts.fragment))
+        except ValueError:
+            return match.group(0)                    # a malformed address (for example an unclosed [ ) is left exactly as the designer wrote it, never a failed send
+        return f"{prefix}{quote}{html.escape(tagged, quote=True)}{quote}"
+
+    return _A_HREF_RE.sub(_one, markup)
 
 
 # ---------------------------------------------------------------- the footer
