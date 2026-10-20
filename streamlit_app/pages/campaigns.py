@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import urllib.parse
 from datetime import datetime, timezone
 
 import streamlit as st
@@ -281,7 +280,7 @@ def _new_campaign_dialog(existing_campaigns):
             try:
                 files = build_campaign_files(
                     campaign_name, "intro",
-                    {"A": {"subject": PLACEHOLDER_INTRO_SUBJECT, "body": PLACEHOLDER_INTRO_BODY if fmt != hc.FORMAT_HTML else hc.starter_plain_body()}},
+                    {"A": {"subject": PLACEHOLDER_INTRO_SUBJECT, "body": PLACEHOLDER_INTRO_BODY if fmt != hc.FORMAT_HTML else ""}},          # an HTML email's text half is made from its design
                     fmt=fmt, layout=layout,
                 )
                 settings_file = new_campaign_override_file(campaign_name, fmt)     # only an HTML campaign needs one: it says format: html
@@ -1059,7 +1058,7 @@ def _shared_default_pacing():
 
 
 def _html_launch_blockers(campaign_cfg, leads):
-    """For an HTML campaign: everything that must be fixed before it can launch, read LIVE from GitHub (every email's design and plain-text copy, run through the same
+    """For an HTML campaign: everything that must be fixed before it can launch, read LIVE from GitHub (every email's design and subject, run through the same
     checks the editor shows). A campaign whose emails cannot be read at all is also blocked, never waved through."""
     name = campaign_cfg["_campaign_name"]
     try:
@@ -1068,10 +1067,10 @@ def _html_launch_blockers(campaign_cfg, leads):
     except Exception as exc:  # noqa: BLE001
         return [f"The campaign's emails could not be read to check them ({exc})."]
     emails = []
-    for stage in stages:
+    for index, stage in enumerate(stages):
         for variant in variants:
             prefix = stage["template_prefix"]
-            entry = {"label": f"{humanize_stage(prefix)} · Variant {variant}", "html": None, "body": "", "problem": None}
+            entry = {"label": f"{humanize_stage(prefix)} · Variant {variant}", "html": None, "subject": "", "first": index == 0, "problem": None}
             try:
                 entry["html"] = client.get_file_content(html_editor_logic.design_path(name, prefix, variant)).decode("utf-8")
             except GitHubActionsError as exc:
@@ -1080,9 +1079,9 @@ def _html_launch_blockers(campaign_cfg, leads):
             except UnicodeDecodeError:
                 entry["problem"] = "the file is not UTF-8 text"
             try:
-                entry["body"] = _fetch_live_template_content(client, name, prefix, variant)["body"]
-            except Exception:  # noqa: BLE001 - an unreadable plain-text copy is reported by the checks as an empty one
-                entry["body"] = ""
+                entry["subject"] = _fetch_live_template_content(client, name, prefix, variant).get("subject", "")
+            except Exception as exc:  # noqa: BLE001 - an email whose subject file cannot be read is reported, never waved through
+                entry["problem"] = entry["problem"] or f"its subject file could not be read: {exc}"
             emails.append(entry)
     footer = html_editor_logic.effective_footer(campaign_cfg, st.session_state.get(html_editor_logic.footer_snapshot_key(name)))          # a footer saved a moment ago counts at once
     return launch_blockers(emails, html_editor_logic.known_variables(leads), footer)
@@ -1099,8 +1098,8 @@ def _lock_asana_name_after_save(lock_key: str) -> None:
 
 
 def _render_link_tagging_section_in_settings(campaign_cfg):
-    """An HTML campaign's link tagging: when on, every web link in its designed emails gets standard utm_ labels (which campaign, which email), so clicks show up in the analytics
-    of the site the link goes to. It does NOT record clicks in this tool. Shown only for HTML campaigns; the switch is a draft until Save is pressed."""
+    """An HTML campaign's link tagging: when on, every web link in its designed emails gets a small tag at the end (which campaign, which email), so the analytics of the site the
+    link goes to can show where a visitor came from. It does NOT record clicks in this tool. Shown only for HTML campaigns; the switch is a draft until Save is pressed."""
     campaign_name = campaign_cfg["_campaign_name"]
     tracking = campaign_cfg.get("tracking") if isinstance(campaign_cfg.get("tracking"), dict) else {}
     snapshot_key = f"tracking_saved_{campaign_name}"
@@ -1109,24 +1108,24 @@ def _render_link_tagging_section_in_settings(campaign_cfg):
     saved = st.session_state.get(snapshot_key) or {"enabled": bool(tracking.get("utm"))}
     st.markdown(section_label_html("HTML email"), unsafe_allow_html=True)
     with st.container(key="se_card_tracking"):
-        head_column, switch_column = st.columns([4.2, 1.1])
-        head_column.markdown(tool_heading_html("🔗", "Link tagging", "Labels every web link so clicks show up in the analytics of the site it goes to.",
-                                               "on" if saved["enabled"] else "off", "● On" if saved["enabled"] else "○ Off"), unsafe_allow_html=True)
+        head_column, switch_column = st.columns([3.6, 1.7], vertical_alignment="center")
         with switch_column:
-            enabled = st.toggle("Enabled", value=saved["enabled"], key=f"tracking_utm_{campaign_name}")
-        st.markdown(rule_html(), unsafe_allow_html=True)
-        example = "?" + urllib.parse.urlencode(hc.utm_params(campaign_name, {**tracking, "utm": True}, "intro_A"))
-        st.markdown(tool_note_html(f"A link to your shop becomes …{example} (the last label says which email: here, the intro, variant A). Look for these labels in Google Analytics or "
-                                   "Shopify. This does not record clicks inside this tool, and the plain-text copy is not tagged." if enabled else
-                                   "Turn this on and save to label the links. Links that already carry utm_ labels, and mailto: or phone links, are never changed."), unsafe_allow_html=True)
+            enabled = st.toggle("Tag my links", value=saved["enabled"], key=f"tracking_utm_{campaign_name}")
         draft = {"enabled": bool(enabled)}
         changed = draft != saved
-        save_column, state_column = st.columns([1, 3])
-        with save_column:
-            save_clicked = st.button("💾 Save", key="tracking_save", type="primary", disabled=not changed)
-        with state_column:
-            if changed:
-                st.markdown(chip_html("unsaved", "● Unsaved change"), unsafe_allow_html=True)
+        chip = ("unsaved", "● Unsaved change") if changed else (("on", "● On") if saved["enabled"] else ("off", "○ Off"))
+        head_column.markdown(tool_heading_html("🔗", "Link tagging", "Adds a small tag to each link, so your website's analytics can show which email a visitor came from.", chip[0], chip[1]),
+                             unsafe_allow_html=True)
+        st.markdown(rule_html(), unsafe_allow_html=True)
+        if enabled:
+            tags = hc.utm_params(campaign_name, {**tracking, "utm": True}, "intro_A")
+            st.caption("Every link in the email gets these four tags added at its end:")
+            st.code("\n".join(f"{key}={value}" for key, value in tags.items()), language=None, wrap_lines=True)
+            st.caption("They tell your analytics that the visitor came by email, from this campaign, and from one particular email (intro_A is the first email, variant A). "
+                       "Look for them in Google Analytics or Shopify. Clicks are not counted inside this tool.")
+        else:
+            st.caption("Off. Turn it on and press Save. Links that already have tags, and email or phone links, are never changed.")
+        save_clicked = st.button("💾 Save", key="tracking_save", type="primary", disabled=not changed)
         if flash:
             st.success(flash)
         if save_clicked:
