@@ -49,6 +49,7 @@ class World:
         self.files = {f"{s}_{v}.txt" for s in stages for v in letters}
         self.content = {}
         self.commits, self.deleted = [], []
+        self.html, self.created = {}, []             # designed (.html) files, and every file saved with create_file (the HTML design editor's Save)
         self.calls, self.fail_after, self.reduced = 0, None, None        # to change GitHub's answer between the page being drawn and an action being processed
 
     def read(self, name):
@@ -73,7 +74,9 @@ def seq_page(world=None, leads=None, send_log=None, responses=None, preset=None,
 
     def get_file_content(self, path, ref="main"):
         if path.rsplit("/", 1)[-1] not in world.files:
-            raise GitHubActionsError(f"404: {path} does not exist")
+            raise GitHubActionsError(f"Failed to read '{path}': 404 not found")
+        if path.endswith(".html"):
+            return world.html.get(path.rsplit("/", 1)[-1], "<p>Hi {{ FirstName }}</p>{{ footer }}").encode("utf-8")
         subject, body = world.read(path.rsplit("/", 1)[-1])
         return f"Subject: {subject}\n\n{body}\n".encode("utf-8")
 
@@ -84,6 +87,10 @@ def seq_page(world=None, leads=None, send_log=None, responses=None, preset=None,
         for f in files:
             name = f["path"].rsplit("/", 1)[-1]
             text = f["content"].decode("utf-8")
+            if name.endswith(".html"):
+                world.files.add(name)
+                world.html[name] = text
+                continue
             subject_line, _, body = text.partition("\n\n")
             world.files.add(name)
             world.write(name, subject_line[len("Subject:"):].strip(), body.strip())
@@ -93,6 +100,15 @@ def seq_page(world=None, leads=None, send_log=None, responses=None, preset=None,
         if world.fail_after is not None and world.calls > world.fail_after:
             return sorted(world.reduced)                                   # what GitHub says by the time the action asks again
         return sorted(world.files)
+
+    def create(self, path, content, message="", **kw):
+        if commit_error:
+            raise commit_error
+        name = path.rsplit("/", 1)[-1]
+        world.created.append({"path": path, "content": content, "message": message})
+        world.files.add(name)
+        if name.endswith(".html"):
+            world.html[name] = content.decode("utf-8")
 
     def delete(self, path, message=""):
         if delete_error:
@@ -105,6 +121,7 @@ def seq_page(world=None, leads=None, send_log=None, responses=None, preset=None,
          patch("github_client.GitHubClient.list_directory_files", lister), \
          patch("github_client.GitHubClient.get_file_content", get_file_content), \
          patch("github_client.GitHubClient.commit_campaign_files_directly", commit), \
+         patch("github_client.GitHubClient.create_file", create), \
          patch("github_client.GitHubClient.delete_file", delete):
         at = AppTest.from_file(os.path.join(PAGES_DIR, "campaigns.py"))
         at.secrets.update(_dashboard_secrets())
