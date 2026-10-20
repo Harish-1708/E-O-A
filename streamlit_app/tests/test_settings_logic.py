@@ -368,3 +368,47 @@ def test_waits_and_the_other_live_settings_merge_together():
 
 def test_a_config_with_no_stages_yet_does_not_break_the_merge():
     assert merge_live_override_into_cfg({"_campaign_name": "C"}, {"stage_wait_days": {"followup1": 3}})["stages"] == []
+
+
+# ================================================================ the email footer (HTML campaigns)
+
+def test_the_footer_settings_are_added_trimmed_and_everything_else_is_kept():
+    import settings_logic as SL
+    raw = {"status": "draft", "sending": {"daily_limit": 50}, "format": "html"}
+    out = SL.build_footer_settings_override(raw, "  Kelson Agency ", " 12 Example Street ", ' Reply "unsubscribe". ')
+    assert out == {"status": "draft", "sending": {"daily_limit": 50}, "format": "html", "footer": {"business_name": "Kelson Agency", "address": "12 Example Street", "opt_out": 'Reply "unsubscribe".'}}
+    assert raw == {"status": "draft", "sending": {"daily_limit": 50}, "format": "html"}                 # the input is never changed
+
+
+@pytest.mark.parametrize("opt_out", ["", "   ", None])
+def test_a_blank_opt_out_wording_is_left_out_so_the_default_is_used(opt_out):
+    import settings_logic as SL
+    assert SL.build_footer_settings_override({}, "K", "A", opt_out) == {"footer": {"business_name": "K", "address": "A"}}
+
+
+def test_the_footer_can_be_set_on_a_campaign_that_has_no_settings_file_yet_and_replaces_an_old_footer():
+    import settings_logic as SL
+    assert SL.build_footer_settings_override(None, "K", "A", "")["footer"] == {"business_name": "K", "address": "A"}
+    assert SL.build_footer_settings_override({"footer": {"business_name": "Old", "address": "Old", "opt_out": "Old"}}, "New", "Addr", "")["footer"] == {"business_name": "New", "address": "Addr"}
+
+
+# ================================================================ link tagging (HTML campaigns)
+
+def test_link_tagging_is_switched_on_and_off_and_everything_else_is_kept():
+    import settings_logic as SL
+    raw = {"format": "html", "status": "draft", "footer": {"business_name": "K", "address": "A"}}
+    on = SL.build_tracking_settings_override(raw, True)
+    assert on == {"format": "html", "status": "draft", "footer": {"business_name": "K", "address": "A"}, "tracking": {"utm": True}}
+    assert SL.build_tracking_settings_override(on, False)["tracking"] == {"utm": False} and raw == {"format": "html", "status": "draft", "footer": {"business_name": "K", "address": "A"}}
+
+
+def test_a_custom_source_and_medium_survive_switching_link_tagging():
+    import settings_logic as SL
+    out = SL.build_tracking_settings_override({"tracking": {"utm": False, "source": "kelson", "medium": "newsletter"}}, True)
+    assert out["tracking"] == {"utm": True, "source": "kelson", "medium": "newsletter"}
+
+
+@pytest.mark.parametrize("raw", [None, {}, {"tracking": None}, {"tracking": "yes"}, {"tracking": ["utm"]}])
+def test_link_tagging_can_be_set_on_a_campaign_with_no_or_a_broken_tracking_setting(raw):
+    import settings_logic as SL
+    assert SL.build_tracking_settings_override(raw, True)["tracking"] == {"utm": True}
