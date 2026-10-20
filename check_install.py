@@ -4,8 +4,8 @@ Run it from the ROOT of your repo (the folder that contains `streamlit_app/`):
 
     python check_install.py
 
-Every line says ok, STALE (the file is an older or different version) or MISSING. Line endings are ignored.
-If anything is STALE or MISSING, paste the output back and the right files will be sent. A failing test is almost always one file
+It compares every file with the tested version (line endings are ignored) and reports which are old or missing.
+If anything is old or missing, the report lists exactly which files to upload into which folder. A failing test is almost always one file
 from a set that was not replaced (a new test against an old page, or the reverse); this finds it in seconds.
 """
 import hashlib
@@ -178,6 +178,10 @@ def digest(path):
 SHOULD_BE_DELETED = ["streamlit_app/pages/today.py", "streamlit_app/tests/test_today_page.py"]
 
 
+def is_test_file(path):
+    return path.startswith("tests/") or "/tests/" in path
+
+
 def main():
     if not os.path.isdir("streamlit_app"):
         print("Run this from the root of your repo: the folder that contains the streamlit_app folder.")
@@ -188,17 +192,37 @@ def main():
         found = [place for place in places if os.path.exists(place)]
         if not found:
             missing.append(path)
-            print(f"MISSING  {path}" + (f"   (also looked in: {', '.join(places[1:])})" if len(places) > 1 else ""))
         elif not any(digest(place) == expected for place in found):
             stale.append(path)
-            print(f"STALE    {found[0]}")
     leftovers = [path for path in SHOULD_BE_DELETED if os.path.exists(path)]
+    problems = sorted(stale + missing)
+    app_problems = [p for p in problems if not is_test_file(p)]
+    test_problems = [p for p in problems if is_test_file(p)]
+    app_total = sum(1 for p in EXPECTED if not is_test_file(p))
+    test_total = len(EXPECTED) - app_total
+
+    print(f"THE APP:   {app_total - len(app_problems)} of {app_total} app files are correct." + ("  The app itself is fully up to date." if not app_problems else ""))
+    print(f"THE TESTS: {test_total - len(test_problems)} of {test_total} test files are correct." + ("" if not test_problems else "  (Tests only check the code. The app runs fine without them, but upload them so they stay in step.)"))
+
+    def show(title, paths):
+        if not paths:
+            return
+        print(f"\n{title}")
+        folders = {}
+        for path in paths:
+            folders.setdefault(os.path.dirname(path) or "(the main folder of the repo)", []).append(path)
+        for folder, files in sorted(folders.items()):
+            print(f"  Upload these {len(files)} file(s) into the folder  {folder}/  (Add file > Upload files):")
+            for path in files:
+                print(f"      {os.path.basename(path)}   [{'missing' if path in missing else 'old version, replace it'}]")
+
+    show("APP FILES TO UPLOAD (the app is not complete until these are in):", app_problems)
+    show("TEST FILES TO UPLOAD:", test_problems)
     for path in leftovers:
-        print(f"DELETE   {path}   (no longer part of the app: Today is now a section of Home)")
-    ok = len(EXPECTED) - len(stale) - len(missing)
-    print(f"\n{ok} of {len(EXPECTED)} files are exactly the tested version.")
-    if stale or missing:
-        print(f"{len(stale)} stale, {len(missing)} missing. Paste this output back and the right files will be sent.")
+        print(f"\nDELETE   {path}   (no longer part of the app: Today is now a section of Home)")
+    print(f"\n{len(EXPECTED) - len(problems)} of {len(EXPECTED)} files are exactly the tested version.")
+    if problems:
+        print(f"{len(stale)} old, {len(missing)} missing. Upload the files listed above, wait a minute, and run this again.")
         return 1
     if leftovers:
         print(f"{len(leftovers)} file(s) above should be deleted, then run this again.")
