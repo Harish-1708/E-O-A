@@ -180,6 +180,16 @@ def build_footer_settings_override(raw_override: Dict, business_name: str, addre
     return updated
 
 
+def build_tracking_settings_override(raw_override: Dict, enabled: bool) -> Dict:
+    """The campaign's settings with link tagging switched on or off. Anything else already under `tracking` (a custom source or medium) is kept, and every other setting is
+    carried over untouched."""
+    updated = dict(raw_override or {})
+    tracking = dict(updated.get("tracking") or {}) if isinstance(updated.get("tracking"), dict) else {}
+    tracking["utm"] = bool(enabled)
+    updated["tracking"] = tracking
+    return updated
+
+
 def build_tracker_sync_settings_override(raw_override: Dict, enabled: bool) -> Dict:
     """Returns a NEW dict — never mutates raw_override. Only the
     'tracker_sync' key is touched. No project-name-style field here —
