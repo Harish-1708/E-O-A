@@ -303,3 +303,63 @@ def test_the_starter_layouts_keep_passing_every_check_when_their_links_are_tagge
     for layout in H.STARTER_LAYOUTS.values():
         tagged = H.tag_links(layout["html"], TAGS)
         assert H.html_checks(tagged, H.starter_plain_text(), ["FirstName"], FOOTER) == {"errors": [], "warnings": []}
+
+
+# ================================================================ adding and removing the footer in a design
+
+def test_a_design_is_said_to_have_the_footer_only_when_it_has_the_placeholder():
+    assert H.footer_in_design("<p>x</p>{{ footer }}") and H.footer_in_design("{{footer}}") and not H.footer_in_design("<p>x</p>") and not H.footer_in_design("") and not H.footer_in_design(None)
+    assert not H.footer_in_design("<!-- footer -->") and not H.footer_in_design("{{ FooterNote }}")
+
+
+def test_adding_the_footer_puts_it_just_before_the_end_of_the_page():
+    assert H.add_footer_placeholder("<html><body><p>x</p></body></html>") == "<html><body><p>x</p>{{ footer }}\n</body></html>"
+    assert H.add_footer_placeholder("<HTML><BODY><p>x</p></BODY></HTML>") == "<HTML><BODY><p>x</p>{{ footer }}\n</BODY></HTML>"
+
+
+def test_a_fragment_with_no_body_tag_gets_the_footer_at_the_end():
+    assert H.add_footer_placeholder("<p>x</p>") == "<p>x</p>\n{{ footer }}\n" and H.add_footer_placeholder("<p>x</p>\n\n") == "<p>x</p>\n{{ footer }}\n" and H.add_footer_placeholder("") == "\n{{ footer }}\n"
+
+
+def test_adding_the_footer_twice_changes_nothing_the_second_time():
+    once = H.add_footer_placeholder("<body><p>x</p></body>")
+    assert H.add_footer_placeholder(once) == once and once.count("{{ footer }}") == 1
+    already = "<p>x</p><div>{{ footer }}</div>"
+    assert H.add_footer_placeholder(already) == already
+
+
+def test_a_design_with_the_footer_added_has_it_and_passes_the_opt_out_check():
+    bare = "<html><body><p>Hello {{ FirstName }}, plenty of readable text goes in this paragraph so the email is not thin.</p></body></html>"
+    assert not H.has_opt_out(bare) and H.has_opt_out(H.add_footer_placeholder(bare)) and H.footer_in_design(H.add_footer_placeholder(bare))
+
+
+def test_removing_the_footer_takes_a_row_that_holds_only_the_placeholder_with_it():
+    layout = H.starter_html("announcement")
+    out = H.remove_footer_placeholder(layout)
+    assert "{{ footer }}" not in out and "<tr><td></td></tr>" not in out and out.count("<tr>") == layout.count("<tr>") - 1 and out.endswith("</table>\n</td></tr></table>\n</body>\n</html>\n")
+
+
+def test_removing_the_footer_never_touches_a_spacer_row_the_designer_made_on_purpose():
+    design = "<table><tr><td height='20'></td></tr><tr><td>text</td></tr><tr><td>{{ footer }}</td></tr><tr><td></td></tr></table>"
+    out = H.remove_footer_placeholder(design)
+    assert out == "<table><tr><td height='20'></td></tr><tr><td>text</td></tr><tr><td></td></tr></table>"
+
+
+def test_a_placeholder_alone_on_its_own_line_takes_the_line_with_it():
+    assert H.remove_footer_placeholder("<p>a</p>\n  {{ footer }}  \n</body>") == "<p>a</p>\n</body>" and H.add_footer_placeholder("<p>a</p>\n</body>") == "<p>a</p>\n{{ footer }}\n</body>"
+
+
+def test_a_placeholder_that_is_not_alone_in_a_row_is_removed_but_its_neighbours_stay():
+    assert H.remove_footer_placeholder("<div>Bye {{ footer }} now</div>") == "<div>Bye  now</div>" and H.remove_footer_placeholder("<p>a</p>{{footer}}{{ footer }}") == "<p>a</p>"
+
+
+def test_removing_a_footer_that_is_not_there_changes_nothing_and_adding_then_removing_returns_the_start():
+    assert H.remove_footer_placeholder("<p>x</p>") == "<p>x</p>" and H.remove_footer_placeholder("") == "" and H.remove_footer_placeholder(None) == ""
+    for layout in H.STARTER_LAYOUTS.values():
+        stripped = H.remove_footer_placeholder(layout["html"])
+        assert H.remove_footer_placeholder(H.add_footer_placeholder(stripped)) == stripped
+
+
+def test_a_footer_row_written_in_capitals_is_removed_as_a_row_too():
+    assert H.remove_footer_placeholder("<TABLE><TR><TD>{{ footer }}</TD></TR><TR><TD>x</TD></TR></TABLE>") == "<TABLE><TR><TD>x</TD></TR></TABLE>"
+    assert H.remove_footer_placeholder("<tr class='f'>\n  <td style='x'>\n {{footer}}\n </td>\n</tr>\n<tr><td>y</td></tr>") == "<tr><td>y</td></tr>"
