@@ -262,6 +262,37 @@ def build_footer_text(footer: Dict) -> str:
     return f"--\n{name} · {address}\n{opt_out}"
 
 
+# ---------------------------------------------------------------- adding and removing the footer in a design
+
+_FOOTER_ROW_RE = re.compile(r"<tr\b[^>]*>\s*<td\b[^>]*>\s*\{\{\s*footer\s*\}\}\s*</td>\s*</tr>[ \t]*\n?", re.I)
+_FOOTER_LINE_RE = re.compile(r"^[ \t]*\{\{\s*footer\s*\}\}[ \t]*\n", re.I | re.M)
+_FOOTER_TOKEN_RE = re.compile(r"\{\{\s*footer\s*\}\}")
+
+
+def footer_in_design(markup: str) -> bool:
+    """Whether a design uses the campaign footer (has {{ footer }} anywhere)."""
+    return "footer" in placeholders_in(markup)
+
+
+def add_footer_placeholder(markup: str) -> str:
+    """The design with {{ footer }} added at the very end of the page (just before </body> when it has one). A design that already has it is returned unchanged."""
+    if footer_in_design(markup):
+        return markup
+    text = markup or ""
+    closing = text.lower().rfind("</body>")
+    if closing < 0:
+        return text.rstrip("\n") + "\n{{ footer }}\n"
+    return text[:closing] + "{{ footer }}\n" + text[closing:]
+
+
+def remove_footer_placeholder(markup: str) -> str:
+    """The design without {{ footer }}. A table row that holds nothing else but the placeholder (the shape the starter layouts use) goes with it; any other empty row, such
+    as a spacer the designer made on purpose, is never touched."""
+    text = _FOOTER_ROW_RE.sub("", markup or "")
+    text = _FOOTER_LINE_RE.sub("", text)                  # a placeholder alone on its line takes the line with it
+    return _FOOTER_TOKEN_RE.sub("", text)
+
+
 # ---------------------------------------------------------------- a plain-text copy of an HTML email
 
 _BLOCK_BREAK_TAGS = ("br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "table")
