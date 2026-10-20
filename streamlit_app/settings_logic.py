@@ -169,6 +169,17 @@ def build_asana_settings_override(raw_override: Dict, enabled: bool, project_nam
     return updated
 
 
+def build_footer_settings_override(raw_override: Dict, business_name: str, address: str, opt_out: str) -> Dict:
+    """The campaign's settings with its email footer (an HTML campaign's) set. Values are trimmed; a blank opt-out wording is left out so the default wording is used. Every other
+    setting is carried over untouched."""
+    updated = dict(raw_override or {})
+    footer = {"business_name": (business_name or "").strip(), "address": (address or "").strip()}
+    if (opt_out or "").strip():
+        footer["opt_out"] = opt_out.strip()
+    updated["footer"] = footer
+    return updated
+
+
 def build_tracker_sync_settings_override(raw_override: Dict, enabled: bool) -> Dict:
     """Returns a NEW dict — never mutates raw_override. Only the
     'tracker_sync' key is touched. No project-name-style field here —
