@@ -20,17 +20,23 @@ FOOTER = {"business_name": "Kelson Agency", "address": "12 Example Street", "opt
 PATH = override_file_path(FIXTURE_CAMPAIGN)
 
 
-def test_the_email_footer_is_not_in_settings_for_any_campaign_it_is_edited_under_the_design():
-    for cfg in (None, HTML, {**HTML, "footer": FOOTER}):
+def test_the_email_footer_is_not_a_settings_card_it_is_edited_in_one_place_only_under_the_design_in_the_sequences_tab():
+    for cfg, expected in ((None, 0), (HTML, 1), ({**HTML, "footer": FOOTER}, 1)):
         with settings_page(cfg=cfg) as (at, _):
-            assert not any((t.key or "").startswith("footer_") for t in at.text_input) and not any(b.key == "footer_save" for b in at.button)
-            assert "Email footer" not in markup(at) and list(at.exception) == []
+            boxes = [t for t in at.text_input if (t.key or "").startswith("footer_business_name_")]
+            assert len(boxes) == expected and list(at.exception) == []                          # one set of footer boxes on the whole page (in the HTML workspace), none for plain text
+            assert not any(b.key == "se_card_footer" for b in at.button) and "se_card_footer" not in markup(at)
 
 
 # ================================================================ link tagging
 
 def tagging_switch(at):
     return next(t for t in at.toggle if t.key == f"tracking_utm_{FIXTURE_CAMPAIGN}")
+
+
+def tagging_words(at):
+    """Everything the card says in words: its captions and the example in its code box."""
+    return " ".join([c.value for c in at.caption] + [c.value for c in at.code])
 
 
 def tagging_save(at):
@@ -52,13 +58,17 @@ def test_the_link_tagging_card_sits_under_its_own_html_email_heading_which_a_pla
 
 def test_an_html_campaign_shows_link_tagging_off_by_default_with_save_off():
     with settings_page(cfg=HTML) as (at, _):
-        assert tagging_switch(at).value is False and tagging_save(at).disabled is True and "Link tagging" in markup(at) and "Turn this on and save" in markup(at)
+        assert tagging_switch(at).value is False and tagging_save(at).disabled is True and "Link tagging" in markup(at) and "Off. Turn it on and press Save." in tagging_words(at)
+        assert tagging_switch(at).label == "Tag my links"
 
 
-def test_a_campaign_that_has_it_on_shows_it_on_with_an_example_naming_the_campaign_and_the_limits():
+def test_a_campaign_that_has_it_on_shows_the_four_tags_one_per_line_and_says_plainly_what_it_does_not_do():
     with settings_page(cfg={**HTML, "tracking": {"utm": True}}) as (at, _):
-        text = markup(at)
-        assert tagging_switch(at).value is True and f"utm_campaign={FIXTURE_CAMPAIGN}" in text and "utm_content=intro_A" in text and "does not record clicks inside this tool" in text
+        words = tagging_words(at)
+        lines = next(c.value for c in at.code if "utm_source" in c.value).split("\n")
+        assert tagging_switch(at).value is True and lines == ["utm_source=email", "utm_medium=outreach", f"utm_campaign={FIXTURE_CAMPAIGN}", "utm_content=intro_A"]
+        assert "Every link in the email gets these four tags added at its end:" in words and "Clicks are not counted inside this tool." in words and "intro_A is the first email, variant A" in words
+        assert "…" not in words and "?utm_" not in words and "&utm_" not in words                      # no run of symbols to decode: one tag per line
 
 
 def test_switching_it_on_turns_save_on_and_saving_writes_it_and_keeps_the_other_settings():
@@ -66,7 +76,7 @@ def test_switching_it_on_turns_save_on_and_saving_writes_it_and_keeps_the_other_
     with settings_page(cfg=HTML, live=live) as (at, captured):
         tagging_switch(at).set_value(True)
         at.run(timeout=30)
-        assert tagging_save(at).disabled is False and "Unsaved change" in markup(at)
+        assert tagging_save(at).disabled is False and "Unsaved change" in markup(at) and "● On" not in markup(at)
         tagging_save(at).click()
         at.run(timeout=30)
         assert list(at.exception) == [] and list(at.error) == [] and len(captured["commits"]) == 1
