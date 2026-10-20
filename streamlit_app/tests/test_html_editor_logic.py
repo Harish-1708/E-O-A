@@ -120,10 +120,14 @@ def test_a_fragment_is_wrapped_as_a_page_and_a_full_page_is_kept_with_the_fittin
     assert EL.preview_document("<html><p>no body tag</p></html>").endswith(EL.FIT_SCRIPT)
 
 
-def test_the_fitting_script_resizes_only_the_frame_it_is_in_and_caps_a_very_long_email():
-    assert "window.frameElement.style.height" in EL.FIT_SCRIPT and f"cap={EL.PREVIEW_MAX_HEIGHT}" in EL.FIT_SCRIPT and "try{" in EL.FIT_SCRIPT and "catch(e)" in EL.FIT_SCRIPT
-    assert "catch(e){}" in EL.FIT_SCRIPT and 600 <= EL.PREVIEW_MAX_HEIGHT <= 2000          # a failure in the script is swallowed (the frame just keeps its starting height), and the cap is sane
-    assert EL.PREVIEW_HEIGHT < EL.PREVIEW_MAX_HEIGHT and "fetch" not in EL.FIT_SCRIPT and "XMLHttpRequest" not in EL.FIT_SCRIPT and "parent." not in EL.FIT_SCRIPT
+def test_the_fitting_script_resizes_the_frame_and_the_box_around_it_never_lets_the_frame_outgrow_the_box_and_caps_a_very_long_email():
+    script = EL.FIT_SCRIPT
+    assert "window.frameElement" in script and "f.parentElement" in script and script.count("setProperty('height'") == 2 and "'important'" in script
+    assert "Math.min(h,w.getBoundingClientRect().height||h)" in script                       # the frame is never taller than its box really became, so it can never overlap what is below
+    assert f"cap={EL.PREVIEW_MAX_HEIGHT}" in script and "Math.min(Math.max(d.scrollHeight" in script
+    assert "catch(e){}" in script and 600 <= EL.PREVIEW_MAX_HEIGHT <= 2000 and EL.PREVIEW_HEIGHT < EL.PREVIEW_MAX_HEIGHT
+    for forbidden in ("fetch", "XMLHttpRequest", "parent.", "top.", "document.cookie", "localStorage", "eval("):
+        assert forbidden not in script
 
 
 def test_the_fitting_script_is_never_part_of_what_is_sent_or_checked():
