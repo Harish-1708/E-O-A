@@ -102,6 +102,7 @@ SETTINGS_CSS = """
 /* ---- the cards: native containers styled as cards (their widgets are Streamlit's own) */
 [class*="st-key-se_card_"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 22px 24px 18px; margin-bottom: 18px; }
 [class*="st-key-se_card_danger"] { border-color: #f3c4c4; }
+.se-footer-preview { border: 1px dashed #d1d5db; border-radius: 10px; background: #fafbfc; margin: 2px 0 6px 0; }
 
 /* ---- sender accounts */
 [class*="st-key-se_rotation_"] label p { font-weight: 700; font-size: 15px; color: #111827; }
