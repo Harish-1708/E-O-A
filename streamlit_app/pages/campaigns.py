@@ -48,7 +48,7 @@ from campaign_builder import (  # noqa: E402
 from settings_logic import (  # noqa: E402
     load_raw_override_live, merge_live_override_into_cfg,
     override_to_yaml_bytes, override_file_path,
-    build_asana_settings_override, build_tracker_sync_settings_override, build_tracking_settings_override,
+    build_asana_settings_override, build_tracker_sync_settings_override, build_tracking_settings_override, global_default_pacing,
 )
 from schedule_view import ScheduleContext, render_schedule_tab  # noqa: E402
 from settings_view import SettingsContext, render_settings_tab  # noqa: E402
@@ -831,6 +831,7 @@ def _render_settings_tab(campaign_cfg, leads, send_log=None):
         update_status=_update_campaign_status, request_launch=lambda: st.session_state.__setitem__("show_launch_confirm", True), archive=_temporarily_remove_campaign,
         files_to_delete=lambda name: list_campaign_files_to_delete(name, TEMPLATES_ROOT, CAMPAIGNS_DIR), name_matches=confirmation_matches_campaign_name, extras=extras,
         default_account=campaign_cfg.get("default_sender_account") or campaign_cfg.get("_global_default_account") or "",
+        default_pacing=_shared_default_pacing(),
     ))
 
 
@@ -1047,6 +1048,14 @@ def _render_status_controls(campaign_cfg, leads, just_arrived: bool, send_log=()
             if st.button("Cancel", key="cancel_launch_button"):
                 st.session_state[launch_confirm_key] = False
                 st.rerun()
+
+
+def _shared_default_pacing():
+    """The wait between sends every campaign starts with, from config/settings.yaml (the standard 3 to 7 minutes if that cannot be read)."""
+    try:
+        return global_default_pacing(outreach.load_settings(SETTINGS_PATH))
+    except Exception:  # noqa: BLE001 - the card then shows the standard default; it must never break the Settings tab
+        return global_default_pacing(None)
 
 
 def _html_launch_blockers(campaign_cfg, leads):
