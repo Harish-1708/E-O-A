@@ -112,10 +112,51 @@ def test_a_hostile_lead_can_never_inject_markup_into_the_preview(hostile):
     assert hostile not in preview["html"] and html.escape(hostile) in preview["html"]
 
 
-def test_a_fragment_is_wrapped_as_a_page_and_a_full_page_is_left_alone():
-    assert EL.preview_document("<p>x</p>").startswith("<html><body") and "<p>x</p>" in EL.preview_document("<p>x</p>")
+def test_a_fragment_is_wrapped_as_a_page_and_a_full_page_is_kept_with_the_fitting_script_before_the_end_of_its_body():
+    fragment = EL.preview_document("<p>x</p>")
+    assert fragment.startswith("<html><body") and "<p>x</p>" in fragment and fragment.endswith(EL.FIT_SCRIPT + "</body></html>")
     page = "<!DOCTYPE html><HTML><body>y</body></HTML>"
-    assert EL.preview_document(page) == page
+    assert EL.preview_document(page) == "<!DOCTYPE html><HTML><body>y" + EL.FIT_SCRIPT + "</body></HTML>"
+    assert EL.preview_document("<html><p>no body tag</p></html>").endswith(EL.FIT_SCRIPT)
+
+
+def test_the_fitting_script_resizes_only_the_frame_it_is_in_and_caps_a_very_long_email():
+    assert "window.frameElement.style.height" in EL.FIT_SCRIPT and f"cap={EL.PREVIEW_MAX_HEIGHT}" in EL.FIT_SCRIPT and "try{" in EL.FIT_SCRIPT and "catch(e)" in EL.FIT_SCRIPT
+    assert "catch(e){}" in EL.FIT_SCRIPT and 600 <= EL.PREVIEW_MAX_HEIGHT <= 2000          # a failure in the script is swallowed (the frame just keeps its starting height), and the cap is sane
+    assert EL.PREVIEW_HEIGHT < EL.PREVIEW_MAX_HEIGHT and "fetch" not in EL.FIT_SCRIPT and "XMLHttpRequest" not in EL.FIT_SCRIPT and "parent." not in EL.FIT_SCRIPT
+
+
+def test_the_fitting_script_is_never_part_of_what_is_sent_or_checked():
+    raw = "<p>Hi {{ FirstName }}</p>{{ footer }}"
+    preview = EL.render_preview(raw, EL.SAMPLE_LEAD, CFG)
+    assert "<script" not in preview["html"] and "<script" in EL.preview_document(preview["html"])
+    assert outreach.render_html_text(raw, EL.SAMPLE_LEAD, CFG)["html"] == preview["html"]
+
+
+# ================================================================ the footer in force
+
+def test_the_footer_in_force_is_the_one_just_saved_else_the_campaigns_own():
+    own = {"footer": {"business_name": " Own ", "address": "Addr", "opt_out": ""}}
+    assert EL.effective_footer(own) == {"business_name": "Own", "address": "Addr", "opt_out": ""}
+    assert EL.effective_footer(own, {"business_name": "New", "address": "Street", "opt_out": "Stop"}) == {"business_name": "New", "address": "Street", "opt_out": "Stop"}
+    assert EL.effective_footer({}) == {"business_name": "", "address": "", "opt_out": ""} and EL.effective_footer({"footer": None}, None) == {"business_name": "", "address": "", "opt_out": ""}
+    assert EL.effective_footer(own, {}) == {"business_name": "Own", "address": "Addr", "opt_out": ""}
+
+
+def test_the_footer_in_force_never_carries_anything_but_the_three_fields():
+    assert set(EL.effective_footer({"footer": {"business_name": "K", "address": "A", "evil": "<script>"}})) == {"business_name", "address", "opt_out"}
+
+
+def test_a_just_saved_footer_makes_an_incomplete_campaign_footer_complete_for_the_preview():
+    preview_before = EL.render_preview("<p>x</p>{{ footer }}", EL.SAMPLE_LEAD, {"format": "html"})
+    cfg = {"format": "html", "footer": EL.effective_footer({}, {"business_name": "K", "address": "A", "opt_out": ""})}
+    preview_after = EL.render_preview("<p>x</p>{{ footer }}", EL.SAMPLE_LEAD, cfg)
+    assert preview_before["errors"] and preview_after["errors"] == [] and "K" in preview_after["html"]
+
+
+def test_the_snapshot_key_is_per_campaign():
+    assert EL.footer_snapshot_key("A") == "footer_saved_A" and EL.footer_snapshot_key("A") != EL.footer_snapshot_key("B")
+
 
 
 def test_the_design_path_names_the_html_file_beside_the_text_file():
