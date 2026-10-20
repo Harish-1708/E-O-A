@@ -8,6 +8,8 @@ HTML_EDITOR_CSS = """
 .he-ok { background: #dcfce7; color: #15803d; } .he-wn { background: #fff4e5; color: #b45309; } .he-er { background: #fdecec; color: #b91c1c; }
 .he-title { font-weight: 700; font-size: 14px; color: #111827; margin: 4px 0 6px; }
 .he-sub { font-size: 12.5px; color: #6b7280; margin: 0 0 8px; }
+.he-footer-preview { border: 1px dashed #d1d5db; border-radius: 10px; background: #fafbfc; margin: 2px 0 6px 0; }
+[class*="st-key-he_footer"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px 16px; }
 [class*="st-key-he_checks"] { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px 16px; }
 """
 
