@@ -153,7 +153,7 @@ def render_html_designs(ctx, client, campaign_name: str, stages, variants) -> No
         lead_labels = dict(lead_choices)
         picked = st.selectbox("Preview as", [k for k, _ in lead_choices], format_func=lead_labels.get, key=keys["lead"], label_visibility="collapsed")
         width_name = st.radio("Width", list(EL.PREVIEW_WIDTHS), horizontal=True, key=keys["width"], label_visibility="collapsed")
-        preview = EL.render_preview(text, EL.pick_lead(ctx.leads, picked), ctx.campaign_cfg)
+        preview = EL.render_preview(text, EL.pick_lead(ctx.leads, picked), ctx.campaign_cfg, utm_content=f"{prefix}_{variant}")
         if preview["html"] is not None:
             components.html(EL.preview_document(preview["html"]), width=EL.PREVIEW_WIDTHS[width_name], height=EL.PREVIEW_HEIGHT, scrolling=True)
         else:
