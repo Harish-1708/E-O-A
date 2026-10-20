@@ -151,7 +151,3 @@ div:has(> [class*="st-key-sq_unlock"]) { margin-bottom: -16px !important; }     
 .sq-ok { color: #4b5563; }
 .sq-warn { color: #b45309; font-weight: 600; }
 """
-
-
-HTML_ADD_NOTE = ("This is an HTML campaign: what you write here is the subject and the plain-text copy. A starter design is created beside it automatically; "
-                 "edit the design under \"Design (HTML)\" at the top of this tab once it exists.")
