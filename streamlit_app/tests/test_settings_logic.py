@@ -412,3 +412,130 @@ def test_a_custom_source_and_medium_survive_switching_link_tagging():
 def test_link_tagging_can_be_set_on_a_campaign_with_no_or_a_broken_tracking_setting(raw):
     import settings_logic as SL
     assert SL.build_tracking_settings_override(raw, True)["tracking"] == {"utm": True}
+
+
+# ================================================================ time between sends
+
+def test_the_presets_are_careful_standard_and_faster_and_standard_is_the_shared_default():
+    import settings_logic as SL
+    assert [(k, lo, hi) for k, _l, lo, hi in SL.PACING_PRESETS] == [("careful", 5.0, 10.0), ("standard", 3.0, 7.0), ("faster", 1.0, 3.0)]
+    assert SL.PACING_FALLBACK == (3.0, 7.0)
+
+
+@pytest.mark.parametrize("minutes, words", [(0.5, "30 seconds"), (0.25, "15 seconds"), (1, "1 minute"), (1.0, "1 minute"), (3, "3 minutes"), (2.5, "2.5 minutes"), (120, "120 minutes")])
+def test_a_gap_is_written_in_plain_words(minutes, words):
+    import settings_logic as SL
+    assert SL.format_minutes(minutes) == words
+
+
+@pytest.mark.parametrize("minutes, words", [(0, "0 min"), (45, "45 min"), (59.6, "1 h"), (60, "1 h"), (125, "2 h 5 min"), (330, "5 h 30 min")])
+def test_a_run_length_is_written_in_hours_and_minutes(minutes, words):
+    import settings_logic as SL
+    assert SL.format_duration(minutes) == words
+
+
+def test_the_shared_default_is_read_from_the_settings_and_falls_back_safely():
+    import settings_logic as SL
+    assert SL.global_default_pacing({"default_campaign_settings": {"sending": {"delay_min_minutes": 2, "delay_max_minutes": 9}}}) == (2.0, 9.0)
+    for broken in (None, {}, {"default_campaign_settings": {}}, {"default_campaign_settings": {"sending": {"delay_min_minutes": "x", "delay_max_minutes": 7}}},
+                   {"default_campaign_settings": {"sending": {"delay_min_minutes": 9, "delay_max_minutes": 2}}}, {"default_campaign_settings": {"sending": {"delay_min_minutes": -1, "delay_max_minutes": 2}}}, "text"):
+        assert SL.global_default_pacing(broken) == SL.PACING_FALLBACK
+
+
+@pytest.mark.parametrize("low, high, expected", [(5, 10, "careful"), (3, 7, "standard"), (1, 3, "faster"), (3.0, 7.0, "standard"), (3, 8, "custom"), (4, 7, "custom"), (0.5, 1, "custom"), (3.5, 7, "custom"), (3, 7.5, "custom"), (5.5, 10, "custom"), (1, 2.5, "custom"), (3.0001, 7, "custom")])
+def test_two_numbers_are_a_preset_only_when_they_match_it_exactly(low, high, expected):
+    import settings_logic as SL
+    assert SL.preset_for(low, high) == expected
+
+
+@pytest.mark.parametrize("low, high", [(0.5, 0.5), (3, 7), (5, 5), (0.5, 120), (120, 120), (1.5, 2.5)])
+def test_a_sensible_wait_is_accepted(low, high):
+    import settings_logic as SL
+    assert SL.validate_pacing(low, high) == []
+
+
+@pytest.mark.parametrize("low, high, words", [(0.4, 5, "shortest wait must be between"), (0, 5, "shortest wait must be between"), (3, 121, "longest wait must be between"), (-1, 5, "shortest wait must be between"),
+                                              (8, 7, "cannot be longer"), (5, 4.5, "cannot be longer"), (None, 5, "shortest wait must be a number"), (3, None, "longest wait must be a number"),
+                                              (float("nan"), 5, "shortest wait must be a number")])
+def test_a_wait_that_would_not_load_or_that_the_screen_does_not_offer_is_refused_with_the_reason(low, high, words):
+    import settings_logic as SL
+    errors = SL.validate_pacing(low, high)
+    assert errors and words in errors[0]
+
+
+def test_both_numbers_wrong_gives_both_reasons_and_no_misleading_order_message():
+    import settings_logic as SL
+    assert len(SL.validate_pacing(0, 500)) == 2 and not any("cannot be longer" in e for e in SL.validate_pacing(0, 500))
+
+
+def test_saving_the_wait_sets_the_two_keys_and_keeps_every_other_setting():
+    import settings_logic as SL
+    raw = {"status": "draft", "format": "html", "sending": {"daily_limit": 40, "sender_rotation": True, "rotation_accounts": ["a", "b"]}, "stage_wait_days": {"followup1": 2}}
+    out = SL.build_pacing_override(raw, 5.0, 12.5)
+    assert out == {"status": "draft", "format": "html", "sending": {"daily_limit": 40, "sender_rotation": True, "rotation_accounts": ["a", "b"], "delay_min_minutes": 5, "delay_max_minutes": 12.5},
+                   "stage_wait_days": {"followup1": 2}}
+    assert raw["sending"] == {"daily_limit": 40, "sender_rotation": True, "rotation_accounts": ["a", "b"]}            # the input is never changed
+
+
+def test_whole_numbers_are_saved_without_a_decimal_point():
+    import settings_logic as SL
+    sending = SL.build_pacing_override({}, 3.0, 7.0)["sending"]
+    assert sending == {"delay_min_minutes": 3, "delay_max_minutes": 7} and type(sending["delay_min_minutes"]) is int
+
+
+@pytest.mark.parametrize("raw", [None, {}, {"sending": None}, {"sending": "text"}, {"sending": []}])
+def test_the_wait_can_be_saved_on_a_campaign_with_no_or_a_broken_sending_block(raw):
+    import settings_logic as SL
+    assert SL.build_pacing_override(raw, 2, 4) == {"sending": {"delay_min_minutes": 2, "delay_max_minutes": 4}}
+
+
+def test_resetting_removes_only_the_two_wait_keys_so_the_shared_default_applies_again():
+    import settings_logic as SL
+    raw = {"sending": {"daily_limit": 40, "delay_min_minutes": 5, "delay_max_minutes": 9}, "status": "draft"}
+    assert SL.build_pacing_override(raw, None, None) == {"sending": {"daily_limit": 40}, "status": "draft"}
+    assert SL.build_pacing_override({"sending": {"delay_min_minutes": 5, "delay_max_minutes": 9}}, None, None) == {}
+    assert "delay_min_minutes" not in SL.build_pacing_override({"sending": {"delay_min_minutes": 5, "delay_max_minutes": 9}}, 3, None).get("sending", {})
+
+
+def test_the_estimate_says_how_often_each_mailbox_sends_and_how_long_the_whole_limit_takes():
+    import settings_logic as SL
+    notes = SL.pacing_notes(100, 4, 3, 7)
+    assert notes[0] == ("info", "Each mailbox sends about one email every 5 minutes (around 12 an hour).")
+    assert notes[1] == ("info", "Sending the whole daily limit of 100 across 4 mailboxes takes about 2 h (at most 2 h 48 min).") and len(notes) == 2
+
+
+def test_a_single_mailbox_is_worded_in_the_singular_and_one_round_has_no_run_length():
+    import settings_logic as SL
+    assert "across 1 mailbox takes" in SL.pacing_notes(10, 1, 3, 7)[1][1]
+    assert [n for n in SL.pacing_notes(3, 5, 3, 7) if "whole daily limit" in n[1]] == []
+
+
+def test_a_run_that_could_pass_githubs_limit_is_warned_about_with_the_real_danger_named():
+    import settings_logic as SL
+    warnings = [t for k, t in SL.pacing_notes(100, 1, 3, 7) if k == "warn"]
+    assert len(warnings) == 1 and "6-hour limit" in warnings[0] and "repeat an email" in warnings[0] and "11 h 33 min at most" in warnings[0]
+    assert not [1 for k, _t in SL.pacing_notes(100, 4, 3, 7) if k == "warn"]
+
+
+def test_the_warning_starts_exactly_above_five_hours():
+    import settings_logic as SL
+    assert not [1 for k, _t in SL.pacing_notes(61, 1, 5, 5) if k == "warn"]            # 60 waits of 5 min = 300 min
+    assert [1 for k, _t in SL.pacing_notes(62, 1, 5, 5) if k == "warn"]               # 61 waits of 5 min = 305 min
+
+
+def test_very_short_gaps_are_warned_about_and_a_fixed_gap_gets_a_gentle_suggestion():
+    import settings_logic as SL
+    assert any(k == "warn" and "look like bulk sending" in t for k, t in SL.pacing_notes(20, 2, 0.5, 1.5))
+    assert not any("bulk sending" in t for k, t in SL.pacing_notes(20, 2, 3, 7))
+    assert any(k == "info" and "exactly the same every time" in t for k, t in SL.pacing_notes(20, 2, 5, 5))
+    assert not any("exactly the same" in t for k, t in SL.pacing_notes(20, 2, 3, 7))
+
+
+def test_the_estimate_never_fails_on_odd_input():
+    import settings_logic as SL
+    assert SL.pacing_notes(0, 0, 0, 0) == [] and isinstance(SL.pacing_notes(1, 1, 0.5, 0.5), list) and isinstance(SL.pacing_notes(-5, -2, 3, 7), list)
+
+
+def test_a_wait_is_pulled_into_the_range_the_boxes_can_show():
+    import settings_logic as SL
+    assert [SL.clamp_pacing(x) for x in (0, 0.2, 0.5, 3, 120, 121, 500, "7")] == [0.5, 0.5, 0.5, 3.0, 120.0, 120.0, 120.0, 7.0]
