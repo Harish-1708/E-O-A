@@ -196,12 +196,12 @@ def test_select_all_and_the_status_button_are_pushed_to_the_right_edge_of_their_
         assert "flex-direction: column" in rule and "align-items: flex-end" in rule, selector
 
 
-def test_only_the_five_cards_have_a_name_that_the_card_rules_would_also_match():
+def test_only_the_six_cards_have_a_name_that_the_card_rules_would_also_match():
     """REGRESSION guard: an element whose name merely CONTAINS a card's name gets the card's border and padding too (it happened twice, as a stray box). Every key the Settings
     view gives an element must be matched by the card rule only if it IS one of the five cards."""
     source = open(os.path.join(os.path.dirname(__file__), "..", "settings_view.py"), encoding="utf-8").read()
     keys = re.findall(r'key=f?"([^"]+)"', source)
-    assert sorted(k for k in keys if "se_card_" in k) == ["se_card_accounts", "se_card_danger", "se_card_limits", "se_card_readiness", "se_card_status"]
+    assert sorted(k for k in keys if "se_card_" in k) == ["se_card_accounts", "se_card_danger", "se_card_limits", "se_card_pacing", "se_card_readiness", "se_card_status"]
 
 
 def test_no_element_name_is_matched_by_two_different_style_groups_by_accident():
