@@ -29,22 +29,32 @@ def _html_cfg(footer=True):
     return get
 
 
-def html_world(with_html=True, design=DESIGN):
-    world = World()
+def html_world(with_html=True, design=DESIGN, letters=LETTERS):
+    world = World(letters=letters)
     if with_html:
-        world.files |= {f"{s}_{v}.html" for s in STAGES for v in LETTERS}
-        world.html = {f"{s}_{v}.html": design for s in STAGES for v in LETTERS}
+        world.files |= {f"{s}_{v}.html" for s in STAGES for v in letters}
+        world.html = {f"{s}_{v}.html": design for s in STAGES for v in letters}
     return world
 
 
 @contextlib.contextmanager
 def editor(world=None, footer=True, **kwargs):
-    """The campaign's Sequences tab switched to its Design (HTML) view."""
+    """An HTML campaign's Sequences tab: its workspace, opened on the first email (Intro, Variant A)."""
     with patch.object(outreach, "get_campaign", _html_cfg(footer)):
-        with seq_page(world=world or html_world(), **kwargs) as (at, w):
-            next(r for r in at.radio if r.key == f"seq_view_{FIXTURE_CAMPAIGN}").set_value("Design (HTML)")
-            go(at)
-            yield at, w
+        with seq_page(world=world or html_world(), **kwargs) as pair:
+            yield pair
+
+
+def pick(at, prefix, variant):
+    """Chooses an email the way a visitor does: its stage in the list on the left, its variant in the pills."""
+    next(b for b in at.button if b.key == f"sq_pick_{STAGES.index(prefix)}").click()
+    go(at)
+    next(r for r in at.radio if r.key == f"html_variant_{FIXTURE_CAMPAIGN}").set_value(variant)
+    go(at)
+
+
+def subject_box(at, prefix="intro", variant="A"):
+    return next(t for t in at.text_input if t.key == f"html_subject_{FIXTURE_CAMPAIGN}_{prefix}_{variant}")
 
 
 def area(at, prefix="intro", variant="A"):
@@ -63,48 +73,40 @@ def all_text(at):
 
 def test_a_plain_text_campaign_never_shows_the_design_editor():
     with seq_page() as (at, _):
-        assert not any((t.key or "").startswith("html_text_") for t in at.text_area) and "Designed (HTML) emails" not in all_text(at) and list(at.exception) == []
+        assert not any((t.key or "").startswith(("html_text_", "html_subject_")) for t in list(at.text_area) + list(at.text_input)) and not any(b.key == "footer_save" for b in at.button)
+        assert any(b.key == "sq_save_button" for b in at.button) and list(at.exception) == []                  # the usual editor is what shows
 
 
-def test_an_html_campaign_opens_on_subject_and_plain_text_and_the_design_is_one_switch_away():
-    with patch.object(outreach, "get_campaign", _html_cfg()):
-        with seq_page(world=html_world()) as (at, _):
-            switch = next(r for r in at.radio if r.key == f"seq_view_{FIXTURE_CAMPAIGN}")
-            assert switch.options == ["Subject & plain text", "Design (HTML)"] and switch.value == "Subject & plain text"
-            assert not any((t.key or "").startswith("html_text_") for t in at.text_area) and any(b.key == "sq_save_button" for b in at.button)       # the usual editor is what shows
-            switch.set_value("Design (HTML)")
-            go(at)
-            assert area(at).value == DESIGN and not any(b.key == "sq_save_button" for b in at.button) and not any((b.key or "").startswith("sq_pick_") for b in at.button)
-            next(r for r in at.radio if r.key == f"seq_view_{FIXTURE_CAMPAIGN}").set_value("Subject & plain text")
-            go(at)
-            assert any(b.key == "sq_save_button" for b in at.button) and list(at.exception) == []
-
-
-def test_a_plain_text_campaign_has_no_such_switch():
-    with seq_page() as (at, _):
-        assert not any((r.key or "").startswith("seq_view_") for r in at.radio)
-
-
-def test_an_html_campaign_shows_the_editor_with_the_saved_design_in_the_box_and_save_off():
+def test_an_html_campaign_has_one_workspace_with_no_plain_text_editor_and_no_view_switch():
     with editor() as (at, _):
-        assert list(at.exception) == [] and "Designed (HTML) emails" in all_text(at)
-        assert area(at).value == DESIGN and button(at, "html_save_").disabled is True
+        assert list(at.exception) == [] and not any(b.key == "sq_save_button" for b in at.button) and not any((t.key or "").startswith("body_") for t in at.text_area)
+        assert not any((r.key or "").startswith("seq_view_") for r in at.radio) and "Plain-text version" in " ".join(e.label for e in at.expander)
 
 
-def test_the_email_picker_offers_every_stage_and_variant_and_switching_loads_that_design():
+def test_a_plain_text_campaign_has_no_variant_pills_of_the_html_workspace():
+    with seq_page() as (at, _):
+        assert not any((r.key or "").startswith(("seq_view_", "html_variant_")) for r in at.radio)
+
+
+def test_an_html_campaign_shows_the_saved_subject_and_design_in_their_boxes_and_save_off():
+    with editor() as (at, _):
+        assert subject_box(at).value == "Paid collaboration with {{CompanyName}}" and area(at).value == DESIGN and button(at, "html_save_").disabled is True
+
+
+def test_the_stage_list_and_the_variant_pills_offer_every_email_and_choosing_one_loads_its_subject_and_design():
     world = html_world()
     world.html["followup1_B.html"] = "<p>the second design {{ footer }}</p>"
     with editor(world=world) as (at, _):
-        picker = next(s for s in at.selectbox if s.key == f"html_pick_{FIXTURE_CAMPAIGN}")
-        assert len(picker.options) == len(STAGES) * len(LETTERS) and picker.options[0] == "Intro · Variant A"
-        picker.set_value("followup1|B")
-        go(at)
-        assert area(at, "followup1", "B").value == "<p>the second design {{ footer }}</p>"
+        pills = next(r for r in at.radio if r.key == f"html_variant_{FIXTURE_CAMPAIGN}")
+        assert pills.options == [f"Variant {v}" for v in LETTERS] and len([b for b in at.button if (b.key or "").startswith("sq_pick_")]) == len(STAGES)
+        pick(at, "followup1", "B")
+        assert area(at, "followup1", "B").value == "<p>the second design {{ footer }}</p>" and subject_box(at, "followup1", "B").value == ""
+        assert "Follow-up 1" in all_text(at)
 
 
 # ================================================================ editing and saving
 
-def test_editing_turns_save_on_and_saving_writes_that_exact_file_and_shows_it_as_saved():
+def test_editing_the_design_turns_save_on_and_saving_writes_only_the_html_file_and_shows_it_as_saved():
     with editor() as (at, world):
         area(at).set_value(DESIGN + "<p>an edit</p>")
         go(at)
@@ -115,13 +117,12 @@ def test_editing_turns_save_on_and_saving_writes_that_exact_file_and_shows_it_as
         saved = world.created[0]
         assert saved["path"] == f"templates/{FIXTURE_CAMPAIGN}/intro_A.html" and saved["content"] == (DESIGN + "<p>an edit</p>").encode("utf-8")
         assert saved["message"].startswith(f"Update design intro_A in {FIXTURE_CAMPAIGN} (via Streamlit, by ")
-        assert any("Design saved" in s.value for s in at.success) and button(at, "html_save_").disabled is True and "Unsaved change" not in all_text(at)
+        assert any("Saved the design" in s.value for s in at.success) and button(at, "html_save_").disabled is True and "Unsaved change" not in all_text(at)
 
 
 def test_only_the_email_on_screen_is_written_never_another_one():
     with editor() as (at, world):
-        next(s for s in at.selectbox if s.key == f"html_pick_{FIXTURE_CAMPAIGN}").set_value("followup2|C")
-        go(at)
+        pick(at, "followup2", "C")
         area(at, "followup2", "C").set_value(DESIGN + "x")
         go(at)
         button(at, "html_save_").click()
@@ -129,16 +130,16 @@ def test_only_the_email_on_screen_is_written_never_another_one():
         assert [c["path"] for c in world.created] == [f"templates/{FIXTURE_CAMPAIGN}/followup2_C.html"]
 
 
-def test_an_unsaved_edit_survives_switching_to_another_email_and_back():
+def test_an_unsaved_design_and_an_unsaved_subject_both_survive_switching_to_another_email_and_back():
     with editor() as (at, _):
         area(at).set_value("<p>half-written</p>")
+        subject_box(at).set_value("A half-written subject")
         go(at)
-        picker = next(s for s in at.selectbox if s.key == f"html_pick_{FIXTURE_CAMPAIGN}")
-        picker.set_value("intro|B")
-        go(at)
-        next(s for s in at.selectbox if s.key == f"html_pick_{FIXTURE_CAMPAIGN}").set_value("intro|A")
-        go(at)
-        assert area(at).value == "<p>half-written</p>"
+        pick(at, "intro", "B")
+        assert area(at, "intro", "B").value == DESIGN and subject_box(at, "intro", "B").value == "Paid collaboration with {{CompanyName}}"
+        pick(at, "followup1", "A")
+        pick(at, "intro", "A")
+        assert area(at).value == "<p>half-written</p>" and subject_box(at).value == "A half-written subject"
 
 
 def test_reload_puts_back_what_is_saved_and_discards_the_edit():
@@ -182,7 +183,7 @@ def test_a_design_with_a_script_cannot_be_saved_is_not_previewed_and_the_checks_
 
 def test_a_good_design_is_previewed_in_a_frame_and_every_check_passes():
     with editor() as (at, _):
-        assert at.get("iframe") and 'class="he-ck"><i class="he-er"' not in all_text(at) and "No problems that stop sending" in all_text(at) and not any("placeholders match no column" in w.value or "Couldn't read" in w.value for w in at.warning)
+        assert at.get("iframe") and "Every check passed" in all_text(at) and not any("placeholders match no column" in w.value or "Couldn't read" in w.value for w in at.warning)
 
 
 def test_the_checks_name_the_problems_of_the_design_on_screen():
@@ -251,11 +252,8 @@ def test_a_design_that_cannot_be_read_for_another_reason_offers_to_try_again_and
         raise GitHubActionsError("Failed to read: 500 server error")
     with patch.object(outreach, "get_campaign", _html_cfg()):
         with seq_page(world=html_world()) as (at, _):
-            next(r for r in at.radio if r.key == f"seq_view_{FIXTURE_CAMPAIGN}").set_value("Design (HTML)")
-            go(at)
             with patch("github_client.GitHubClient.get_file_content", failing):
-                next(s for s in at.selectbox if s.key == f"html_pick_{FIXTURE_CAMPAIGN}").set_value("followup3|D")
-                go(at)
+                pick(at, "followup3", "D")
                 assert any("Couldn't read this email's design" in e.value and "500" in e.value for e in at.error) and any(b.label == "Try again" for b in at.button)
 
 
@@ -284,7 +282,7 @@ def test_the_test_button_needs_a_valid_address_and_a_saved_design():
         assert button(at, "html_test_").disabled is False
         area(at).set_value(DESIGN + "x")
         go(at)
-        assert button(at, "html_test_").disabled is True and "Save the design first" in all_text(at)
+        assert button(at, "html_test_").disabled is True and "Save first: the test sends what is saved." in all_text(at)
 
 
 def test_the_test_button_is_off_while_the_design_contains_something_unsafe():
@@ -298,8 +296,7 @@ def test_the_test_button_is_off_while_the_design_contains_something_unsafe():
 def test_sending_a_test_starts_the_workflow_for_exactly_the_email_on_screen():
     calls, patcher = _dispatches()
     with editor() as (at, world), patcher:
-        next(s for s in at.selectbox if s.key == f"html_pick_{FIXTURE_CAMPAIGN}").set_value("followup1|B")
-        go(at)
+        pick(at, "followup1", "B")
         _test_box(at).set_value("  team@kelson.agency ")
         go(at)
         button(at, "html_test_").click()
@@ -320,14 +317,14 @@ def test_a_test_that_cannot_be_started_says_so():
         assert any("Couldn't start the test" in e.value for e in at.error) and not any("Test requested" in s.value for s in at.success)
 
 
-def test_the_checks_read_the_plain_text_copy_of_the_email_on_screen():
-    with editor() as (at, _):
-        assert "plain-text copy has no opt-out line" in all_text(at)               # the stand-in copy in this fake GitHub has none
-    world = html_world()
-    world.write("intro_A.txt", "Hello", "Hi {{ FirstName }}\n\n{{ footer }}")
-    with editor(world=world) as (at, _):
-        assert "plain-text copy has no opt-out line" not in all_text(at)
-        assert "Subject: Hello" in all_text(at)                                       # and its subject is shown beside it
+def test_the_plain_text_version_is_shown_as_made_automatically_from_the_design_on_screen():
+    with editor(world=html_world(design="<h1>Big news, {{ FirstName }}</h1><p>See <a href='https://x.com/a'>the offer</a>.</p>{{ footer }}")) as (at, _):
+        shown = " ".join(c.value for c in at.code)
+        assert "Big news, Ann" in shown and "See the offer (https://x.com/a)." in shown and "Kelson Agency" in shown and "<" not in shown
+        assert "made automatically from the design" in " ".join(e.label for e in at.expander) and "You never need to write it" in all_text(at)
+        area(at).set_value("<p>Changed words</p>{{ footer }}")
+        go(at)
+        assert "Changed words" in " ".join(c.value for c in at.code)
 
 
 # ================================================================ the footer panel under the design
@@ -355,8 +352,7 @@ def foot_save(at):
 def test_the_footer_panel_is_under_the_design_of_every_email_and_a_plain_text_campaign_has_none():
     with editor() as (at, _):
         assert "Email footer" in all_text(at) and "shared by every email in this campaign" in " ".join(e.label for e in at.expander) and foot_save(at).disabled is True
-        next(s for s in at.selectbox if s.key == f"html_pick_{FIXTURE_CAMPAIGN}").set_value("followup3|D")
-        go(at)
+        pick(at, "followup3", "D")
         assert "Email footer" in all_text(at) and any(b.key == "footer_save" for b in at.button)             # the same panel under every stage and variant
     with seq_page() as (at, _):
         assert not any(b.key == "footer_save" for b in at.button) and "Email footer" not in all_text(at)
@@ -391,7 +387,7 @@ def test_adding_the_footer_to_one_email_leaves_every_other_email_alone():
     with editor(world=html_world(design=NO_FOOTER_DESIGN)) as (at, world):
         next(b for b in at.button if (b.key or "").startswith("html_footer_add_")).click()
         go(at)
-        next(b for b in at.button if b.key == f"html_save_html_saved_{FIXTURE_CAMPAIGN}_intro_A").click()
+        button(at, "html_save_").click()
         go(at)
         assert [c["path"] for c in world.created] == [f"templates/{FIXTURE_CAMPAIGN}/intro_A.html"] and world.created[0]["content"].decode().endswith("{{ footer }}\n")
 
@@ -477,3 +473,167 @@ def test_a_failed_footer_save_says_so_and_does_not_count_the_footer_as_saved():
         foot_save(at).click()
         go(at)
         assert any("Failed to save" in e.value for e in at.error) and not any("Footer saved" in s.value for s in at.success) and "footer is incomplete" in all_text(at)
+
+
+# ================================================================ the subject, saved together with the design
+
+INTRO_SUBJECT = "Paid collaboration with {{CompanyName}}"
+INTRO_BODY = "Hi {{FirstName}},\n\nBody of intro A.\n\nThanks,\nHarish\n"          # the fake GitHub plays a file back with one trailing newline
+
+
+def test_changing_only_the_subject_writes_only_the_subject_file_and_keeps_the_text_that_was_in_it():
+    with editor() as (at, world):
+        subject_box(at).set_value("  A  brand new   subject for {{ FirstName }} ")
+        go(at)
+        assert button(at, "html_save_").disabled is False and "Unsaved change" in all_text(at)
+        button(at, "html_save_").click()
+        go(at)
+        assert list(at.exception) == [] and list(at.error) == [] and len(world.created) == 1
+        saved = world.created[0]
+        assert saved["path"] == f"templates/{FIXTURE_CAMPAIGN}/intro_A.txt" and saved["content"].decode() == f"Subject: A brand new subject for {{{{ FirstName }}}}\n\n{INTRO_BODY}"
+        assert saved["message"].startswith(f"Update subject of intro_A in {FIXTURE_CAMPAIGN} (via Streamlit, by ") and any("Saved the subject." in s.value for s in at.success)
+        assert button(at, "html_save_").disabled is True and subject_box(at).value == "A brand new subject for {{ FirstName }}"
+
+
+def test_changing_both_writes_the_subject_then_the_design_in_that_order_and_says_so():
+    with editor() as (at, world):
+        subject_box(at).set_value("New subject")
+        area(at).set_value(DESIGN + "<p>edit</p>")
+        go(at)
+        button(at, "html_save_").click()
+        go(at)
+        assert [c["path"].rsplit("/", 1)[-1] for c in world.created] == ["intro_A.txt", "intro_A.html"] and any("Saved the subject and design." in s.value for s in at.success)
+
+
+def test_the_subject_box_holds_at_most_two_hundred_characters():
+    with editor() as (at, _):
+        assert subject_box(at).max_chars == 200
+
+
+def test_the_first_email_cannot_be_saved_or_tested_without_a_subject_and_says_why():
+    with editor() as (at, world):
+        subject_box(at).set_value("   ")
+        area(at).set_value(DESIGN + "x")
+        _test_box(at).set_value("team@kelson.agency")
+        go(at)
+        assert button(at, "html_save_").disabled is True and button(at, "html_test_").disabled is True and world.created == []
+        text = all_text(at)
+        assert "Not saved: the first email needs a subject." in text and "The subject is empty. The first email of a sequence needs one." in text
+        assert "The first email of a sequence needs a subject." in text
+
+
+def test_a_follow_up_may_have_a_blank_subject_to_continue_the_thread_and_the_page_explains_it():
+    with editor() as (at, world):
+        pick(at, "followup1", "A")
+        assert subject_box(at, "followup1", "A").value == "" and "Leave the subject blank to send this as a reply in the same email thread" in all_text(at)
+        area(at, "followup1", "A").set_value(DESIGN + "x")
+        go(at)
+        assert button(at, "html_save_").disabled is False and "needs a subject" not in all_text(at)
+        button(at, "html_save_").click()
+        go(at)
+        assert [c["path"].rsplit("/", 1)[-1] for c in world.created] == ["followup1_A.html"]
+
+
+def test_clearing_a_follow_ups_subject_is_a_real_change_that_saves_a_blank_subject_line():
+    world = html_world()
+    world.write("followup1_A.txt", "Re-use this thread", "old body")
+    with editor(world=world) as (at, w):
+        pick(at, "followup1", "A")
+        subject_box(at, "followup1", "A").set_value("")
+        go(at)
+        button(at, "html_save_").click()
+        go(at)
+        assert w.created[0]["content"].decode() == "Subject: \n\nold body\n" and any("Saved the subject." in s.value for s in at.success)
+
+
+def test_if_the_design_fails_after_the_subject_saved_the_error_says_so_and_a_retry_writes_only_the_design():
+    writes = []
+
+    def flaky(self, path, content, message="", **kw):
+        writes.append(path.rsplit("/", 1)[-1])
+        if path.endswith(".html") and writes.count("intro_A.html") == 1:
+            raise GitHubActionsError("html write refused")
+
+    with editor() as (at, world):
+        subject_box(at).set_value("Saved subject")
+        area(at).set_value(DESIGN + "<p>edit</p>")
+        go(at)
+        with patch("github_client.GitHubClient.create_file", flaky):
+            button(at, "html_save_").click()
+            go(at)
+            assert writes == ["intro_A.txt", "intro_A.html"] and any("Failed to save: html write refused (the subject did save)" in e.value for e in at.error)
+            assert button(at, "html_save_").disabled is False and area(at).value == DESIGN + "<p>edit</p>" and subject_box(at).value == "Saved subject"
+            button(at, "html_save_").click()
+            go(at)
+            assert writes == ["intro_A.txt", "intro_A.html", "intro_A.html"] and any("Saved the design." in s.value for s in at.success)       # the subject is not written a second time
+
+
+def test_if_nothing_can_be_written_nothing_is_marked_saved_and_both_edits_stay():
+    with editor(commit_error=GitHubActionsError("boom")) as (at, world):
+        subject_box(at).set_value("Wanted subject")
+        area(at).set_value(DESIGN + "x")
+        go(at)
+        button(at, "html_save_").click()
+        go(at)
+        assert any("Failed to save: boom" in e.value and "did save" not in e.value for e in at.error) and not any("Saved the" in s.value for s in at.success)
+        assert subject_box(at).value == "Wanted subject" and area(at).value == DESIGN + "x" and button(at, "html_save_").disabled is False
+
+
+def test_reload_puts_back_both_the_saved_subject_and_the_saved_design():
+    with editor() as (at, world):
+        subject_box(at).set_value("Changed")
+        area(at).set_value("<p>changed</p>")
+        go(at)
+        button(at, "html_reload_").click()
+        go(at)
+        assert subject_box(at).value == INTRO_SUBJECT and area(at).value == DESIGN and world.created == []
+
+
+def test_a_subject_that_cannot_be_read_is_reported_while_the_design_can_still_be_edited():
+    from github_client import GitHubClient
+    with editor() as (at, _):
+        original = GitHubClient.get_file_content                    # the fake GitHub's reader, which is in place now
+
+        def selective(self, path, ref="main"):
+            if path.endswith("followup2_B.txt"):
+                raise GitHubActionsError("Failed to read: 500 server error")
+            return original(self, path, ref)
+
+        with patch("github_client.GitHubClient.get_file_content", selective):
+            pick(at, "followup2", "B")
+            assert any("Couldn't read this email's subject" in w.value and "500" in w.value for w in at.warning) and area(at, "followup2", "B").value == DESIGN
+
+
+def test_the_test_button_waits_for_a_saved_subject_too_and_comes_back_once_it_is_saved():
+    with editor() as (at, _):
+        _test_box(at).set_value("team@kelson.agency")
+        subject_box(at).set_value("Changed subject")
+        go(at)
+        assert button(at, "html_test_").disabled is True and "Save first: the test sends what is saved." in all_text(at)
+        button(at, "html_save_").click()
+        go(at)
+        assert button(at, "html_test_").disabled is False
+
+
+# ================================================================ variants
+
+def test_the_variant_pills_say_variant_a_to_d_and_choosing_one_shows_its_own_delete_option():
+    with editor() as (at, _):
+        pills = next(r for r in at.radio if r.key == f"html_variant_{FIXTURE_CAMPAIGN}")
+        assert pills.options == ["Variant A", "Variant B", "Variant C", "Variant D"] and "Delete variant A" in " ".join(e.label for e in at.expander)
+        pick(at, "intro", "C")
+        assert "Delete variant C" in " ".join(e.label for e in at.expander) and "Delete variant A" not in " ".join(e.label for e in at.expander)
+
+
+def test_add_variant_is_off_when_every_variant_already_exists_and_on_otherwise():
+    with editor() as (at, _):
+        assert next(b for b in at.button if b.key == f"html_add_variant_{FIXTURE_CAMPAIGN}").disabled is True
+    with editor(world=html_world(letters="AB")) as (at, _):
+        assert next(b for b in at.button if b.key == f"html_add_variant_{FIXTURE_CAMPAIGN}").disabled is False
+
+
+def test_the_workspace_follows_the_stage_chosen_in_the_list_and_names_it():
+    with editor() as (at, _):
+        assert "Intro" in all_text(at)
+        pick(at, "followup4", "A")
+        assert "Follow-up 4" in all_text(at) and area(at, "followup4", "A").value == DESIGN
