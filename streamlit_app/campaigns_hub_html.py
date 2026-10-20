@@ -68,8 +68,14 @@ def chart_html(series: Optional[Dict]) -> str:
     return _one_line(f'<div class="hb-spark">{drawn}</div><div class="hb-chart-cap">{caption}</div>')
 
 
-def campaign_card_html(row: Dict, now: Optional[datetime] = None) -> str:
-    """The body of a campaign's card (its Open and Duplicate buttons are real buttons beside it)."""
+def format_badge_html(fmt: str) -> str:
+    """The small Text / HTML badge beside a campaign's name."""
+    return '<span class="hb-fmt hb-fmt-html">HTML</span>' if fmt == "html" else '<span class="hb-fmt hb-fmt-text">Text</span>'
+
+
+def campaign_card_html(row: Dict, now: Optional[datetime] = None, show_format: bool = False) -> str:
+    """The body of a campaign's card (its Open and Duplicate buttons are real buttons beside it). An HTML campaign always carries its badge; a plain-text campaign carries one
+    only when show_format is on (the page turns it on once there is an HTML campaign to tell it apart from), so until then every card is exactly what it was."""
     kind, chip_text = STATUS_CHIPS.get(row.get("status"), ("done", str(row.get("status_label") or row.get("status") or "")))
     activity = "No activity yet" if not row.get("last_activity") else f"Last activity {relative_time(row['last_activity'], now)}"
     if row.get("status") == "draft":
@@ -79,7 +85,8 @@ def campaign_card_html(row: Dict, now: Optional[datetime] = None) -> str:
     faded = " hb-faded" if not row.get("sent") and row.get("status") in ("draft", "attention") else ""
     metrics = [("Leads", row.get("total_leads", 0)), ("Sent", row.get("sent", 0)), ("Replies", row.get("replies", 0)), ("Reply rate", row.get("reply_rate", "—"))]
     metrics_html = "".join(f'<div><b>{esc(value)}</b><span>{label}</span></div>' for label, value in metrics)
-    return _one_line(f'<div class="hb-row"><div><div class="hb-name">{esc(row.get("name"))}</div><div class="hb-meta"><span class="hb-chip hb-chip-{kind}">{esc(chip_text)}</span>'
+    badge = format_badge_html("html") if row.get("format") == "html" else (format_badge_html("text") if show_format else "")
+    return _one_line(f'<div class="hb-row"><div><div class="hb-name">{esc(row.get("name"))}{badge}</div><div class="hb-meta"><span class="hb-chip hb-chip-{kind}">{esc(chip_text)}</span>'
                      f'<span>{esc(activity)}</span></div>{problems_html}</div>'
                      f'<div class="hb-metrics{faded}">{metrics_html}</div><div class="hb-chart">{chart_html(row.get("series"))}</div></div>')
 
@@ -109,6 +116,24 @@ def source_chip_html(name: str) -> str:
     return f'<div class="hb-source">Copying from <span class="hb-chip hb-chip-done">{esc(name)}</span></div>'
 
 
+FORMAT_LABELS = {"text": "Plain text", "html": "Designed (HTML)"}
+FORMAT_CAPTIONS = {
+    "text": "Reads like a personal email, from a real person. The safer choice for first contact with people who do not know you yet, such as creators and partners.",
+    "html": "A branded layout with sections, images and buttons. Best for people who opted in (customers, subscribers) and for announcements.",
+}
+
+
+def created_files_html(fmt: str, campaign_name: str) -> str:
+    """What creating the campaign will make, shown before anything is created."""
+    name = esc(campaign_name or "Your_Campaign")
+    lines = [f'<span class="hb-td">templates/{name}/</span>', '&nbsp;&nbsp;<span class="hb-tn">intro_A.txt</span> <span class="hb-tm">&nbsp;subject and the plain-text email</span>' if fmt != "html"
+             else '&nbsp;&nbsp;<span class="hb-tn">intro_A.txt</span> <span class="hb-tm">&nbsp;subject and the plain-text copy</span>']
+    if fmt == "html":
+        lines.append('&nbsp;&nbsp;<span class="hb-tn">intro_A.html</span> <span class="hb-tm">&nbsp;the designed email (the starter layout)</span>')
+        lines += ["", '<span class="hb-td">config/campaigns/</span>', f'&nbsp;&nbsp;<span class="hb-tn">{name}.yaml</span> <span class="hb-tm">&nbsp;format: html</span>']
+    return _one_line('<div class="hb-tree">' + "<br>".join(lines) + "</div>")
+
+
 def dialog_intro_html(text: str) -> str:
     return f'<div class="hb-dialog-intro">{esc(text)}</div>'
 
@@ -118,6 +143,14 @@ def page_head_html(title: str, subtitle: str) -> str:
 
 
 HUB_CSS = """
+.hb-fmt { display: inline-block; margin-left: 8px; vertical-align: middle; border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 800; white-space: nowrap; }
+.hb-fmt-html { background: #ede9fe; color: #6d28d9; }
+.hb-fmt-text { background: #e0f2fe; color: #0369a1; }
+/* the format and layout choices in the New campaign dialog: each option is a card, the chosen one outlined in blue (Streamlit wraps every option in its own element, marked data-selected) */
+[class*="st-key-hub_new_campaign_format"] [data-testid="stRadioGroup"] > div, [class*="st-key-hub_new_campaign_layout"] [data-testid="stRadioGroup"] > div { border: 1.5px solid #d1d5db; border-radius: 12px; padding: 10px 14px; margin-bottom: 8px; background: #fff; }
+[class*="st-key-hub_new_campaign_format"] [data-testid="stRadioGroup"] > div[data-selected="true"], [class*="st-key-hub_new_campaign_layout"] [data-testid="stRadioGroup"] > div[data-selected="true"] { border-color: #2563eb; background: #f3f7ff; box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }
+.hb-tree { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; line-height: 1.75; background: #0f172a; color: #e2e8f0; border-radius: 12px; padding: 12px 16px; margin: 6px 0 12px 0; }
+.hb-td { color: #93c5fd; } .hb-tn { color: #86efac; } .hb-tm { color: #94a3b8; }
 /* ---- the Campaigns list */
 .hb-title { font-size: 32px; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; color: #111827; }
 .hb-subtitle { color: #6b7280; font-size: 14px; margin-top: 6px; }
