@@ -429,3 +429,69 @@ def test_duplicating_never_changes_the_source_campaigns_waits():
     source = {"status": "active", "stage_wait_days": {"followup1": 5}}
     build_duplicated_config_override(source)
     assert source == {"status": "active", "stage_wait_days": {"followup1": 5}}
+
+
+# ================================================================ HTML campaigns: the files a new email needs
+
+def test_a_text_campaigns_files_are_exactly_the_txt_files_as_before():
+    from campaign_builder import build_campaign_files
+    files = build_campaign_files("Camp", "intro", {"A": {"subject": "S", "body": "B"}, "B": {"subject": "S2", "body": "B2"}})
+    assert [f["path"] for f in files] == ["templates/Camp/intro_A.txt", "templates/Camp/intro_B.txt"]
+    assert files == build_campaign_files("Camp", "intro", {"A": {"subject": "S", "body": "B"}, "B": {"subject": "S2", "body": "B2"}}, fmt="text")
+
+
+def test_an_html_campaigns_files_are_a_txt_and_an_html_for_every_variant():
+    import html_campaign_logic as hc
+    from campaign_builder import build_campaign_files
+    files = build_campaign_files("Camp", "intro", {"A": {"subject": "S", "body": "B"}, "B": {"subject": "S2", "body": "B2"}}, fmt="html")
+    assert [f["path"] for f in files] == ["templates/Camp/intro_A.txt", "templates/Camp/intro_A.html", "templates/Camp/intro_B.txt", "templates/Camp/intro_B.html"]
+    assert files[0]["content"] == b"Subject: S\n\nB\n" and files[1]["content"] == hc.starter_html(hc.DEFAULT_LAYOUT).encode("utf-8")
+
+
+def test_the_chosen_starter_layout_is_used_and_an_unknown_one_falls_back_to_the_default():
+    import html_campaign_logic as hc
+    from campaign_builder import build_campaign_files
+    content = lambda layout: build_campaign_files("C", "intro", {"A": {"subject": "S", "body": "B"}}, fmt="html", layout=layout)[1]["content"].decode()
+    assert content("announcement") == hc.starter_html("announcement") and content("product_spotlight") == hc.starter_html("product_spotlight")
+    assert content("nonsense") == content(None) == hc.starter_html(hc.DEFAULT_LAYOUT)
+
+
+def test_a_variants_own_design_beats_the_starter_layout():
+    from campaign_builder import build_campaign_files
+    files = build_campaign_files("C", "intro", {"A": {"subject": "S", "body": "B", "html": "<p>from the designer</p>{{ footer }}"}}, fmt="html", layout="announcement")
+    assert files[1]["content"] == b"<p>from the designer</p>{{ footer }}"
+
+
+def test_only_the_variants_asked_for_get_files_in_an_html_campaign_too():
+    from campaign_builder import build_campaign_files
+    assert [f["path"] for f in build_campaign_files("C", "followup1", {"B": {"subject": "", "body": "B"}}, fmt="html")] == ["templates/C/followup1_B.txt", "templates/C/followup1_B.html"]
+
+
+def test_a_new_html_campaign_gets_a_settings_file_saying_so_and_a_text_campaign_gets_none():
+    import yaml
+    from campaign_builder import new_campaign_override_file
+    assert new_campaign_override_file("Camp", "text") is None and new_campaign_override_file("Camp", "nonsense") is None and new_campaign_override_file("Camp", "") is None
+    made = new_campaign_override_file("Camp", "html")
+    assert made["path"] == "config/campaigns/Camp.yaml" and yaml.safe_load(made["content"]) == {"format": "html"}
+
+
+def test_deleting_a_campaign_removes_its_designed_files_too_after_the_text_files(tmp_path):
+    from campaign_builder import list_campaign_files_to_delete
+    templates = tmp_path / "templates" / "Camp"
+    templates.mkdir(parents=True)
+    for name in ("intro_A.txt", "intro_A.html", "followup1_A.txt", "followup1_A.html", "notes.md"):
+        (templates / name).write_text("x")
+    campaigns = tmp_path / "campaigns"
+    campaigns.mkdir()
+    (campaigns / "Camp.yaml").write_text("format: html\n")
+    assert list_campaign_files_to_delete("Camp", str(tmp_path / "templates"), str(campaigns)) == [
+        "templates/Camp/followup1_A.txt", "templates/Camp/intro_A.txt", "templates/Camp/followup1_A.html", "templates/Camp/intro_A.html", "config/campaigns/Camp.yaml"]
+
+
+def test_deleting_a_text_campaign_is_unchanged(tmp_path):
+    from campaign_builder import list_campaign_files_to_delete
+    templates = tmp_path / "templates" / "Camp"
+    templates.mkdir(parents=True)
+    for name in ("intro_A.txt", "followup1_A.txt"):
+        (templates / name).write_text("x")
+    assert list_campaign_files_to_delete("Camp", str(tmp_path / "templates"), str(tmp_path / "none")) == ["templates/Camp/followup1_A.txt", "templates/Camp/intro_A.txt"]
