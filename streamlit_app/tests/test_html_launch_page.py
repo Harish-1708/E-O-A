@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import outreach  # noqa: E402
 from github_client import GitHubActionsError  # noqa: E402
 from test_html_editor_page import DESIGN, FOOTER, html_world  # noqa: E402
-from test_sequences_page import _every_test_uses_the_fixture_repo, _clear_streamlit_caches, go, seq_page  # noqa: E402
+from test_sequences_page import FIXTURE_CAMPAIGN, _every_test_uses_the_fixture_repo, _clear_streamlit_caches, go, seq_page  # noqa: E402
 
 _AUTOUSE_FIXTURES = (_every_test_uses_the_fixture_repo, _clear_streamlit_caches)
 _REAL = outreach.get_campaign
@@ -101,3 +101,11 @@ def test_cancel_closes_the_confirmation_even_when_launching_is_blocked():
 def test_a_plain_text_campaign_with_no_html_files_at_all_is_never_held_up_by_html_checks():
     with launching(world=html_world(with_html=False), fmt="text", footer=False) as (at, _):
         assert confirm(at).disabled is False and blocked_message(at) == "" and list(at.exception) == []
+
+
+def test_a_footer_saved_a_moment_ago_counts_at_once_at_launch_before_the_app_catches_up():
+    saved = {"business_name": "Kelson Agency", "address": "12 Example Street", "opt_out": ""}
+    with launching(footer=False, preset={f"footer_saved_{FIXTURE_CAMPAIGN}": saved}) as (at, _):
+        assert confirm(at).disabled is False and blocked_message(at) == ""
+    with launching(footer=False) as (at, _):                                      # without it the same campaign is still held
+        assert confirm(at).disabled is True and "footer is incomplete" in blocked_message(at)
