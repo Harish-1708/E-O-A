@@ -12,9 +12,26 @@ import outreach  # noqa: E402
 SAMPLE_LEAD = {"FirstName": "Ann", "LastName": "Lee", "Company": "Acme Studio", "Email": "ann@example.com"}
 UPLOAD_LIMIT_BYTES = 1_000_000                      # far more than Gmail will show (it cuts at about 102 KB), but a sane ceiling for an upload
 PREVIEW_WIDTHS = {"Desktop": None, "Mobile": 375}
-PREVIEW_HEIGHT = 620
+PREVIEW_HEIGHT = 380                  # where the preview frame starts; the page inside then resizes the frame to fit the email (see FIT_SCRIPT)
+PREVIEW_MAX_HEIGHT = 1400             # a very long email scrolls inside the frame beyond this
+# Added to the PREVIEW only (never saved, never sent, and only after the design itself has passed the safety check, which refuses any script of the designer's own): it sets
+# the height of the preview's frame to the height of the email, so a short email does not leave an empty gap under it and a long one is not cut off.
+FIT_SCRIPT = ("<script>(function(){var cap=%d;function fit(){try{var d=document.documentElement,b=document.body;var h=Math.max(d.scrollHeight,b?b.scrollHeight:0);"
+              "window.frameElement.style.height=Math.min(h,cap)+'px';}catch(e){}}window.addEventListener('load',fit);window.addEventListener('resize',fit);"
+              "setTimeout(fit,120);setTimeout(fit,700);})();</script>") % PREVIEW_MAX_HEIGHT
 FOOTER_PLACEHOLDER = ('<div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#92400e;background:#fffaf0;border:1px dashed #f3d9a8;padding:10px;margin:8px;'
                       'text-align:center;">Your footer will appear here. Add the business name and the postal address under Settings.</div>')
+
+
+def footer_snapshot_key(campaign_name: str) -> str:
+    """The session key holding a footer that was just saved, until the app's own copy of the settings catches up (after the app redeploys)."""
+    return f"footer_saved_{campaign_name}"
+
+
+def effective_footer(campaign_cfg: Dict, just_saved: Optional[Dict] = None) -> Dict:
+    """The footer in force: the one just saved if there is one (so the preview, the checks and the launch check use it straight away), else the campaign's own."""
+    footer = just_saved if just_saved else (campaign_cfg.get("footer") or {})
+    return {key: str(footer.get(key) or "").strip() for key in hc.FOOTER_FIELDS}
 
 
 def design_path(campaign_name: str, prefix: str, variant: str) -> str:
@@ -85,7 +102,8 @@ def render_preview(raw: str, lead: Dict, campaign_cfg: Dict, utm_content: str = 
 
 
 def preview_document(rendered: str) -> str:
-    """The rendered email as a complete page for the preview frame: a fragment is wrapped (white background, readable default font), a full page is shown as it is."""
-    if "<html" in rendered.lower():
-        return rendered
-    return f'<html><body style="margin:0;background:#ffffff;font-family:Arial,Helvetica,sans-serif;">{rendered}</body></html>'
+    """The rendered email as a complete page for the preview frame: a fragment is wrapped (white background, readable default font), a full page is kept as it is, and the
+    script that fits the frame to the email is added at the end of the body."""
+    page = rendered if "<html" in rendered.lower() else f'<html><body style="margin:0;background:#ffffff;font-family:Arial,Helvetica,sans-serif;">{rendered}</body></html>'
+    closing = page.lower().rfind("</body>")
+    return page + FIT_SCRIPT if closing < 0 else page[:closing] + FIT_SCRIPT + page[closing:]
