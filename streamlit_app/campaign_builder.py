@@ -24,6 +24,8 @@ import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
+import yaml
+
 CAMPAIGN_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 VARIANT_LETTERS = ["A", "B", "C", "D"]
 
@@ -32,6 +34,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import outreach  # noqa: E402
+import html_campaign_logic as hc  # noqa: E402
 
 # The single source of truth every page uses for "how many stages can a
 # campaign have" text — never a separately hardcoded number, which is
@@ -74,18 +77,31 @@ def build_template_file_content(subject: str, body: str) -> bytes:
 
 
 def build_campaign_files(campaign_name: str, stage_prefix: str,
-                          variants: Dict[str, Dict[str, str]]) -> List[Dict]:
+                          variants: Dict[str, Dict[str, str]], fmt: str = "text", layout: Optional[str] = None) -> List[Dict]:
     """variants: {'A': {'subject': ..., 'body': ...}, 'B': {...}, ...}.
     Returns the [{'path':..., 'content': bytes}] list GitHubClient.
     open_campaign_pull_request expects, for ONE stage of a campaign
-    (stage_prefix is e.g. 'intro' or 'followup1')."""
+    (stage_prefix is e.g. 'intro' or 'followup1').
+
+    fmt="html" (an HTML campaign) adds, beside each .txt (the subject and the plain-text copy), the .html with the designed version: a variant's own 'html' if it has one,
+    otherwise the chosen starter layout. fmt="text" (the default) returns exactly what it always has: only the .txt files."""
     files = []
     for letter in VARIANT_LETTERS:
         if letter not in variants:
             continue
         content = build_template_file_content(variants[letter]["subject"], variants[letter]["body"])
         files.append({"path": f"templates/{campaign_name}/{stage_prefix}_{letter}.txt", "content": content})
+        if fmt == hc.FORMAT_HTML:
+            design = variants[letter].get("html") or hc.starter_html(layout or hc.DEFAULT_LAYOUT)
+            files.append({"path": f"templates/{campaign_name}/{stage_prefix}_{letter}.html", "content": design.encode("utf-8")})
     return files
+
+
+def new_campaign_override_file(campaign_name: str, fmt: str) -> Optional[Dict]:
+    """The settings file a brand-new campaign needs to be an HTML campaign: {format: html}. A plain-text campaign needs none (None), exactly as before."""
+    if fmt != hc.FORMAT_HTML:
+        return None
+    return {"path": f"config/campaigns/{campaign_name}.yaml", "content": yaml.safe_dump({"format": hc.FORMAT_HTML}, sort_keys=False).encode("utf-8")}
 
 
 def next_stage_from_stages(stages: List[Dict], variants: List[str]) -> Optional[Tuple[str, List[str]]]:
@@ -165,8 +181,12 @@ def list_campaign_files_to_delete(campaign_name: str, templates_root: str, campa
     campaign_template_dir = os.path.join(templates_root, campaign_name)
     paths = []
     if os.path.isdir(campaign_template_dir):
-        for filename in sorted(os.listdir(campaign_template_dir)):
+        names = sorted(os.listdir(campaign_template_dir))
+        for filename in names:
             if filename.endswith(".txt"):
+                paths.append(f"templates/{campaign_name}/{filename}")
+        for filename in names:                    # an HTML campaign's designed versions go too (after the text files, so the campaign stops existing first)
+            if filename.endswith(".html"):
                 paths.append(f"templates/{campaign_name}/{filename}")
 
     override_path = os.path.join(campaigns_dir, f"{campaign_name}.yaml")
