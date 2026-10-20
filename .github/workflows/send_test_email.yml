@@ -1,0 +1,59 @@
+name: Send Test Email
+
+# Sends ONE test email of a campaign to an address you choose (normally a team mailbox), built exactly the way the real send builds it, with a made-up lead
+# ("Test Recipient") and "[TEST]" at the start of the subject. Started by the "Send me a test" button in an HTML campaign's editor, or by hand with Run workflow.
+# It touches no Google Sheet, no lead and no sequence, and records nothing: it only sends the one email. See send_test_email in outreach.py.
+on:
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: "Campaign name"
+        required: true
+      stage:
+        description: "Stage file prefix, e.g. intro or followup1"
+        required: true
+      variant:
+        description: "Variant letter: A, B, C or D"
+        required: true
+      to:
+        description: "The address that receives the test (use a team mailbox)"
+        required: true
+      account:
+        description: "Optional: sender account name (blank = the campaign's default)"
+        required: false
+        default: ""
+
+jobs:
+  send-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Send the test email
+        env:
+          EMAIL_ACCOUNTS_JSON: ${{ secrets.EMAIL_ACCOUNTS_JSON }}
+          EMAIL_ACCOUNT_SLOT_1: ${{ secrets.EMAIL_ACCOUNT_SLOT_1 }}
+          EMAIL_ACCOUNT_SLOT_2: ${{ secrets.EMAIL_ACCOUNT_SLOT_2 }}
+          EMAIL_ACCOUNT_SLOT_3: ${{ secrets.EMAIL_ACCOUNT_SLOT_3 }}
+          EMAIL_ACCOUNT_SLOT_4: ${{ secrets.EMAIL_ACCOUNT_SLOT_4 }}
+          EMAIL_ACCOUNT_SLOT_5: ${{ secrets.EMAIL_ACCOUNT_SLOT_5 }}
+          EMAIL_ACCOUNT_SLOT_6: ${{ secrets.EMAIL_ACCOUNT_SLOT_6 }}
+          EMAIL_ACCOUNT_SLOT_7: ${{ secrets.EMAIL_ACCOUNT_SLOT_7 }}
+          EMAIL_ACCOUNT_SLOT_8: ${{ secrets.EMAIL_ACCOUNT_SLOT_8 }}
+          EMAIL_ACCOUNT_SLOT_9: ${{ secrets.EMAIL_ACCOUNT_SLOT_9 }}
+          EMAIL_ACCOUNT_SLOT_10: ${{ secrets.EMAIL_ACCOUNT_SLOT_10 }}
+        run: |
+          set -o pipefail
+          python outreach.py send-test --campaign "${{ github.event.inputs.campaign }}" \
+            --stage "${{ github.event.inputs.stage }}" --variant "${{ github.event.inputs.variant }}" \
+            --to "${{ github.event.inputs.to }}" --account "${{ github.event.inputs.account }}" | tee test_output.txt
+      - name: Add to job summary
+        if: always()
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat test_output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
