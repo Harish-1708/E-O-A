@@ -18,8 +18,10 @@ import streamlit as st
 import outreach
 import sequences_html as H
 import sequences_view_logic as L
+from html_editor_view import render_html_designs
 from campaign_builder import TOTAL_STAGE_COUNT, build_campaign_files, next_stage_from_stages, validate_variant_content
 from github_client import GitHubActionsError
+from html_sequences_logic import VIEW_DESIGN, VIEW_TEXT, is_html_campaign, with_html_companions, with_html_deletions
 from leads_logic import humanize_stage
 from sequences_logic import (
     build_new_variant_files_for_all_stages, build_stage_deletion_paths, build_variant_deletion_paths, build_variant_edit_file, can_delete_stage,
@@ -91,7 +93,17 @@ def render_sequences_tab(ctx: SequencesContext) -> None:
         return
 
     # Pre-load every template file in parallel so the reads further down find them already cached (best-effort; a no-op when caching is off).
-    client.warm_file_cache([f"templates/{campaign_name}/{s['template_prefix']}_{v}.txt" for s in stages for v in variants])
+    warm = [f"templates/{campaign_name}/{s['template_prefix']}_{v}.txt" for s in stages for v in variants]
+    if is_html_campaign(ctx.campaign_cfg):
+        warm += [f"templates/{campaign_name}/{s['template_prefix']}_{v}.html" for s in stages for v in variants]
+    client.warm_file_cache(warm)
+
+    if is_html_campaign(ctx.campaign_cfg):
+        # An HTML campaign has two things to edit for each email: its subject and plain-text copy (the editor below) and its design (full width, with the preview).
+        view = st.radio("What to edit", [VIEW_TEXT, VIEW_DESIGN], horizontal=True, key=f"seq_view_{campaign_name}", label_visibility="collapsed")
+        if view == VIEW_DESIGN:
+            render_html_designs(ctx, client, campaign_name, stages, variants)
+            return
 
     state = _campaign_state(campaign_name)
     state["stage"] = max(0, min(int(state.get("stage") or 0), len(stages) - 1))
@@ -151,6 +163,8 @@ def _render_stage_list(ctx, client, campaign_name, stages, variants, state) -> N
                         )
                     else:
                         paths = build_stage_deletion_paths(campaign_name, last_stage["template_prefix"], live_variants)
+                        if is_html_campaign(ctx.campaign_cfg):
+                            paths = with_html_deletions(paths)              # an HTML campaign's email is two files: both go, the text files first
                         delete_client = ctx.get_client()
                         for path in paths:
                             delete_client.delete_file(path, message=f"Delete stage {last_stage['name']} from "
@@ -313,10 +327,13 @@ def _render_delete_variant(ctx, campaign_name, stages, variants, variant) -> Non
                 )
             else:
                 paths = build_variant_deletion_paths(campaign_name, live_stages, variant)
+                stage_count = len(paths)
+                if is_html_campaign(ctx.campaign_cfg):
+                    paths = with_html_deletions(paths)                      # both files of every email, the text files first
                 for path in paths:
                     client.delete_file(path, message=f"Delete variant {variant} from "
                                                      f"{campaign_name} (via Streamlit, by {ctx.current_user()})")
-                st.success(f"Variant {variant} deleted from all {len(paths)} stage(s). May "
+                st.success(f"Variant {variant} deleted from all {stage_count} stage(s). May "
                            "take a minute to actually reflect here while the app redeploys.")
         except outreach.ConfigError as exc:
             st.error(f"Couldn't verify the campaign's current structure before deleting — nothing "
@@ -366,6 +383,8 @@ def _render_add_variant(ctx, campaign_name, stages, variants, state) -> Optional
         st.markdown(H.editor_title_html(f"Add variant {next_letter}" if next_letter else "Add variant"), unsafe_allow_html=True)
         with st.container(key="sq_cancel_variant"):
             st.button("Cancel", key="sq_cancel_variant_button", on_click=_set_mode, args=(campaign_name, "edit"))
+        if is_html_campaign(ctx.campaign_cfg):
+            st.caption(H.HTML_ADD_NOTE)
         if not next_letter:
             st.info("Every stage already has all 4 variants (A–D) — that's the maximum.")
             return None
@@ -401,6 +420,8 @@ def _render_add_variant(ctx, campaign_name, stages, variants, state) -> Optional
             else:
                 try:
                     files = build_new_variant_files_for_all_stages(campaign_name, stages, next_letter, contents_by_stage)
+                    if is_html_campaign(ctx.campaign_cfg):
+                        files = with_html_companions(files)                 # the designed version beside every new text file, in the same save
                     client = ctx.get_client()
                     client.commit_campaign_files_directly(
                         files=files,
@@ -427,6 +448,8 @@ def _render_add_stage(ctx, campaign_name, stages, variants, state) -> Optional[D
         st.markdown(H.editor_title_html("Add a follow-up stage"), unsafe_allow_html=True)
         with st.container(key="sq_cancel_stage"):
             st.button("Cancel", key="sq_cancel_stage_button", on_click=_set_mode, args=(campaign_name, "edit"))
+        if is_html_campaign(ctx.campaign_cfg):
+            st.caption(H.HTML_ADD_NOTE)
         if next_stage is None:
             st.info(f"This campaign already has all {TOTAL_STAGE_COUNT} stages.")
             return None
@@ -462,7 +485,7 @@ def _render_add_stage(ctx, campaign_name, stages, variants, state) -> Optional[D
                     st.error(message)
             else:
                 try:
-                    files = build_campaign_files(campaign_name, stage_prefix, variant_inputs)
+                    files = build_campaign_files(campaign_name, stage_prefix, variant_inputs, fmt="html" if is_html_campaign(ctx.campaign_cfg) else "text")
                     client = ctx.get_client()
                     client.commit_campaign_files_directly(
                         files=files,
