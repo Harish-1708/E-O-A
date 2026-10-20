@@ -48,7 +48,7 @@ from campaign_builder import (  # noqa: E402
 from settings_logic import (  # noqa: E402
     load_raw_override_live, merge_live_override_into_cfg,
     override_to_yaml_bytes, override_file_path,
-    build_asana_settings_override, build_tracker_sync_settings_override, build_footer_settings_override, build_tracking_settings_override,
+    build_asana_settings_override, build_tracker_sync_settings_override, build_tracking_settings_override,
 )
 from schedule_view import ScheduleContext, render_schedule_tab  # noqa: E402
 from settings_view import SettingsContext, render_settings_tab  # noqa: E402
@@ -820,7 +820,6 @@ def _render_settings_tab(campaign_cfg, leads, send_log=None):
         # An HTML campaign's own settings first (its email footer: nothing of it shows in a plain-text campaign), then the integrations, then the rarely needed
         # maintenance tools last, as in the design.
         if campaign_cfg.get("format") == hc.FORMAT_HTML:
-            _render_footer_section_in_settings(campaign_cfg)
             _render_link_tagging_section_in_settings(campaign_cfg)
         _render_asana_sync_section_in_settings(campaign_cfg)
         _render_tracker_sync_section_in_settings(campaign_cfg)
@@ -1076,7 +1075,8 @@ def _html_launch_blockers(campaign_cfg, leads):
             except Exception:  # noqa: BLE001 - an unreadable plain-text copy is reported by the checks as an empty one
                 entry["body"] = ""
             emails.append(entry)
-    return launch_blockers(emails, html_editor_logic.known_variables(leads), campaign_cfg.get("footer"))
+    footer = html_editor_logic.effective_footer(campaign_cfg, st.session_state.get(html_editor_logic.footer_snapshot_key(name)))          # a footer saved a moment ago counts at once
+    return launch_blockers(emails, html_editor_logic.known_variables(leads), footer)
 
 
 def _flip_asana_lock(lock_key: str, currently_locked: bool) -> None:
@@ -1089,66 +1089,6 @@ def _lock_asana_name_after_save(lock_key: str) -> None:
         st.session_state[lock_key] = True
 
 
-def _render_footer_section_in_settings(campaign_cfg):
-    """An HTML campaign's email footer: business name, postal address and how people opt out. It is put wherever a design (and its plain-text copy) has {{ footer }}.
-    Shown only for HTML campaigns. The three boxes are a draft until Save is pressed; Save writes them to the campaign's settings file (read live first, so nothing else in it is lost)."""
-    campaign_name = campaign_cfg["_campaign_name"]
-    footer = campaign_cfg.get("footer") or {}
-    snapshot_key = f"footer_saved_{campaign_name}"
-    flash_key = f"footer_flash_{campaign_name}"
-    flash = st.session_state.pop(flash_key, None)                              # the message from a save that just redrew this card as saved
-    saved = st.session_state.get(snapshot_key) or {"business_name": str(footer.get("business_name") or "").strip(), "address": str(footer.get("address") or "").strip(),
-                                                   "opt_out": str(footer.get("opt_out") or "").strip()}
-    st.markdown(section_label_html("HTML email"), unsafe_allow_html=True)
-    with st.container(key="se_card_footer"):
-        complete = not hc.footer_problems(saved)
-        st.markdown(tool_heading_html("✉", "Email footer", "Added wherever the design (and its plain-text copy) has {{ footer }}. A campaign cannot send an email that uses it until this is filled in.",
-                                      "on" if complete else "off", "● Complete" if complete else "○ Needs details"), unsafe_allow_html=True)
-        st.markdown(rule_html(), unsafe_allow_html=True)
-        st.markdown(field_label_html("Business name"), unsafe_allow_html=True)
-        business_name = st.text_input("Business name", value=saved["business_name"], key=f"footer_business_name_{campaign_name}", label_visibility="collapsed", placeholder="e.g. Kelson Agency")
-        st.markdown(field_label_html("Postal address", "required for marketing email in many countries"), unsafe_allow_html=True)
-        address = st.text_input("Postal address", value=saved["address"], key=f"footer_address_{campaign_name}", label_visibility="collapsed", placeholder="e.g. 12 Example Street, New York, NY 10001")
-        st.markdown(field_label_html("How people opt out", "leave blank to use the standard wording"), unsafe_allow_html=True)
-        opt_out = st.text_input("How people opt out", value=saved["opt_out"], key=f"footer_opt_out_{campaign_name}", label_visibility="collapsed", placeholder=hc.DEFAULT_OPT_OUT)
-        draft = {"business_name": business_name.strip(), "address": address.strip(), "opt_out": opt_out.strip()}
-        changed = draft != saved
-        if not hc.footer_problems(draft):
-            st.markdown(field_label_html("How it will look"), unsafe_allow_html=True)
-            st.markdown(f'<div class="se-footer-preview">{hc.build_footer_html(draft)}</div>', unsafe_allow_html=True)
-        st.markdown(rule_html(), unsafe_allow_html=True)
-        save_column, state_column = st.columns([1, 3])
-        with save_column:
-            save_clicked = st.button("💾 Save", key="footer_save", type="primary", disabled=not changed)
-        with state_column:
-            if changed:
-                st.markdown(chip_html("unsaved", "● Unsaved change"), unsafe_allow_html=True)
-        if flash:
-            st.success(flash)
-        with st.expander("How it works"):
-            st.caption(
-                "Write {{ footer }} in the design where the footer should go, and again at the end of the plain-text copy. If your designer's HTML already has its own address and "
-                "unsubscribe line, you do not need it: the checks only ask that every email has some way to opt out. Whatever is typed here is made safe before it is used."
-            )
-        if save_clicked:
-            if hc.footer_problems(draft):
-                st.error("Enter the business name and the postal address.")
-            else:
-                try:
-                    client = _get_github_client()
-                    raw_override = load_raw_override_live(campaign_name, client, CAMPAIGNS_DIR)             # the LIVE file, not a possibly stale local copy
-                    updated = build_footer_settings_override(raw_override, draft["business_name"], draft["address"], draft["opt_out"])
-                    client.create_file(
-                        override_file_path(campaign_name), override_to_yaml_bytes(updated),
-                        message=f"Update email footer for {campaign_name} (via Streamlit, by {current_user()})",
-                    )
-                    st.session_state[snapshot_key] = draft
-                    st.session_state[flash_key] = "Footer saved. May take a minute to reflect here while the app redeploys."
-                    st.rerun()                                                 # redraw the card as saved (the Save button and the unsaved chip were drawn before the save ran)
-                except GitHubActionsError as exc:
-                    st.error(f"Failed to save: {exc}")
-
-
 def _render_link_tagging_section_in_settings(campaign_cfg):
     """An HTML campaign's link tagging: when on, every web link in its designed emails gets standard utm_ labels (which campaign, which email), so clicks show up in the analytics
     of the site the link goes to. It does NOT record clicks in this tool. Shown only for HTML campaigns; the switch is a draft until Save is pressed."""
@@ -1158,6 +1098,7 @@ def _render_link_tagging_section_in_settings(campaign_cfg):
     flash_key = f"tracking_flash_{campaign_name}"
     flash = st.session_state.pop(flash_key, None)
     saved = st.session_state.get(snapshot_key) or {"enabled": bool(tracking.get("utm"))}
+    st.markdown(section_label_html("HTML email"), unsafe_allow_html=True)
     with st.container(key="se_card_tracking"):
         head_column, switch_column = st.columns([4.2, 1.1])
         head_column.markdown(tool_heading_html("🔗", "Link tagging", "Labels every web link so clicks show up in the analytics of the site it goes to.",
