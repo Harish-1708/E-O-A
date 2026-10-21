@@ -664,7 +664,8 @@ def test_the_preview_in_the_editor_is_tagged_exactly_like_the_send(tmp_path):
     import html_editor_logic as EL
     cfg = _tag_cfg(tmp_path, {"utm": True})
     preview = EL.render_preview(LINK_DESIGN, LEAD, cfg, utm_content="intro_A")
-    assert preview["html"] == outreach.render_email_html(str(tmp_path), "intro", "A", LEAD, cfg)["html"]
+    sent = outreach.render_email_html(str(tmp_path), "intro", "A", LEAD, cfg)["html"]
+    assert preview["html"] == hc.fill_unsubscribe_html(sent, hc.SAMPLE_SENDER)                      # the same, except the sample sender address where the real send uses its mailbox
 
 
 def test_a_designer_file_with_a_broken_link_still_sends(tmp_path):
@@ -799,3 +800,92 @@ def test_a_test_email_reports_unknown_placeholders_from_the_subject_and_the_desi
     _write(tmp_path, "intro_A.html", "<p>Hi {{ in_design }} {{ in_design }}</p>{{ footer }}")
     sent = outreach.send_test_email(cfg, ACCOUNTS, "intro", "A", "team@kelson.agency")
     assert sent["missing_variables"] == ["in_subject", "in_design"] and "in_old_body" not in sent["missing_variables"]
+
+
+
+# ================================================================ unsubscribe: the header, the footer link and the message id
+
+def test_the_footer_carries_a_clickable_unsubscribe_link_with_a_stand_in_for_the_senders_address():
+    footer = hc.build_footer_html(CFG_WITH_FOOTER["footer"])
+    assert f'<a href="{hc.UNSUBSCRIBE_TOKEN}"' in footer and ">Unsubscribe</a>" in footer and "Kelson Agency" in footer and "12 Example Street" in footer
+    assert hc.UNSUBSCRIBE_TOKEN not in hc.PLACEHOLDER_RE.findall(footer) and not hc.PLACEHOLDER_RE.search(hc.UNSUBSCRIBE_TOKEN)      # it can never be mistaken for a {{ placeholder }}
+
+
+def test_the_message_builder_puts_the_real_sending_address_into_the_footer_link_of_both_halves():
+    design = "<p>Hi</p>" + hc.build_footer_html(CFG_WITH_FOOTER["footer"])
+    text = hc.html_to_text(design)
+    assert hc.UNSUBSCRIBE_TOKEN in text and "Unsubscribe (" in text                                  # the plain-text half shows the link as text (address)
+    msg, _ = outreach._build_outbound_message("sales@kelson.agency", "ann@x.com", "Hi", text, html_body=design)
+    plain, html_part = [p.get_payload(decode=True).decode() for p in msg.get_payload()]
+    assert "mailto:sales@kelson.agency?subject=unsubscribe" in plain and 'href="mailto:sales@kelson.agency?subject=unsubscribe"' in html_part
+    assert hc.UNSUBSCRIBE_TOKEN not in plain and hc.UNSUBSCRIBE_TOKEN not in html_part and msg["List-Unsubscribe"] == "<mailto:sales@kelson.agency?subject=unsubscribe>"
+
+
+def test_each_sending_mailbox_gets_its_own_address_in_its_own_emails():
+    design = "<p>x</p>" + hc.build_footer_html(CFG_WITH_FOOTER["footer"])
+    first, _ = outreach._build_outbound_message("a@one.com", "t@x.com", "S", "t", html_body=design)
+    second, _ = outreach._build_outbound_message("b@two.org", "t@x.com", "S", "t", html_body=design)
+    assert "mailto:a@one.com" in first.get_payload()[1].get_payload(decode=True).decode() and "mailto:b@two.org" in second.get_payload()[1].get_payload(decode=True).decode()
+    assert "b@two.org" not in first.get_payload()[1].get_payload(decode=True).decode()
+
+
+def test_a_design_with_its_own_unsubscribe_line_and_no_footer_is_left_exactly_as_the_designer_wrote_it():
+    design = '<p>Hi <a href="https://x.com/unsub">unsubscribe here</a></p>'
+    msg, _ = outreach._build_outbound_message("a@one.com", "t@x.com", "S", "plain text", html_body=design)
+    assert msg.get_payload()[1].get_payload(decode=True).decode() == design and msg.get_payload()[0].get_payload(decode=True).decode() == "plain text"
+
+
+def test_an_awkward_sending_address_cannot_break_out_of_the_attribute():
+    design = "<p>x</p>" + hc.build_footer_html(CFG_WITH_FOOTER["footer"])
+    msg, _ = outreach._build_outbound_message('a"b<c>@one.com', "t@x.com", "S", "t", html_body=design)
+    html_part = msg.get_payload()[1].get_payload(decode=True).decode()
+    assert 'a&quot;b&lt;c&gt;@one.com' in html_part and 'href="mailto:a"' not in html_part and html_part.count("<a ") == 1
+
+
+def test_the_unsubscribe_header_and_the_footer_link_use_the_same_address_and_subject():
+    msg, _ = outreach._build_outbound_message("sales@kelson.agency", "t@x.com", "S", "t", html_body="<p>x</p>" + hc.build_footer_html({"business_name": "K", "address": "A"}))
+    header = msg["List-Unsubscribe"].strip("<>")
+    assert header == hc.unsubscribe_mailto("sales@kelson.agency") and header in msg.get_payload()[1].get_payload(decode=True).decode()
+    assert outreach.is_unsubscribe_request(header.split("subject=")[1])                           # and the reply check recognises exactly that subject
+
+
+def test_an_html_emails_message_id_is_on_the_senders_domain_and_a_plain_text_emails_is_unchanged():
+    html_msg, html_id = outreach._build_outbound_message("sales@kelson.agency", "t@x.com", "S", "t", html_body="<p>x</p>")
+    assert html_id.endswith("@kelson.agency>") and html_msg["Message-ID"] == html_id and "localhost" not in html_id
+    text_msg, text_id = outreach._build_outbound_message("sales@kelson.agency", "t@x.com", "S", "t")
+    assert text_msg["Message-ID"] == text_id and not text_id.endswith("@kelson.agency>")        # plain-text mail keeps exactly the id it always had
+
+
+def test_a_sender_address_with_no_domain_falls_back_to_the_normal_message_id():
+    msg, message_id = outreach._build_outbound_message("nodomain", "t@x.com", "S", "t", html_body="<p>x</p>")
+    assert msg["Message-ID"] == message_id and message_id.startswith("<") and "@" in message_id
+
+
+def test_the_test_email_reports_the_unsubscribe_header_it_sent_for_html_and_none_for_plain_text(tmp_path, monkeypatch):
+    _capture_smtp(monkeypatch)
+    html_sent = outreach.send_test_email(_test_cfg(tmp_path, "html"), ACCOUNTS, "intro", "A", "team@kelson.agency")
+    account = ACCOUNTS[html_sent["account"]]["address"]
+    assert html_sent["unsubscribe_header"] == f"<mailto:{account}?subject=unsubscribe>"
+    assert outreach.send_test_email(_test_cfg(tmp_path, "text"), ACCOUNTS, "intro", "A", "team@kelson.agency")["unsubscribe_header"] == ""
+
+
+def test_the_test_command_prints_the_header_and_the_honest_note_about_gmail_for_html_only(tmp_path, monkeypatch, capsys):
+    import argparse
+    _capture_smtp(monkeypatch)
+    monkeypatch.setattr(outreach, "load_email_accounts", lambda: ACCOUNTS)
+    monkeypatch.setattr(outreach, "get_campaign", lambda name, **kw: _test_cfg(tmp_path, "html"))
+    outreach.cmd_send_test(argparse.Namespace(campaign="C", stage="intro", variant="A", to="team@kelson.agency", account=""))
+    out = capsys.readouterr().out
+    assert "Unsubscribe header sent with this email: List-Unsubscribe: <mailto:" in out and "Gmail often does not show its own Unsubscribe button" in out
+    monkeypatch.setattr(outreach, "get_campaign", lambda name, **kw: _test_cfg(tmp_path, "text"))
+    outreach.cmd_send_test(argparse.Namespace(campaign="C", stage="intro", variant="A", to="team@kelson.agency", account=""))
+    assert "Unsubscribe header" not in capsys.readouterr().out
+
+
+def test_a_real_batch_email_of_an_html_campaign_ends_with_a_working_unsubscribe_link_in_both_halves(tmp_path):
+    cfg = _batch_cfg(tmp_path, "html", html_text="<p>Hi {{ FirstName }}</p>{{ footer }}")
+    item = outreach.build_batch(cfg, [make_lead(_row=2, FirstName="Ann")], "intro", 10, forced_variant="A")[0]
+    assert hc.UNSUBSCRIBE_TOKEN in item["html_body"] and hc.UNSUBSCRIBE_TOKEN in item["body"]       # filled in later, when the sending mailbox is known
+    msg, _ = outreach._build_outbound_message("sales1@kelson.agency", "ann@x.com", item["subject"], item["body"], html_body=item["html_body"])
+    parts = [p.get_payload(decode=True).decode() for p in msg.get_payload()]
+    assert all("mailto:sales1@kelson.agency?subject=unsubscribe" in part for part in parts) and not any(hc.UNSUBSCRIBE_TOKEN in part for part in parts)
