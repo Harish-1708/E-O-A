@@ -637,3 +637,22 @@ def test_the_workspace_follows_the_stage_chosen_in_the_list_and_names_it():
         assert "Intro" in all_text(at)
         pick(at, "followup4", "A")
         assert "Follow-up 4" in all_text(at) and area(at, "followup4", "A").value == DESIGN
+
+
+# ================================================================ the unsubscribe link in the preview
+
+def test_the_preview_and_the_plain_text_version_show_a_sample_sender_address_never_the_stand_in():
+    import html_campaign_logic as hcl
+    with editor() as (at, _):
+        page = getattr(at.get("iframe")[0].proto, "srcdoc", "")
+        shown = " ".join(c.value for c in at.code)
+        assert "Unsubscribe</a>" in page and f"mailto:{hcl.SAMPLE_SENDER}?subject=unsubscribe" in page and hcl.UNSUBSCRIBE_TOKEN not in page
+        assert f"Unsubscribe (mailto:{hcl.SAMPLE_SENDER}?subject=unsubscribe)" in shown and hcl.UNSUBSCRIBE_TOKEN not in shown
+
+
+def test_the_footer_details_preview_shows_the_unsubscribe_link_with_the_sample_address():
+    import html_campaign_logic as hcl
+    with editor(footer=False) as (at, _):
+        fill_foot(at, business_name="Kelson Agency", address="12 Example Street")
+        text = all_text(at)
+        assert 'class="he-footer-preview"' in text and f"mailto:{hcl.SAMPLE_SENDER}?subject=unsubscribe" in text and hcl.UNSUBSCRIBE_TOKEN not in text
