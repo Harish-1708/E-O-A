@@ -245,11 +245,34 @@ def _footer_values(footer: Dict) -> Tuple[str, str, str]:
     return name, address, opt_out
 
 
+# The footer's Unsubscribe link must point at the mailbox the email is SENT FROM, which is only known when the message is built. So the footer carries this stand-in, and the
+# message builder swaps in the real address (in the design and in the plain-text half). It is written so it can never be mistaken for a {{ placeholder }}.
+UNSUBSCRIBE_TOKEN = "[[unsubscribe_mailto]]"
+SAMPLE_SENDER = "you@yourdomain.com"
+
+
+def unsubscribe_mailto(sender_address: str) -> str:
+    """The address an Unsubscribe click (in the footer, or from a mail app's own Unsubscribe button) writes to: the sending mailbox, with the subject the reply check recognises."""
+    return f"mailto:{sender_address}?subject=unsubscribe"
+
+
+def fill_unsubscribe_html(markup: str, sender_address: str) -> str:
+    """The design with the footer's stand-in replaced by the real mailto link (escaped for use inside an attribute)."""
+    return (markup or "").replace(UNSUBSCRIBE_TOKEN, html.escape(unsubscribe_mailto(sender_address), quote=True))
+
+
+def fill_unsubscribe_text(text: str, sender_address: str) -> str:
+    """The plain-text half with the stand-in replaced by the real mailto address."""
+    return (text or "").replace(UNSUBSCRIBE_TOKEN, unsubscribe_mailto(sender_address))
+
+
 def build_footer_html(footer: Dict) -> str:
-    """The footer block for an HTML email. Every value is escaped, so nothing typed in the settings can become markup."""
+    """The footer block for an HTML email: the business name and address, the opt-out wording, and a clickable Unsubscribe link. Every value is escaped, so nothing typed in
+    the settings can become markup. The link carries UNSUBSCRIBE_TOKEN until the message is built."""
     name, address, opt_out = _footer_values(footer or {})
     return ('<div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:#6b7280;text-align:center;padding:16px 8px;">'
-            f'{html.escape(name)} &middot; {html.escape(address)}<br>{html.escape(opt_out)}</div>')
+            f'{html.escape(name)} &middot; {html.escape(address)}<br>{html.escape(opt_out)}<br>'
+            f'<a href="{UNSUBSCRIBE_TOKEN}" style="color:#6b7280;text-decoration:underline;">Unsubscribe</a></div>')
 
 
 def build_footer_text(footer: Dict) -> str:
