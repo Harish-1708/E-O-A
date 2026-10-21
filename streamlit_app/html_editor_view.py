@@ -270,7 +270,7 @@ def _render_footer_panel(client, campaign_name: str, ctx, text_key: str, text: s
             changed = draft != footer_now
             if not hc.footer_problems(draft):
                 st.markdown(EH.title_html("How it will look"), unsafe_allow_html=True)
-                st.markdown(f'<div class="he-footer-preview">{hc.build_footer_html(draft)}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="he-footer-preview">{hc.fill_unsubscribe_html(hc.build_footer_html(draft), hc.SAMPLE_SENDER)}</div>', unsafe_allow_html=True)
             save_column, state_column = st.columns([1, 3])
             with save_column:
                 save_clicked = st.button("💾 Save footer", key="footer_save", type="primary", disabled=not changed)
