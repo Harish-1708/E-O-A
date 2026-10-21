@@ -1,4 +1,5 @@
 """The pure rules for HTML campaigns: what an email must never contain, the checks, the footer, the plain-text helper and the starter layouts."""
+import html
 import os
 import re
 import sys
@@ -378,3 +379,34 @@ def test_a_subject_file_is_read_back_exactly_by_the_engines_own_parser():
     import outreach
     for subject in ("Spring news", "{{ FirstName }}, a note", "", "Ünïcode ☕ subject"):
         assert outreach.parse_template_content(H.build_subject_file(subject))["subject"] == subject
+
+
+# ================================================================ the unsubscribe link
+
+def test_the_unsubscribe_address_is_the_sending_mailbox_with_the_subject_the_reply_check_reads():
+    assert H.unsubscribe_mailto("sales@kelson.agency") == "mailto:sales@kelson.agency?subject=unsubscribe"
+
+
+def test_the_stand_in_is_replaced_everywhere_it_appears_in_the_design_and_in_the_text():
+    markup = f'<a href="{H.UNSUBSCRIBE_TOKEN}">a</a><a href="{H.UNSUBSCRIBE_TOKEN}">b</a>'
+    out = H.fill_unsubscribe_html(markup, "s@k.agency")
+    assert out.count("mailto:s@k.agency?subject=unsubscribe") == 2 and H.UNSUBSCRIBE_TOKEN not in out
+    assert H.fill_unsubscribe_text(f"Unsubscribe ({H.UNSUBSCRIBE_TOKEN})", "s@k.agency") == "Unsubscribe (mailto:s@k.agency?subject=unsubscribe)"
+    assert H.fill_unsubscribe_html("<p>none here</p>", "s@k.agency") == "<p>none here</p>" and H.fill_unsubscribe_html(None, "s@k.agency") == "" and H.fill_unsubscribe_text(None, "s@k.agency") == ""
+
+
+def test_the_footer_has_an_unsubscribe_link_whose_target_is_filled_in_later_and_whose_text_is_escaped_input_only():
+    footer = H.build_footer_html(FOOTER)
+    assert f'<a href="{H.UNSUBSCRIBE_TOKEN}" style="color:#6b7280;text-decoration:underline;">Unsubscribe</a>' in footer and footer.count("<a ") == 1
+    hostile = H.build_footer_html({"business_name": '"><a href="https://evil.example">x</a>', "address": "<script>x</script>", "opt_out": "<img src=x onerror=1>"})
+    assert hostile.count("<a ") == 1 and H.unsafe_problems(hostile) == [] and "evil.example" not in hostile.replace("&quot;&gt;&lt;a href=&quot;https://evil.example", "")
+
+
+@pytest.mark.parametrize("sender", ['a"b<c>@x.com', "o'brien@x.com", "a&b@x.com"])
+def test_an_awkward_sender_address_stays_inside_the_link_attribute(sender):
+    out = H.fill_unsubscribe_html(H.build_footer_html(FOOTER), sender)
+    assert out.count("<a ") == 1 and 'href="mailto:' in out and "<script" not in out and H.scan_html(out).links == [html.unescape(re.search(r'href="([^"]*)"', out).group(1))]
+
+
+def test_a_footer_with_the_stand_in_still_passes_every_check_and_counts_as_an_opt_out():
+    assert H.has_opt_out("{{ footer }}") and H.html_checks("<p>" + "word " * 30 + "</p>{{ footer }}", "", ["FirstName"], FOOTER) == {"errors": [], "warnings": []}
