@@ -95,13 +95,13 @@ def render_preview(raw: str, lead: Dict, campaign_cfg: Dict, utm_content: str = 
         return {"html": None, "errors": unsafe, "missing": []}
     try:
         result = outreach.render_html_text(raw, lead, campaign_cfg, utm_content=utm_content)
-        return {"html": result["html"], "errors": [], "missing": result["missing_variables"]}
+        return {"html": hc.fill_unsubscribe_html(result["html"], hc.SAMPLE_SENDER), "errors": [], "missing": result["missing_variables"]}
     except outreach.TemplateError as exc:
         if "footer is incomplete" not in str(exc):
             return {"html": None, "errors": [str(exc)], "missing": []}
         missing: List[str] = []
         shown = outreach.render_text(raw, lead, missing_out=missing, escape=outreach.html_lib.escape, reserved={"footer": FOOTER_PLACEHOLDER})
-        return {"html": shown, "errors": [str(exc)], "missing": list(dict.fromkeys(missing))}
+        return {"html": hc.fill_unsubscribe_html(shown, hc.SAMPLE_SENDER), "errors": [str(exc)], "missing": list(dict.fromkeys(missing))}
 
 
 def preview_document(rendered: str) -> str:
