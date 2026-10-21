@@ -88,7 +88,7 @@ def test_the_preview_is_what_the_send_would_produce_for_that_lead():
     raw = "<p>Hi {{ FirstName }} at {{ CompanyName }}</p>{{ footer }}"
     lead = {"FirstName": "Ann", "Company": "Acme"}
     preview = EL.render_preview(raw, lead, CFG)
-    assert preview["errors"] == [] and preview["missing"] == [] and preview["html"] == outreach.render_html_text(raw, lead, CFG)["html"] and "Hi Ann at Acme" in preview["html"]
+    assert preview["errors"] == [] and preview["missing"] == [] and preview["html"] == hc.fill_unsubscribe_html(outreach.render_html_text(raw, lead, CFG)["html"], hc.SAMPLE_SENDER) and "Hi Ann at Acme" in preview["html"]
 
 
 def test_unsafe_html_is_never_rendered_in_the_preview():
@@ -134,7 +134,7 @@ def test_the_fitting_script_is_never_part_of_what_is_sent_or_checked():
     raw = "<p>Hi {{ FirstName }}</p>{{ footer }}"
     preview = EL.render_preview(raw, EL.SAMPLE_LEAD, CFG)
     assert "<script" not in preview["html"] and "<script" in EL.preview_document(preview["html"])
-    assert outreach.render_html_text(raw, EL.SAMPLE_LEAD, CFG)["html"] == preview["html"]
+    assert hc.fill_unsubscribe_html(outreach.render_html_text(raw, EL.SAMPLE_LEAD, CFG)["html"], hc.SAMPLE_SENDER) == preview["html"]
 
 
 # ================================================================ the footer in force
@@ -185,3 +185,10 @@ def test_extra_errors_are_listed_with_the_others():
 def test_nothing_in_a_check_message_can_become_markup(hostile):
     markup = EH.checks_html({"errors": [hostile], "warnings": [hostile]}, [hostile]) + EH.title_html(hostile, hostile)
     assert "<script>" not in markup and "<img" not in markup and markup.count(html.escape(hostile)) == 5
+
+
+def test_the_preview_shows_the_sample_sender_address_in_the_unsubscribe_link_and_never_the_stand_in():
+    preview = EL.render_preview("<p>Hi</p>{{ footer }}", EL.SAMPLE_LEAD, CFG)
+    assert f"mailto:{hc.SAMPLE_SENDER}?subject=unsubscribe" in preview["html"] and hc.UNSUBSCRIBE_TOKEN not in preview["html"]
+    incomplete = EL.render_preview("<p>Hi</p>{{ footer }}", EL.SAMPLE_LEAD, {"format": "html"})
+    assert hc.UNSUBSCRIBE_TOKEN not in incomplete["html"]
