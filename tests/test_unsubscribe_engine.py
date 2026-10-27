@@ -1062,7 +1062,7 @@ def test_the_test_address_with_an_account_position_still_turns_the_page_off(tmp_
 
 # ================================================================ the static page on GitHub Pages: links, emails and checks
 
-STATIC_PAGE = "https://harish-1708.github.io/E-O-A/unsubscribe.html"
+STATIC_PAGE = "https://unsubscribe.kelson.agency/"
 GOOGLE = "https://script.google.com/macros/s/AKfycbyID/exec"
 
 
@@ -1191,7 +1191,7 @@ def test_the_redirect_limit_stops_a_loop_in_the_data_request(google):
 
 
 def with_probe_results(monkeypatch, static=("ok", "GitHub Pages served the unsubscribe page (HTTP 200)."), config=("ok", "the page's config.js names the same Google script as UNSUBSCRIBE_URL."),
-                       get=("ok", "every answer (2 steps) allows a page on https://harish-1708.github.io, and the last one is the script's data."), post=("ok", "every answer (2 steps) allows a page on https://harish-1708.github.io, and the last one is the script's data.")):
+                       get=("ok", "every answer (2 steps) allows a page on https://unsubscribe.kelson.agency, and the last one is the script's data."), post=("ok", "every answer (2 steps) allows a page on https://unsubscribe.kelson.agency, and the last one is the script's data.")):
     calls = {"static": [], "config": [], "api": []}
     monkeypatch.setattr(outreach, "probe_static_page", lambda url, timeout=20: calls["static"].append(url) or static)
     monkeypatch.setattr(outreach, "probe_page_config", lambda page_url, expected_api, timeout=20: calls["config"].append((page_url, expected_api)) or config)
@@ -1205,7 +1205,7 @@ def test_the_run_prints_the_footer_link_and_the_four_static_page_checks_and_stay
     out, code = run_command(tmp_path, monkeypatch, capsys)
     footer = _Sent.calls[0]["html_body"].split('href="')[1].split('"')[0]
     assert code == 0 and f"Footer link (what recipients click, on GitHub Pages): {footer}" in out and footer.startswith(STATIC_PAGE + "?t=")
-    for label in ("A, the page is being served: OK.", "B, its config.js names the same Google script: OK.", "C, the script answers the page's data request (GET) and allows a page on https://harish-1708.github.io: OK.",
+    for label in ("A, the page is being served: OK.", "B, its config.js names the same Google script: OK.", "C, the script answers the page's data request (GET) and allows a page on https://unsubscribe.kelson.agency: OK.",
                   "D, the script accepts the page's confirm request (POST, with this TEST link: records nothing): OK."):
         assert label in out, label
     assert "PAGE VERDICT: everything the page needs works from here" in out and "NOT TESTED HERE: a real browser" in out and "PROBLEM" not in out
@@ -1217,11 +1217,11 @@ def test_the_checks_are_made_on_the_footer_link_the_config_the_google_address_an
     footer = _Sent.calls[0]["html_body"].split('href="')[1].split('"')[0]
     token = ul.token_from_url(footer)
     assert calls["static"] == [footer] and calls["config"] == [(STATIC_PAGE, GOOGLE)]
-    assert calls["api"] == [(GOOGLE, token, "https://harish-1708.github.io", False), (GOOGLE, token, "https://harish-1708.github.io", True)] and ul.verify_token(SECRET, token)["t"] == 1
+    assert calls["api"] == [(GOOGLE, token, "https://unsubscribe.kelson.agency", False), (GOOGLE, token, "https://unsubscribe.kelson.agency", True)] and ul.verify_token(SECRET, token)["t"] == 1
 
 
 @pytest.mark.parametrize("which, label", [("static", "A, the page is being served: BLOCKED."), ("config", "B, its config.js names the same Google script: BLOCKED."),
-                                          ("get", "(GET) and allows a page on https://harish-1708.github.io: BLOCKED."), ("post", "(POST, with this TEST link: records nothing): BLOCKED.")])
+                                          ("get", "(GET) and allows a page on https://unsubscribe.kelson.agency: BLOCKED."), ("post", "(POST, with this TEST link: records nothing): BLOCKED.")])
 def test_any_blocked_static_page_check_fails_the_run_after_the_email_was_sent_and_says_which(tmp_path, monkeypatch, capsys, pages_on, which, label):
     with_probe_results(monkeypatch, **{which: ("blocked", "the reason in plain words")})
     out, code = run_command(tmp_path, monkeypatch, capsys)
@@ -1254,3 +1254,24 @@ def test_a_plain_text_test_run_and_a_page_that_is_off_never_make_the_page_checks
     monkeypatch.delenv("UNSUBSCRIBE_URL")
     run_command(tmp_path, monkeypatch, capsys)
     assert calls == {"static": [], "config": [], "api": []}
+
+
+
+def test_a_github_io_page_address_is_used_but_the_test_run_warns_that_it_shows_the_github_name(tmp_path, monkeypatch, capsys, pages_on):
+    monkeypatch.setenv("UNSUBSCRIBE_PAGE_URL", "https://harish-1708.github.io/E-O-A/unsubscribe.html")
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    footer = _Sent.calls[0]["html_body"].split('href="')[1].split('"')[0]
+    assert code == 0 and footer.startswith("https://harish-1708.github.io/E-O-A/unsubscribe.html?t=") and "WARNING: UNSUBSCRIBE_PAGE_URL is a github.io address" in out and "Static page checks" in out
+
+
+def test_an_address_on_your_own_domain_gives_no_warning_and_a_clean_link(tmp_path, monkeypatch, capsys, pages_on):
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    footer = _Sent.calls[0]["html_body"].split('href="')[1].split('"')[0]
+    assert code == 0 and "WARNING" not in out and footer.startswith("https://unsubscribe.kelson.agency/?t=") and "github" not in footer and "github" not in _Sent.calls[0]["html_body"].lower()
+
+
+def test_no_part_of_a_real_email_names_github_when_the_page_is_on_your_own_domain(tmp_path, monkeypatch, pages_on):
+    send(html_cfg(tmp_path), ListSheets(leads_of("a@x.com")), monkeypatch)
+    call = _Sent.calls[0]
+    msg, _ = outreach._build_outbound_message("sales@kelson.agency", "a@x.com", "S", call["body"], html_body=call["html_body"], unsubscribe_url=call["unsubscribe_url"])
+    assert "github" not in msg.as_string().lower()
