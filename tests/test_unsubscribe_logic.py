@@ -180,3 +180,85 @@ def test_the_tab_and_its_columns_are_what_the_google_page_writes():
 def test_a_decoded_payload_is_plain_json_with_no_padding_in_the_link():
     body = KNOWN_PLAIN.split(".")[0]
     assert "=" not in body and json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))["b"] == "Kelson Agency"
+
+
+# ================================================================ the page address (the test address works for you and nobody else)
+
+SECRET20 = "s" * 20
+
+
+def status(url):
+    return ul.configuration_status({"UNSUBSCRIBE_URL": url, "UNSUBSCRIBE_SECRET": SECRET20})
+
+
+@pytest.mark.parametrize("url", ["https://script.google.com/macros/s/AKfycbx123/exec", "https://script.google.com/macros/s/AKfycbx123/exec/", "https://SCRIPT.GOOGLE.COM/macros/s/AKfy/exec",
+                                 "https://script.google.com/macros/s/AKfy/exec?a=1", "https://unsubscribe.kelson.agency/page", "https://example.com/dev"])
+def test_a_proper_page_address_is_accepted_without_a_warning(url):
+    config, note = status(url)
+    assert config is not None and note == "" and config.url == url
+
+
+@pytest.mark.parametrize("url", ["https://script.google.com/macros/s/AKfycbx123/dev", "https://script.google.com/macros/s/AKfycbx123/dev/", "https://SCRIPT.google.com/macros/s/AKfy/DEV".replace("DEV", "dev")])
+def test_googles_test_address_is_refused_because_it_opens_only_for_the_scripts_owner(url):
+    config, note = status(url)
+    assert config is None and "ends in /dev" in note and "TEST address" in note and "only for the script's owner" in note and "/exec" in note and "OFF" in note
+
+
+@pytest.mark.parametrize("url", ["https://script.google.com/macros/s/AKfycbx123", "https://script.google.com/macros/s/AKfycbx123/exec2", "https://script.google.com/macros/s/AKfycbx123/exe", "https://script.google.com/"])
+def test_a_google_address_that_is_not_the_web_app_address_is_refused(url):
+    config, note = status(url)
+    assert config is None and "should end in /exec" in note and "OFF" in note
+
+
+def test_an_address_for_people_inside_one_workspace_is_kept_but_flagged():
+    config, note = status("https://script.google.com/a/macros/kelson.agency/s/AKfy/exec")
+    assert config is not None and "/a/macros/" in note and "Who has access" in note and "Anyone" in note
+
+
+@pytest.mark.parametrize("url", ["https://script.google.com/macros/s/AKfy/exec\nhttps://x", "https://script.google.com/macros/s/AKfy /exec", "https://script.google.com/macros/s/AKfy/exec\t"[:-1] + "\r\nx"])
+def test_an_address_pasted_with_a_space_or_a_line_break_in_it_is_refused(url):
+    config, note = status(url)
+    assert config is None and "space or a line break" in note
+
+
+def test_surrounding_whitespace_from_a_paste_is_simply_trimmed():
+    config, note = status("  https://script.google.com/macros/s/AKfy/exec \n")
+    assert config is not None and config.url == "https://script.google.com/macros/s/AKfy/exec" and note == ""
+
+
+def test_the_address_rules_do_not_apply_to_another_host():
+    assert ul.address_problem("https://example.com/macros/s/X/dev") == (False, "")
+    assert ul.address_problem("https://notscript.google.com.evil.example/macros/s/X/dev") == (False, "")
+
+
+# ================================================================ what the page answers when opened without signing in
+
+@pytest.mark.parametrize("status_code, url, body, state", [
+    (200, "https://script.google.com/macros/s/X/exec", "<html>This link is not valid</html>", "ok"), (200, "https://x.example/p", "<html>anything</html>", "ok"),
+    (200, "https://x/p", "Sorry, unable to open the file at present. Please check the address and try again.", "blocked"), (404, "https://x/p", "Not found", "blocked"),
+    (403, "https://x/p", "", "blocked"), (401, "https://x/p", "", "blocked"), (410, "https://x/p", "", "blocked"),
+    (200, "https://accounts.google.com/ServiceLogin?continue=x", "<html>Sign in</html>", "signin"), (302, "https://ACCOUNTS.google.com/v3/signin", "", "signin"),
+    (500, "https://x/p", "oops", "unknown"), (302, "https://x/p", "", "unknown"), (None, "https://x/p", "", "unknown")])
+def test_what_the_address_answered_is_classified_for_a_person(status_code, url, body, state):
+    got_state, message = ul.classify_probe(status_code, url, body)
+    assert got_state == state and message
+    assert (state in ("blocked", "signin")) == ("Deploy > Manage deployments > Edit > Who has access: Anyone" in message)         # a problem always says how to fix it
+
+
+def test_the_error_page_is_recognised_whatever_the_status_and_the_letter_case():
+    assert ul.classify_probe(200, "https://x", "<b>SORRY, UNABLE TO OPEN THE FILE AT PRESENT</b>")[0] == "blocked"
+    assert ul.classify_probe(404, "https://x", "unable to open the file")[0] == "blocked"
+
+
+def test_our_own_not_valid_card_is_reported_as_the_unsubscribe_page_answering():
+    assert "answered as the unsubscribe page" in ul.classify_probe(200, "https://x", "<div>This link is not valid</div>")[1]
+    assert "answered as the unsubscribe page" not in ul.classify_probe(200, "https://x", "<div>other</div>")[1]
+
+
+def test_a_problem_on_our_side_is_never_a_verdict_on_the_page():
+    state, message = ul.classify_probe(None, "https://x", "", error="Name or service not known")
+    assert state == "unknown" and "could not check" in message and "Name or service not known" in message
+
+
+def test_only_unknown_is_not_a_problem():
+    assert {ul.classify_probe(200, "u", "")[0], ul.classify_probe(500, "u", "")[0]} == {"ok", "unknown"}
