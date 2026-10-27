@@ -61,7 +61,7 @@ def test_the_file_has_every_section_in_order_with_its_header():
     rows = rows_of(F.build_performance_csv(perf(), "Camp"))
     names = [r[0] for i, r in enumerate(rows) if r and i > 0 and rows[i - 1] == []]
     assert rows[0] == ["Camp — Performance"]
-    assert names == ["Headline figures", "What the replies say", "Follow-up stage effectiveness", "Template variants", "By sender account", "Deliverability", "Errors (all time)"]
+    assert names == ["Headline figures", "Where the leads are now", "What the replies say", "Follow-up stage effectiveness", "Template variants", "By sender account", "Deliverability", "Errors (all time)"]
 
 
 def test_the_headline_section_holds_all_ten_figures_exactly_as_the_page_shows_them():
@@ -155,3 +155,25 @@ def test_the_export_notes_the_change_beside_the_reply_rate_and_says_nothing_extr
     assert with_trend["Reply rate"] == ["Reply rate", "66.7%", "2 replied · ▲ 15.0 pts vs previous 7 days"]
     without = {r[0]: r for r in rows_of(F.build_performance_csv(perf())) if r}
     assert without["Reply rate"] == ["Reply rate", "66.7%", "2 replied"]
+
+
+def test_the_where_section_lists_every_place_by_its_plain_name_with_its_count_and_its_share_of_all_the_leads():
+    outcomes = {label: 0 for label in F.OUTCOME_ORDER}
+    outcomes.update({"Not contacted yet": 2, "In progress": 3, "Completed the sequence": 1, "Replied": 2})
+    rows = rows_of(F.build_performance_csv({**perf(), "outcomes": outcomes, "total_leads": 8, "contacted": 6}, "Camp"))
+    start = rows.index(["Where the leads are now"])
+    assert rows[start + 1] == ["Where", "Leads", "Share of leads"]
+    table = rows[start + 2: start + 2 + len(F.OUTCOME_ORDER)]
+    assert [r[0] for r in table] == ["Not contacted yet", "In progress", "Completed", "Replied", "Bounced", "Unsubscribed", "Declined", "Stopped by hand", "Paused", "Removed", "No email address"]
+    assert table[:4] == [["Not contacted yet", "2", "25.0%"], ["In progress", "3", "37.5%"], ["Completed", "1", "12.5%"], ["Replied", "2", "25.0%"]] and table[4] == ["Bounced", "0", "0.0%"]
+
+
+def test_the_where_section_shows_dashes_not_a_division_error_for_a_campaign_with_no_leads():
+    rows = rows_of(F.build_performance_csv({**perf(), "outcomes": {label: 0 for label in F.OUTCOME_ORDER}, "total_leads": 0}, "Camp"))
+    start = rows.index(["Where the leads are now"])
+    assert all(r[2] == "—" for r in rows[start + 2: start + 2 + len(F.OUTCOME_ORDER)])
+
+
+def test_an_older_figures_dict_with_no_outcomes_still_exports_without_failing():
+    rows = rows_of(F.build_performance_csv({**{k: v for k, v in perf().items() if k != "outcomes"}, "total_leads": 3}, "Camp"))
+    assert ["Where the leads are now"] in rows
