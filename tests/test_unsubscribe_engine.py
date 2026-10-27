@@ -30,7 +30,7 @@ def page_on(monkeypatch):
 def no_network(monkeypatch):
     """The page check is stubbed for every test (it answers 'ok' unless a test says otherwise) and its calls are recorded."""
     calls = []
-    monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20: calls.append(url) or ul.classify_probe(200, url, "<div>This link is not valid</div>"))
+    monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20, expect=(): calls.append(url) or ul.classify_probe(200, url, "<div>This link is not valid</div>", expect=expect))
     return calls
 
 
@@ -571,6 +571,10 @@ class Google(http.server.BaseHTTPRequestHandler):
                   "/forbidden": (403, "<html>no</html>"), "/server-error": (500, "<html>oops</html>"), "/accounts.google.com/ServiceLogin": (200, "<html>Sign in</html>")}
         if self.path.split("?")[0] in routes:
             return self.reply(*routes[self.path.split("?")[0]])
+        if self.path.startswith("/gate"):
+            return self.reply(200, "<html>Sorry, unable to open the file at present. Please check the address and try again.</html>") if "t=" in self.path else self.reply(200, "<html><div>This link is not valid</div></html>")
+        if self.path.startswith("/wrapped"):
+            return self.reply(200, "<html><script>goog.script.init(\"\\x3cdiv class\\x3d\\x22bd\\x22\\x3e\\x3ch1\\x3eUnsubscribe\\x3c/h1\\x3e\\x3cbutton\\x3eUnsubscribe me\\x3c/button\\x3e\", \"\")</script></html>")
         if self.path.startswith("/to-valid"):
             return self.reply(302, location="/valid")
         if self.path.startswith("/to-signin"):
@@ -625,20 +629,20 @@ def run_command(tmp_path, monkeypatch, capsys, fmt="html"):
 
 
 def stub_probe(monkeypatch, state, message="stub"):
-    monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20: (state, message))
+    monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20, expect=(): (state, message))
 
 
 def test_a_test_run_opens_the_page_address_and_reports_it_next_to_the_address_in_use(tmp_path, monkeypatch, capsys, page_on, no_network):
     out, code = run_command(tmp_path, monkeypatch, capsys)
-    assert no_network == [PAGE] and code == 0
-    assert f"Page address in use: {PAGE}" in out and "Unsubscribe page check (opened from GitHub without signing in): OK." in out and "t=" not in out.split("Page address in use:")[1].split("\n")[0]
+    assert code == 0 and len(no_network) == 2 and no_network[0] == PAGE
+    assert f"Page address in use: {PAGE}" in out and "Check 1, the page address on its own (opened from GitHub without signing in): OK." in out and "t=" not in out.split("Page address in use:")[1].split("\n")[0]
 
 
 def test_when_google_refuses_the_page_the_run_says_so_clearly_and_fails_but_the_email_was_sent(tmp_path, monkeypatch, capsys, page_on):
     stub_probe(monkeypatch, "blocked", "Google answered 'Sorry, unable to open the file at present'. Fix: Deploy > Manage deployments")
     out, code = run_command(tmp_path, monkeypatch, capsys)
     assert code == 1 and "Test email sent to team@kelson.agency" in out and len(_Sent.calls) == 1
-    assert "check (opened from GitHub without signing in): BLOCKED." in out and "PROBLEM: recipients would not be able to open the unsubscribe page" in out and "the test email itself was sent" in out
+    assert "Check 1, the page address on its own (opened from GitHub without signing in): BLOCKED." in out and "PROBLEM: recipients would not be able to open the unsubscribe page" in out and "the test email itself was sent" in out
 
 
 def test_a_page_that_wants_a_google_sign_in_also_fails_the_run(tmp_path, monkeypatch, capsys, page_on):
@@ -686,3 +690,162 @@ def test_the_test_address_in_a_real_send_means_a_plain_email_unsubscribe_and_nev
     monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
     send(html_cfg(tmp_path), ListSheets(leads_of("a@x.com")), monkeypatch)
     assert "unsubscribe_url" not in _Sent.calls[0] and "html_body" in _Sent.calls[0]
+
+
+
+# ================================================================ the EXACT link in the email is what gets checked, and printed
+
+def real_links(tmp_path, monkeypatch, capsys):
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    return out, code, _Sent.calls[0]
+
+
+def test_the_check_opens_the_exact_link_that_is_in_the_email_not_just_the_bare_address(tmp_path, monkeypatch, capsys, page_on, no_network):
+    out, code, call = real_links(tmp_path, monkeypatch, capsys)
+    exact = call["unsubscribe_url"]
+    assert no_network == [PAGE, exact] and exact.startswith(PAGE + "?t=") and len(exact) > len(PAGE) + 100
+    assert exact in call["html_body"].replace("&amp;", "&") and exact in call["body"]                       # the very same string is in the email's HTML and plain-text copy
+
+
+def test_the_run_prints_the_whole_link_so_it_can_be_compared_character_by_character_with_the_one_in_the_email(tmp_path, monkeypatch, capsys, page_on):
+    out, code, call = real_links(tmp_path, monkeypatch, capsys)
+    assert f"Link in this test email (exact): {call['unsubscribe_url']}" in out
+
+
+def test_the_run_reports_the_links_anatomy(tmp_path, monkeypatch, capsys, page_on):
+    out, code, call = real_links(tmp_path, monkeypatch, capsys)
+    line = next(l for l in out.splitlines() if l.startswith("Link check:"))
+    assert "starts with the address in use: YES" in line and f"length {len(call['unsubscribe_url'])} characters" in line
+    assert "only safe characters in the token: YES" in line and "the same link in the footer, the header and the plain-text copy: YES" in line
+
+
+def test_both_checks_are_reported_separately_with_the_exact_link_expecting_the_real_page(tmp_path, monkeypatch, capsys, page_on):
+    seen = []
+    monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20, expect=(): seen.append((url, expect)) or ("ok", "stub"))
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert seen[0] == (PAGE, ()) and seen[1][0].startswith(PAGE + "?t=") and seen[1][1] == ul.LINK_MARKERS
+    assert "Check 1, the page address on its own" in out and "Check 2, the exact link in this email (opened the same way): OK. stub" in out
+
+
+def stub_two(monkeypatch, bare, exact):
+    answers = iter([bare, exact])
+    monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20, expect=(): next(answers))
+
+
+def test_when_the_address_opens_but_the_exact_link_does_not_the_run_says_the_link_is_the_problem_and_fails(tmp_path, monkeypatch, capsys, page_on):
+    stub_two(monkeypatch, ("ok", "served"), ("blocked", "Google answered 'unable to open the file'"))
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 1 and "Check 1, the page address on its own (opened from GitHub without signing in): OK." in out and "Check 2, the exact link in this email (opened the same way): BLOCKED." in out
+    assert "the address on its own opens but the exact link in the email does NOT" in out and "problem is the link" in out and "PROBLEM" in out
+
+
+def test_when_both_open_the_run_passes_and_points_at_the_recipients_browser_or_google_sign_in(tmp_path, monkeypatch, capsys, page_on):
+    stub_two(monkeypatch, ("ok", "served"), ("ok", "served the unsubscribe page itself"))
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "BOTH open for an anonymous visitor" in out and "several Google accounts signed in at once" in out and "private window" in out and "PROBLEM" not in out
+
+
+def test_when_the_address_itself_is_refused_the_diagnosis_blames_the_deployment(tmp_path, monkeypatch, capsys, page_on):
+    stub_two(monkeypatch, ("blocked", "refused"), ("blocked", "refused"))
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 1 and "the page address itself is refused" in out and "the deployment or the address in the secret" in out
+
+
+def test_when_the_exact_link_needs_a_google_sign_in_the_run_fails_too(tmp_path, monkeypatch, capsys, page_on):
+    stub_two(monkeypatch, ("ok", "served"), ("signin", "asked for a sign-in"))
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 1 and "SIGNIN." in out and "problem is the link" in out
+
+
+def test_a_check_that_cannot_be_made_gives_no_verdict_and_does_not_fail(tmp_path, monkeypatch, capsys, page_on):
+    stub_two(monkeypatch, ("ok", "served"), ("unknown", "could not check the page from here (timed out)."))
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "not conclusive" in out and "PROBLEM" not in out
+
+
+def test_the_real_check_requests_the_link_verbatim_including_its_whole_token_and_still_sends_no_cookies(google, page_on):
+    token = "x" * 330 + ".sig_-9"
+    REAL_PROBE(google + "/valid?t=" + token, expect=ul.LINK_MARKERS)
+    assert SEEN[0]["path"] == "/valid?t=" + token and "cookie" not in {name.lower() for name in SEEN[0]["headers"]} and "authorization" not in {name.lower() for name in SEEN[0]["headers"]}
+
+
+def test_a_page_that_opens_bare_but_refuses_the_same_address_with_a_token_is_told_apart_by_the_two_checks(google):
+    bare, exact = REAL_PROBE(google + "/gate"), REAL_PROBE(google + "/gate?t=abc.def", expect=ul.LINK_MARKERS)
+    assert bare[0] == "ok" and exact[0] == "blocked" and "problem is the link" in ul.compare_probes(bare[0], exact[0])
+
+
+def test_the_real_check_recognises_the_real_page_text_when_google_delivers_it_inside_a_script_string(google):
+    state, message = REAL_PROBE(google + "/wrapped?t=abc", expect=ul.LINK_MARKERS)
+    assert state == "ok" and "served the unsubscribe page itself" in message and "t=abc" not in message               # and the token is never echoed back in the message
+
+
+def test_an_ok_answer_without_the_pages_text_says_it_cannot_confirm_more(google):
+    state, message = REAL_PROBE(google + "/plain?t=abc", expect=ul.LINK_MARKERS)
+    assert state == "ok" and "could not see the unsubscribe page's own text" in message
+
+
+# ================================================================ nothing about the link changes between the engine and the recipient
+
+def test_a_realistically_long_link_leaves_the_sender_identical_in_the_header_the_html_and_the_plain_text(tmp_path, monkeypatch, page_on):
+    import re as regex
+    cfg = html_cfg(tmp_path, name="Kelson_Creators_Licensing_17SEP", business="Kelson Agency")
+    cfg["footer"]["address"] = "12 Example Street, Suite 400, New York, NY 10001, United States"
+    lead = make_lead(LeadID="L-123456", Email="a.recipient+newsletter@some-company.co.uk", FirstName="Ann")
+    rendered = outreach.render_email_html(str(tmp_path), "intro", "A", lead, cfg)
+    url = rendered["unsubscribe_url"]
+    msg, _ = outreach._build_outbound_message("sales@kelson.agency", lead["Email"], "S", hc.html_to_text(rendered["html"]), html_body=rendered["html"], unsubscribe_url=url)
+    received = email.message_from_bytes(msg.as_bytes(), policy=email.policy.default)
+    header = regex.sub(r"\r?\n(?=[ \t])", "", received.get_all("List-Unsubscribe")[0] if False else email.message_from_bytes(msg.as_bytes())["List-Unsubscribe"])
+    inside = regex.match(r"\s*<([^>]*)>,\s*<mailto:[^>]+>\s*$", header)
+    assert inside and inside.group(1) == url and not regex.search(r"\s", url) and len(url) < 900
+    html_part = received.get_body(preferencelist=("html",)).get_content()
+    text_part = received.get_body(preferencelist=("plain",)).get_content()
+    assert regex.search(r'href="(https://script[^"]+)"', html_part).group(1) == url and url in text_part
+    assert max(len(line) for line in text_part.splitlines()) < 998 and all(part.get("Content-Transfer-Encoding") == "base64" for part in received.iter_parts())
+    folded = msg.as_string().split("List-Unsubscribe:")[1].split("List-Unsubscribe-Post")[0]
+    assert any(url in physical for physical in folded.split("\n"))                                           # the link is never split across two physical lines
+
+
+# ================================================================ the link check says NO when the link really is wrong
+
+def run_with_link(tmp_path, monkeypatch, capsys, link, in_every_copy=True):
+    real = outreach.send_test_email
+
+    def fake(*args, **kwargs):
+        sent = real(*args, **kwargs)
+        return {**sent, "unsubscribe_url": link, "link_in_every_copy": in_every_copy}
+    monkeypatch.setattr(outreach, "send_test_email", fake)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    return next(line for line in out.splitlines() if line.startswith("Link check:"))
+
+
+def test_the_link_check_says_no_when_the_link_does_not_start_with_the_address_in_use(tmp_path, monkeypatch, capsys, page_on):
+    line = run_with_link(tmp_path, monkeypatch, capsys, "https://other.example/exec?t=abc.def")
+    assert "starts with the address in use: NO" in line and "only safe characters in the token: NO" in line
+
+
+def test_the_link_check_says_no_when_the_token_has_a_character_that_a_mail_app_could_change(tmp_path, monkeypatch, capsys, page_on):
+    for bad in ("abc def", "abc)def", "abc,def", "abc=def", "abc%20def", "abc\u00e9def", "abc!def"):
+        line = run_with_link(tmp_path, monkeypatch, capsys, f"{PAGE}?t={bad}")
+        assert "starts with the address in use: YES" in line and "only safe characters in the token: NO" in line, bad
+
+
+def test_the_link_check_says_yes_for_every_character_a_token_may_hold(tmp_path, monkeypatch, capsys, page_on):
+    line = run_with_link(tmp_path, monkeypatch, capsys, f"{PAGE}?t=AZaz09._-.AZaz09")
+    assert "starts with the address in use: YES" in line and "only safe characters in the token: YES" in line
+
+
+def test_the_link_check_says_no_when_the_link_is_not_in_every_copy(tmp_path, monkeypatch, capsys, page_on):
+    assert "the same link in the footer, the header and the plain-text copy: NO" in run_with_link(tmp_path, monkeypatch, capsys, f"{PAGE}?t=abc.def", in_every_copy=False)
+    assert "the same link in the footer, the header and the plain-text copy: YES" in run_with_link(tmp_path, monkeypatch, capsys, f"{PAGE}?t=abc.def", in_every_copy=True)
+
+
+def test_the_real_copies_flag_is_yes_with_the_footer_and_no_for_a_design_whose_body_has_no_link(tmp_path, monkeypatch, page_on):
+    _capture_smtp(monkeypatch)
+    with_footer = outreach.send_test_email(_test_cfg(tmp_path, "html"), ACCOUNTS, "intro", "A", "team@kelson.agency")
+    assert with_footer["link_in_every_copy"] is True
+    cfg = _test_cfg(tmp_path, "html")
+    (tmp_path / "intro_A.html").write_text('<p>Hi {{ FirstName }} <a href="https://x.example/stop">unsubscribe</a></p>', encoding="utf-8")
+    cfg["footer"] = {}
+    without = outreach.send_test_email(cfg, ACCOUNTS, "intro", "A", "team@kelson.agency")
+    assert without["unsubscribe_page"] is True and without["link_in_every_copy"] is False                    # the header carries the link; the body, by the designer's choice, does not
