@@ -164,18 +164,49 @@ PROBE_FIX = ("Almost always the deployment is not set to 'Who has access: Anyone
              "Version: New version > Deploy, then copy the Web app URL (ending /exec) into the UNSUBSCRIBE_URL secret.")
 
 
-def classify_probe(status: Optional[int], final_url: str, body: str, error: str = "") -> Tuple[str, str]:
-    """(state, message) for what the address answered when opened from the internet WITHOUT signing in, which is exactly what a recipient does. State is 'ok', 'blocked', 'signin' or
-    'unknown'. A best-effort check: only 'blocked' and 'signin' are reported as problems, and 'unknown' never blocks anything."""
+LINK_MARKERS = ("Unsubscribe me", "This is a test link from your team")        # text only the real page contains, to recognise it in what Google answers with
+
+
+def _where(final_url: str) -> str:
+    """Where the request ended up (host and path only, never the query, which holds the link's token)."""
+    parts = urlsplit(str(final_url or ""))
+    return f"{parts.netloc}{parts.path}" if parts.netloc else ""
+
+
+def classify_probe(status: Optional[int], final_url: str, body: str, error: str = "", expect: Tuple[str, ...] = ()) -> Tuple[str, str]:
+    """(state, message) for what an address answered when opened from the internet WITHOUT signing in, which is what a recipient's request looks like to Google. State is 'ok',
+    'blocked', 'signin' or 'unknown'. `expect` is text only the real page contains: when given, an OK answer also says whether the page itself was seen. A best-effort check: only
+    'blocked' and 'signin' are reported as problems, and 'unknown' never blocks anything."""
     text = str(body or "").lower()
     if error:
         return "unknown", f"could not check the page from here ({error})."
+    where = _where(final_url)
+    tail = f" (HTTP {status}, ended at {where})" if where else f" (HTTP {status})"
     if "unable to open the file" in text:
-        return "blocked", "Google answered 'Sorry, unable to open the file at present'. That is what every recipient except you would see. " + PROBE_FIX
+        return "blocked", "Google answered 'Sorry, unable to open the file at present'. That is what every recipient except you would see" + tail + ". " + PROBE_FIX
     if "accounts.google.com" in str(final_url or "").lower():
-        return "signin", "Google asked for a sign-in, so a recipient who is not signed in to Google could not open it. " + PROBE_FIX
+        return "signin", "Google asked for a sign-in, so a recipient who is not signed in to Google could not open it" + tail + ". " + PROBE_FIX
     if status in (401, 403, 404, 410):
-        return "blocked", f"Google answered {status}, so recipients could not open the page. " + PROBE_FIX
+        return "blocked", f"Google answered {status}, so recipients could not open the page{tail}. " + PROBE_FIX
     if status == 200:
-        return "ok", ("Opened from the internet without signing in: Google served the page" + (" and it answered as the unsubscribe page." if "this link is not valid" in text else "."))
+        if expect:
+            seen = any(marker.lower() in text for marker in expect)
+            return "ok", ("Opened from the internet without signing in: Google served the unsubscribe page itself" + tail + "." if seen else
+                          "Opened from the internet without signing in: Google answered with a page" + tail + ", but this check could not see the unsubscribe page's own text in it, so it cannot confirm more.")
+        return "ok", ("Opened from the internet without signing in: Google served the page" + (" and it answered as the unsubscribe page" if "this link is not valid" in text else "") + tail + ".")
     return "unknown", f"the address answered with an unexpected status ({status})."
+
+
+def compare_probes(bare_state: str, exact_state: str) -> str:
+    """What the two checks together mean: the address on its own, and the exact link in the email (the address plus its token)."""
+    bad = ("blocked", "signin")
+    if bare_state in bad:
+        return "DIAGNOSIS: the page address itself is refused, so the problem is the deployment or the address in the secret, not the individual link."
+    if exact_state in bad:
+        return ("DIAGNOSIS: the address on its own opens but the exact link in the email does NOT. The problem is the link (its length or its token), not the deployment: send the exact link "
+                "printed above to whoever can fix it, and do not rely on it.")
+    if bare_state == "ok" and exact_state == "ok":
+        return ("DIAGNOSIS: BOTH open for an anonymous visitor, so the link itself is fine. If a recipient still sees Google's 'unable to open the file', it comes from THEIR browser or Google "
+                "sign-in (several Google accounts signed in at once, a company account that blocks outside web apps, or an in-app browser). Ask them to open the same link in a private "
+                "window or in their phone's own browser.")
+    return "DIAGNOSIS: not conclusive: at least one of the two checks could not be made from here."
