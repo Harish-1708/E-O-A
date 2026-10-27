@@ -16,9 +16,12 @@
  *        UNSUBSCRIBE_SECRET = a long random text, at least 16 characters (the same text goes into GitHub, below)
  *        SHEET_ID           = the ID of your shared Sheet (the long text between /d/ and /edit in its address)
  *   3. In the editor, choose the function  setupCheck  and press Run. Allow the permissions it asks for. It should say PASS. Then run  selfTest  and check it says PASS.
- *   4. Deploy > New deployment > type: Web app. Execute as: Me. Who has access: Anyone. Press Deploy and copy the Web app URL (it ends in /exec).
+ *   4. Deploy > New deployment > type: Web app. Execute as: Me. Who has access: Anyone (NOT "Only myself", NOT "Anyone within your organisation"). Press Deploy and copy the Web app URL.
+ *      It ends in /exec. Never use the "Test deployments" address: it ends in /dev and opens only for you.
  *   5. In GitHub > Settings > Secrets and variables > Actions, add two secrets:  UNSUBSCRIBE_URL = that Web app URL,  UNSUBSCRIBE_SECRET = the same secret text as in step 2.
- *   6. Send yourself a test email from the app and click Unsubscribe in it.
+ *   6. CHECK FROM OUTSIDE: open the Web app URL on its own (nothing after /exec) in a private (incognito) window where you are not signed in to Google. It must show a card saying
+ *      "This link is not valid". If Google shows "unable to open the file" instead, the access setting or the address is wrong: go back to step 4.
+ *   7. Send yourself a test email from the app. The run's summary also opens the page from GitHub and says OK or PROBLEM. Then click Unsubscribe in the email (a test link records nothing).
  *   When you change this code later: Deploy > Manage deployments > Edit > New version > Deploy (the address stays the same).
  */
 
