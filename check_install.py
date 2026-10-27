@@ -175,10 +175,10 @@ EXPECTED = {
     "tests/test_response_status.py": "131a1e040c34be625a968fbf6485e0d1a4e4b535dbe1513f093e7ce7e4dd4aaf",
     "tests/test_stage_wait_overrides.py": "b784bda4227086834a5dd811387b9c02419ead37f91af743416debf17ac811b4",
     "tests/test_static_page.py": "aa78cff9a97f01e213eebfe011167031d55570f28deb9de630ac352ab04a681d",
-    "tests/test_unsubscribe_engine.py": "79002b46417e97bbd65f5d4c04cab925427896ff9839a5c739ba8b90465b4622",
-    "tests/test_unsubscribe_logic.py": "323d49b076db69db6e7e73a975a94ad088a2e827bd7b129d47ed1fecb0d55a96",
+    "tests/test_unsubscribe_engine.py": "ba0ab74eef1e863de20a2e5db34839e2507c65d1ef0f7ab70e4d17eab464259d",
+    "tests/test_unsubscribe_logic.py": "36408b4fd17b16d9bb63e9db3e81df4c4a73a2b8cab6e12c53deac5e5071afe7",
     "tests/test_unsubscribe_workflows.py": "35f5d4098f42adfed7182526d7cb6bd83598b43cd768769e5494f33128ab416a",
-    "unsubscribe_logic.py": "79980e9105efb7db3630a64f36bcb922177cde4c36c3efefb92d013ef6b0d177",
+    "unsubscribe_logic.py": "a6474ec5629d10df8fcf9e51ea212e4f71d5bf5d372c6a721a08dba3a4dc7ad8",
 }
 
 
