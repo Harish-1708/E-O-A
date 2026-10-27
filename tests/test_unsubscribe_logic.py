@@ -311,3 +311,75 @@ def test_the_page_texts_the_check_looks_for_are_really_in_the_google_script():
     with open(os.path.join(os.path.dirname(__file__), "..", "apps_script", "Code.gs"), encoding="utf-8") as handle:
         code = handle.read()
     assert all(marker in code for marker in ul.LINK_MARKERS)
+
+
+# ================================================================ what a browser does after the first answer
+
+ESCAPED = ('goog.script.init("\\x3ciframe src\\x3d\\x22https:\\/\\/n-abc-0lu-script.googleusercontent.com\\/userCodeAppPanel\\x3fx\\x3d1\\x26y\\x3d2\\x22\\x3e '
+           '\\u003ca href\\u003d\\u0022https://n-q.googleusercontent.com/z\\u0022\\u003e https://script.google.com/static/x.js https://www.gstatic.com/a.js")')
+
+
+def test_the_pages_content_frame_is_found_inside_googles_escaped_answer_with_its_query_intact():
+    assert ul.find_frame_urls(ESCAPED) == ["https://n-abc-0lu-script.googleusercontent.com/userCodeAppPanel?x=1&y=2", "https://n-q.googleusercontent.com/z"]
+
+
+def test_only_googleusercontent_addresses_count_and_the_app_panel_comes_first():
+    body = "https://n-1.googleusercontent.com/other https://n-2.googleusercontent.com/userCodeAppPanel https://script.google.com/x https://evilgoogleusercontent.com/y https://n-1.googleusercontent.com/other"
+    assert ul.find_frame_urls(body) == ["https://n-2.googleusercontent.com/userCodeAppPanel", "https://n-1.googleusercontent.com/other"]
+
+
+@pytest.mark.parametrize("body", ["", None, "no addresses here", "https://script.google.com/only", "http://", "googleusercontent.com/without-scheme"])
+def test_an_answer_with_no_content_frame_gives_an_empty_list(body):
+    assert ul.find_frame_urls(body) == []
+
+
+def test_trailing_punctuation_is_not_part_of_a_found_address():
+    assert ul.find_frame_urls("see (https://n-1.googleusercontent.com/panel), then https://n-2.googleusercontent.com/p2.") == ["https://n-1.googleusercontent.com/panel", "https://n-2.googleusercontent.com/p2"]
+
+
+def test_another_host_can_be_given_for_testing():
+    assert ul.find_frame_urls("x http://127.0.0.1:8080/frame?a=1 y", hosts=("127.0.0.1",)) == ["http://127.0.0.1:8080/frame?a=1"]
+
+
+def step(kind="hop", state="ok", **kw):
+    return {"kind": kind, "where": "script.google.com/macros/s/X/exec", "status": 200, "state": state, "size": 10, **kw}
+
+
+@pytest.mark.parametrize("steps, words", [
+    ([step(state="blocked")], "refused at the first request (step 1)"), ([step(), step(state="blocked")], "refused at redirect step 2"),
+    ([step(), step(kind="frame", state="blocked")], "refused at the page's own content frame (the second request a browser makes) (step 2)"),
+    ([step(state="signin")], "refused at the first request"), ([step(), step(kind="frame", state="signin")], "content frame"),
+    ([step(), {"kind": "frame", "where": "x", "error": "timed out", "state": "unknown"}], "not conclusive: a step could not be made (timed out)"),
+    ([step()], "No separate content frame was found"), ([step(), step(kind="frame")], "including the page's own content frame")])
+def test_a_trace_is_summed_up_in_one_sentence_that_says_where_it_went_wrong(steps, words):
+    verdict = ul.trace_verdict(steps)
+    assert verdict.startswith("TRACE VERDICT:") and words in verdict
+
+
+def test_every_verdict_says_what_the_trace_could_not_test_and_only_a_refusal_says_how_to_fix_it():
+    for steps in ([step()], [step(), step(kind="frame")], [step(state="blocked")], [step(state="signin")], [{"kind": "hop", "where": "x", "error": "e", "state": "unknown"}]):
+        verdict = ul.trace_verdict(steps)
+        assert "NOT TESTED HERE" in verdict and "signed in to a Google account" in verdict and "Unsubscribe diagnostics tab" in verdict
+        assert ("Who has access: Anyone" in verdict) == (steps[0].get("state") in ("blocked", "signin"))
+
+
+def test_a_trace_is_laid_out_one_line_per_request_with_what_a_person_needs_to_see():
+    lines = ul.format_trace([step(status=302, location="script.google.com/macros/s/X/exec2", cookies=["NID"], size=0), step(kind="frame", content_type="text/html; charset=utf-8", frame_options="DENY", size=4321),
+                             {"kind": "hop", "where": "x.example/p", "error": "timed out", "state": "unknown"}])
+    assert lines[0].startswith("  step 1 (request) script.google.com/macros/s/X/exec -> HTTP 302 [OK]") and "redirects to script.google.com/macros/s/X/exec2" in lines[0] and "sets cookies: NID" in lines[0]
+    assert lines[1].startswith("  step 2 (content frame)") and "text/html" in lines[1] and "charset" not in lines[1] and "X-Frame-Options: DENY" in lines[1] and "4321 bytes" in lines[1]
+    assert lines[2] == "  step 3 (request) x.example/p: could not be made (timed out)"
+
+
+def test_the_diagnostics_log_names_are_what_the_google_script_writes():
+    assert ul.DIAGNOSTICS_TAB == "Unsubscribe diagnostics" and ul.DIAGNOSTICS_COLUMNS == ["Time", "Event", "State", "Brand", "Campaign", "QueryLength", "TokenLength", "ParamNames"]
+    assert ul.DIAGNOSTIC_EVENTS == ["opened", "rendered", "confirmed", "one-tap"]
+
+
+def test_an_address_written_entirely_in_unicode_escapes_is_read_whole():
+    body = 'x "https:\\u002f\\u002fn-1.googleusercontent.com\\u002fuserCodeAppPanel\\u003fa\\u003d1\\u0026b\\u003d2" y'
+    assert ul.find_frame_urls(body) == ["https://n-1.googleusercontent.com/userCodeAppPanel?a=1&b=2"]
+
+
+def test_both_kinds_of_escape_can_be_mixed_in_one_address():
+    assert ul.find_frame_urls('https:\\/\\/n-1.googleusercontent.com\\x2fp\\u003fa\\x3d1&amp;b=2') == ["https://n-1.googleusercontent.com/p?a=1&b=2"]
