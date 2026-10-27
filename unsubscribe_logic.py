@@ -35,6 +35,25 @@ class PageConfig(NamedTuple):
     secret: str
 
 
+def canonical_address(url: str) -> Tuple[str, List[str]]:
+    """(address, removed). For a script.google.com address, drop everything that only means something inside the BROWSER it was copied from: the account position
+    ('/macros/u/6/s/...' becomes '/macros/s/...'), a query such as ?authuser=6, and a #fragment. Every other host is left exactly as given. `removed` lists what was taken out."""
+    parts = urlsplit(url)
+    if (parts.hostname or "").lower() != "script.google.com":
+        return url, []
+    removed: List[str] = []
+    path = parts.path
+    account = re.match(r"^/macros/u/(\d+)/(s/.*)$", path)
+    if account:
+        path = "/macros/" + account.group(2)
+        removed.append(f"/u/{account.group(1)}/")
+    if parts.query:
+        removed.append("?" + parts.query)
+    if parts.fragment:
+        removed.append("#" + parts.fragment)
+    return f"{parts.scheme}://{parts.netloc}{path}", removed
+
+
 def address_problem(url: str) -> Tuple[bool, str]:
     """(refuse, note) for a page address that is usable as a web address but is the wrong KIND of Google address. A Google web app has a TEST address (ends in /dev) that opens only for the
     script's owner: pasted into the secret it works when YOU test it and shows everybody else 'Sorry, unable to open the file'. Refused. An address for people inside one Google
@@ -69,9 +88,16 @@ def configuration_status(environ) -> Tuple[Optional[PageConfig], str]:
         return None, "UNSUBSCRIBE_URL must start with https:// (mail apps only use secure links), so the unsubscribe page is OFF."
     if len(secret) < MIN_SECRET_LENGTH:
         return None, f"UNSUBSCRIBE_SECRET is too short (use at least {MIN_SECRET_LENGTH} characters), so the unsubscribe page is OFF."
+    if re.search(r"\s", url):
+        return None, address_problem(url)[1]                                   # checked BEFORE the address is tidied: tidying would quietly drop a pasted line break
+    url, removed = canonical_address(url)
     refuse, note = address_problem(url)
     if refuse:
         return None, note
+    if removed:
+        tidied = (f"UNSUBSCRIBE_URL contained {', '.join(removed)}, which only mean something in the browser it was copied from (for example, /u/6/ is your position among the Google accounts signed in there). "
+                  f"It was removed, and the address used is {url}. Copy the Web app URL from the Deploy dialog or Manage deployments, never from the browser's address bar.")
+        note = (tidied + " " + note).strip()
     return PageConfig(url, secret), note
 
 
