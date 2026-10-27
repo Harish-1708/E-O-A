@@ -1261,7 +1261,7 @@ def test_a_github_io_page_address_is_used_but_the_test_run_warns_that_it_shows_t
     monkeypatch.setenv("UNSUBSCRIBE_PAGE_URL", "https://harish-1708.github.io/E-O-A/unsubscribe.html")
     out, code = run_command(tmp_path, monkeypatch, capsys)
     footer = _Sent.calls[0]["html_body"].split('href="')[1].split('"')[0]
-    assert code == 0 and footer.startswith("https://harish-1708.github.io/E-O-A/unsubscribe.html?t=") and "WARNING: UNSUBSCRIBE_PAGE_URL is a github.io address" in out and "Static page checks" in out
+    assert code == 0 and footer.startswith("https://harish-1708.github.io/E-O-A/unsubscribe.html?t=") and "WARNING: UNSUBSCRIBE_PAGE_URL is a github.io address with a repository name in its path" in out and "Static page checks" in out
 
 
 def test_an_address_on_your_own_domain_gives_no_warning_and_a_clean_link(tmp_path, monkeypatch, capsys, pages_on):
@@ -1275,3 +1275,14 @@ def test_no_part_of_a_real_email_names_github_when_the_page_is_on_your_own_domai
     call = _Sent.calls[0]
     msg, _ = outreach._build_outbound_message("sales@kelson.agency", "a@x.com", "S", call["body"], html_body=call["html_body"], unsubscribe_url=call["unsubscribe_url"])
     assert "github" not in msg.as_string().lower()
+
+
+
+def test_a_neutral_organisation_address_on_github_io_works_with_only_a_reminder_and_names_nothing_personal(tmp_path, monkeypatch, capsys, pages_on):
+    monkeypatch.setenv("UNSUBSCRIBE_PAGE_URL", "https://kelson-mail.github.io/")
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    call = _Sent.calls[0]
+    footer = call["html_body"].split('href="')[1].split('"')[0]
+    assert code == 0 and footer.startswith("https://kelson-mail.github.io/?t=") and "recipients can read its name (kelson-mail.github.io)" in out and "repository" not in out.split("WARNING:")[1].split("\n")[0]
+    msg, _ = outreach._build_outbound_message("sales@kelson.agency", "a@x.com", "S", call["body"], html_body=call["html_body"], unsubscribe_url=call["unsubscribe_url"])
+    assert "harish-1708" not in msg.as_string().lower() and "e-o-a" not in msg.as_string().lower()
