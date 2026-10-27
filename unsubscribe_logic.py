@@ -76,6 +76,11 @@ def address_problem(url: str) -> Tuple[bool, str]:
     return False, ""
 
 
+GITHUB_IO_WARNING = ("UNSUBSCRIBE_PAGE_URL is a github.io address. It works, but every recipient can read your GitHub name in the link, and a link on a free hosting domain can look suspicious to "
+                     "spam filters. Use your own domain instead (for example https://unsubscribe.kelson.agency/): at your domain provider add a CNAME record from that name to "
+                     "<your-github-name>.github.io, then enter the name under Settings > Pages > Custom domain and tick Enforce HTTPS.")
+
+
 def page_address_problem(url: str) -> str:
     """Why an UNSUBSCRIBE_PAGE_URL cannot be used (empty when it can). It must be the GitHub Pages address, on its own: a Google address would bring back the very problem it avoids."""
     if re.search(r"\s", url):
@@ -120,6 +125,12 @@ def configuration_status(environ) -> Tuple[Optional[PageConfig], str]:
         if problem:
             note = (note + " " + problem + " The page on GitHub Pages is NOT used: recipients are sent to the Google page instead.").strip()
             page = ""
+        else:
+            parts = urlsplit(page)
+            if not parts.path:
+                page = page + "/"                                              # https://host becomes https://host/ so the link is https://host/?t=...
+            if (parts.hostname or "").lower().endswith(".github.io"):
+                note = (note + " " + GITHUB_IO_WARNING).strip()
     return PageConfig(url, secret, page), note
 
 
