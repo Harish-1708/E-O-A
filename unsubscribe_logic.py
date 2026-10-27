@@ -76,9 +76,10 @@ def address_problem(url: str) -> Tuple[bool, str]:
     return False, ""
 
 
-GITHUB_IO_WARNING = ("UNSUBSCRIBE_PAGE_URL is a github.io address. It works, but every recipient can read your GitHub name in the link, and a link on a free hosting domain can look suspicious to "
-                     "spam filters. Use your own domain instead (for example https://unsubscribe.kelson.agency/): at your domain provider add a CNAME record from that name to "
-                     "<your-github-name>.github.io, then enter the name under Settings > Pages > Custom domain and tick Enforce HTTPS.")
+GITHUB_IO_PROJECT_WARNING = ("UNSUBSCRIBE_PAGE_URL is a github.io address with a repository name in its path, so every recipient can read both your GitHub account name and your repository name "
+                             "in the link. Put the page at the root of a neutral GitHub organisation instead (https://<organisation>.github.io/), or use your own domain.")
+GITHUB_IO_ROOT_NOTE = ("UNSUBSCRIBE_PAGE_URL is on github.io, so recipients can read its name ({host}) in every link. That is fine while the name is a neutral one (an organisation named for the agency); "
+                       "it is not if it is your personal GitHub name.")
 
 
 def page_address_problem(url: str) -> str:
@@ -130,7 +131,8 @@ def configuration_status(environ) -> Tuple[Optional[PageConfig], str]:
             if not parts.path:
                 page = page + "/"                                              # https://host becomes https://host/ so the link is https://host/?t=...
             if (parts.hostname or "").lower().endswith(".github.io"):
-                note = (note + " " + GITHUB_IO_WARNING).strip()
+                message = GITHUB_IO_PROJECT_WARNING if parts.path.strip("/") else GITHUB_IO_ROOT_NOTE.format(host=(parts.hostname or "").lower())
+                note = (note + " " + message).strip()
     return PageConfig(url, secret, page), note
 
 
