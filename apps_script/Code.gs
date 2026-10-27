@@ -17,7 +17,8 @@
  *        SHEET_ID           = the ID of your shared Sheet (the long text between /d/ and /edit in its address)
  *   3. In the editor, choose the function  setupCheck  and press Run. Allow the permissions it asks for. It should say PASS. Then run  selfTest  and check it says PASS.
  *   4. Deploy > New deployment > type: Web app. Execute as: Me. Who has access: Anyone (NOT "Only myself", NOT "Anyone within your organisation"). Press Deploy and copy the Web app URL.
- *      It ends in /exec. Never use the "Test deployments" address: it ends in /dev and opens only for you.
+ *      It ends in /exec. Never use the "Test deployments" address: it ends in /dev and opens only for you. Copy it from the Deploy dialog (or Manage deployments), NEVER from your browser's
+ *      address bar: when you are signed in to several Google accounts the address bar shows /u/6/ (your account's position), which means nothing to anyone else.
  *   5. In GitHub > Settings > Secrets and variables > Actions, add two secrets:  UNSUBSCRIBE_URL = that Web app URL,  UNSUBSCRIBE_SECRET = the same secret text as in step 2.
  *   6. CHECK FROM OUTSIDE: open the Web app URL on its own (nothing after /exec) in a private (incognito) window where you are not signed in to Google. It must show a card saying
  *      "This link is not valid". If Google shows "unable to open the file" instead, the access setting or the address is wrong: go back to step 4.
