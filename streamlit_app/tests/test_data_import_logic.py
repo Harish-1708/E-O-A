@@ -209,7 +209,7 @@ def test_there_is_no_pending_approval_filter_any_more_and_approval_does_not_affe
     """Approval is not used any more (it does not gate sending), so it is no longer a filter on the Data tab."""
     import data_import_logic
     assert not hasattr(data_import_logic, "FILTER_PENDING_APPROVAL") and "Pending Approval" not in FILTER_OPTIONS
-    assert FILTER_OPTIONS == ["All", "In Progress", "Replied", "Bounced", "Removed"]
+    assert FILTER_OPTIONS == ["All", "In Progress", "Completed", "Replied", "Bounced", "Removed"]
     leads = [_lead(Approval="Yes"), _lead(Approval=""), _lead(Approval="No")]
     assert filter_leads(leads, "Pending Approval") == leads                      # an old saved choice falls back to showing everything, never an error
     assert filter_leads(leads, FILTER_ALL) == leads
