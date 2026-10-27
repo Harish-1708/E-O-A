@@ -203,15 +203,20 @@ def payload_to_bytes(payload: Dict) -> bytes:
 
 FILTER_ALL = "All"
 FILTER_IN_PROGRESS = "In Progress"
+FILTER_COMPLETED = "Completed"
 FILTER_REPLIED = "Replied"
 FILTER_BOUNCED = "Bounced"
 FILTER_REMOVED = "Removed"
 
 # (There used to be a "Pending Approval" filter here. Approval no longer gates sending and is not used any more, so it was removed.)
-FILTER_OPTIONS = [FILTER_ALL, FILTER_IN_PROGRESS, FILTER_REPLIED, FILTER_BOUNCED, FILTER_REMOVED]
+FILTER_OPTIONS = [FILTER_ALL, FILTER_IN_PROGRESS, FILTER_COMPLETED, FILTER_REPLIED, FILTER_BOUNCED, FILTER_REMOVED]
 
 
-def filter_leads(leads: List[Dict], status_filter: str) -> List[Dict]:
+def filter_leads(leads: List[Dict], status_filter: str, stage_count: Optional[int] = None) -> List[Dict]:
+    """The leads a status chip shows. With `stage_count` (how many stages the campaign has) a lead that has been sent its last email and has not replied or been stopped is
+    COMPLETED and no longer 'In Progress'; without it only a lead explicitly marked Completed counts, and In Progress is exactly what it always was."""
+    from leads_logic import sequence_completed
+    finished = (lambda lead: sequence_completed(lead, stage_count)) if stage_count is not None else (lambda lead: lead.get("Status") == "Completed")
     if status_filter == FILTER_ALL:
         return leads
     if status_filter == FILTER_REMOVED:
@@ -220,10 +225,12 @@ def filter_leads(leads: List[Dict], status_filter: str) -> List[Dict]:
         return [l for l in leads if l.get("Status") == "Stopped - Replied"]
     if status_filter == FILTER_BOUNCED:
         return [l for l in leads if l.get("Status") == "Stopped - Bounced"]
+    if status_filter == FILTER_COMPLETED:
+        return [l for l in leads if finished(l)]
     if status_filter == FILTER_IN_PROGRESS:
         return [l for l in leads
                 if (l.get("IntroSentAt") or "").strip() and not (l.get("Status") or "").startswith("Stopped")
-                and l.get("Status") != "Removed"]
+                and l.get("Status") != "Removed" and not (stage_count is not None and finished(l))]
     return leads
 
 
