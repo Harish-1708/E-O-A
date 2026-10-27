@@ -974,3 +974,42 @@ def test_the_trace_runs_on_the_exact_link_in_the_email_and_only_when_the_page_is
     run_command(tmp_path, monkeypatch, capsys)
     run_command(tmp_path, monkeypatch, capsys, fmt="text")
     assert seen == []
+
+
+# ================================================================ an address copied from a browser never reaches an email
+
+BROWSER_ADDRESS = "https://script.google.com/macros/u/6/s/AKfycbyID/exec"
+CLEAN_ADDRESS = "https://script.google.com/macros/s/AKfycbyID/exec"
+
+
+@pytest.fixture
+def browser_copied(monkeypatch):
+    monkeypatch.setenv("UNSUBSCRIBE_URL", BROWSER_ADDRESS)
+    monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
+
+
+def test_a_link_made_from_an_address_with_an_account_position_has_the_clean_path(tmp_path, browser_copied):
+    link = outreach.unsubscribe_page_link(html_cfg(tmp_path), make_lead(LeadID="L1", Email="a@x.com"))
+    assert link.startswith(CLEAN_ADDRESS + "?t=") and "/u/6/" not in link and ul.verify_token(SECRET, link.split("?t=")[1])["e"] == "a@x.com"
+
+
+def test_every_copy_of_the_link_in_a_real_email_has_the_clean_path(tmp_path, monkeypatch, browser_copied):
+    send(html_cfg(tmp_path), ListSheets(leads_of("a@x.com")), monkeypatch)
+    call = _Sent.calls[0]
+    assert call["unsubscribe_url"].startswith(CLEAN_ADDRESS + "?t=") and "/u/6/" not in call["html_body"] and "/u/6/" not in call["body"] and call["unsubscribe_url"] in call["body"]
+    msg, _ = outreach._build_outbound_message("sales@kelson.agency", "a@x.com", "S", call["body"], html_body=call["html_body"], unsubscribe_url=call["unsubscribe_url"])
+    assert "/u/6/" not in msg.as_string()
+
+
+def test_the_test_run_says_the_address_was_tidied_prints_the_clean_address_and_checks_the_clean_link(tmp_path, monkeypatch, capsys, browser_copied, no_network):
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and f"Page address in use: {CLEAN_ADDRESS}" in out and "WARNING: UNSUBSCRIBE_URL contained /u/6/" in out and "/u/6/" not in out.split("WARNING:")[0]
+    assert no_network[0] == CLEAN_ADDRESS and no_network[1].startswith(CLEAN_ADDRESS + "?t=") and "starts with the address in use: YES" in out
+    assert "/macros/u/6/" not in "".join(no_network)
+
+
+def test_the_test_address_with_an_account_position_still_turns_the_page_off(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("UNSUBSCRIBE_URL", "https://script.google.com/macros/u/6/s/AKfycbyID/dev")
+    monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "Unsubscribe page: OFF. UNSUBSCRIBE_URL ends in /dev" in out and "unsubscribe_url" not in _Sent.calls[0]
