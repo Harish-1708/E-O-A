@@ -76,7 +76,7 @@ def test_the_set_up_steps_name_every_secret_and_the_deploy_settings(code):
     head = code.split("var TAB_NAME")[0]
     for words in ("Execute as: Me", "Who has access: Anyone", "UNSUBSCRIBE_URL", "UNSUBSCRIBE_SECRET", "SHEET_ID", "setupCheck", "selfTest", "Send yourself a test email"):
         assert words in head, words
-    for words in ("private (incognito) window", "unable to open the file", "/dev", "This link is not valid", 'NOT "Only myself"'):
+    for words in ("private (incognito) window", "unable to open the file", "/dev", "This link is not valid", 'NOT "Only myself"', "NEVER from your browser's", "/u/6/"):
         assert words in head, words                       # the two settings that make a page open for you and for nobody else are named in the steps
     assert head.count("UNSUBSCRIBE_SECRET") >= 2          # once for the script's own settings (step 2) and once for GitHub (step 5): the same text in both places
 
