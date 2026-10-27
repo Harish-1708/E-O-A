@@ -17,6 +17,7 @@ from test_outreach import ACCOUNTS, FakeSheets, make_lead  # noqa: E402
 
 SECRET = "test-secret-1234567890"
 PAGE = "https://script.google.com/macros/s/ID/exec"
+REAL_TRACE = outreach.trace_unsubscribe_link
 REAL_PROBE = outreach.probe_unsubscribe_page                                 # the real function, kept before every test stubs it: no test may reach the internet
 
 
@@ -31,6 +32,8 @@ def no_network(monkeypatch):
     """The page check is stubbed for every test (it answers 'ok' unless a test says otherwise) and its calls are recorded."""
     calls = []
     monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20, expect=(): calls.append(url) or ul.classify_probe(200, url, "<div>This link is not valid</div>", expect=expect))
+    monkeypatch.setattr(outreach, "trace_unsubscribe_link", lambda url, timeout=20, expect=(), frame_hosts=ul.FRAME_HOSTS, max_hops=6: [
+        {"kind": "hop", "where": "script.google.com/macros/s/ID/exec", "status": 200, "state": "ok", "size": 100, "content_type": "text/html", "location": "", "cookies": [], "frame_options": ""}])
     return calls
 
 
@@ -556,11 +559,13 @@ class Google(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def reply(self, code, body="", location=None):
+    def reply(self, code, body="", location=None, headers=()):
         SEEN.append({"path": self.path, "headers": dict(self.headers)})
         self.send_response(code)
         if location:
             self.send_header("Location", location)
+        for name, value in headers:
+            self.send_header(name, value)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
@@ -575,6 +580,24 @@ class Google(http.server.BaseHTTPRequestHandler):
             return self.reply(200, "<html>Sorry, unable to open the file at present. Please check the address and try again.</html>") if "t=" in self.path else self.reply(200, "<html><div>This link is not valid</div></html>")
         if self.path.startswith("/wrapped"):
             return self.reply(200, "<html><script>goog.script.init(\"\\x3cdiv class\\x3d\\x22bd\\x22\\x3e\\x3ch1\\x3eUnsubscribe\\x3c/h1\\x3e\\x3cbutton\\x3eUnsubscribe me\\x3c/button\\x3e\", \"\")</script></html>")
+        port = self.server.server_address[1]
+        if self.path.startswith("/t/start"):
+            return self.reply(302, location="/t/wrapper?t=SECRETTOKEN", headers=[("Set-Cookie", "NID=abc; Path=/")])
+        if self.path.startswith("/t/wrapper"):
+            return self.reply(200, f'<html><script>goog.script.init("\\x3cdiv\\x3eUnsubscribe me\\x3c/div\\x3e http:\\/\\/127.0.0.1:{port}\\/t\\/frame\\x3fa\\x3d1")</script></html>', headers=[("Set-Cookie", "GAPS=xyz; Path=/"), ("X-Frame-Options", "SAMEORIGIN")])
+        if self.path.startswith("/t/frame-blocked-wrapper"):
+            return self.reply(200, f'<html>Unsubscribe me http://127.0.0.1:{port}/t/blocked</html>')
+        if self.path.startswith("/t/blocked"):
+            return self.reply(200, "<html>Sorry, unable to open the file at present. Please check the address and try again.</html>")
+        if self.path.startswith("/t/frame"):
+            ok = "NID=abc" in (self.headers.get("Cookie") or "") and (self.headers.get("Referer") or "") == f"http://127.0.0.1:{port}/"
+            return self.reply(200, "<html>frame</html>") if ok else self.reply(403, "<html>no cookie or referrer</html>")
+        if self.path.startswith("/t/no-frame"):
+            return self.reply(200, "<html>Unsubscribe me</html>")
+        if self.path.startswith("/t/loop"):
+            return self.reply(302, location="/t/loop")
+        if self.path.startswith("/t/to-signin"):
+            return self.reply(302, location="/accounts.google.com/ServiceLogin")
         if self.path.startswith("/to-valid"):
             return self.reply(302, location="/valid")
         if self.path.startswith("/to-signin"):
@@ -849,3 +872,105 @@ def test_the_real_copies_flag_is_yes_with_the_footer_and_no_for_a_design_whose_b
     cfg["footer"] = {}
     without = outreach.send_test_email(cfg, ACCOUNTS, "intro", "A", "team@kelson.agency")
     assert without["unsubscribe_page"] is True and without["link_in_every_copy"] is False                    # the header carries the link; the body, by the designer's choice, does not
+
+
+
+# ================================================================ the browser-style trace
+
+def trace(base, path, **kw):
+    return REAL_TRACE(base + path, frame_hosts=("127.0.0.1",), expect=ul.LINK_MARKERS, **kw)
+
+
+def test_the_trace_follows_each_redirect_one_step_at_a_time_then_asks_for_the_content_frame(google):
+    steps = trace(google, "/t/start?t=SECRETTOKEN")
+    assert [(s["kind"], s["status"], s["state"]) for s in steps] == [("hop", 302, "ok"), ("hop", 200, "ok"), ("frame", 200, "ok")]
+    assert steps[0]["location"].endswith("/t/wrapper") and steps[0]["cookies"] == ["NID"] and steps[1]["cookies"] == ["GAPS"] and steps[1]["frame_options"] == "SAMEORIGIN"
+    assert [hit["path"] for hit in SEEN] == ["/t/start?t=SECRETTOKEN", "/t/wrapper?t=SECRETTOKEN", "/t/frame?a=1"]
+
+
+def test_the_content_frame_is_requested_with_the_cookies_so_far_and_only_the_origin_as_referrer(google):
+    steps = trace(google, "/t/start")
+    frame_request = next(hit for hit in SEEN if hit["path"].startswith("/t/frame"))
+    assert "NID=abc" in frame_request["headers"]["Cookie"] and frame_request["headers"]["Referer"] == google + "/" and steps[-1]["state"] == "ok"
+
+
+def test_a_server_that_wants_the_cookie_refuses_a_check_that_does_not_keep_cookies(google):
+    SEEN.clear()
+    assert REAL_PROBE(google + "/t/frame?a=1")[0] == "blocked"                                # the same address, asked for without the cookie and the referrer
+
+
+def test_the_trace_never_shows_a_links_token_in_any_step(google):
+    steps = trace(google, "/t/start?t=SECRETTOKEN")
+    assert "SECRETTOKEN" not in repr(steps) and "SECRETTOKEN" not in "\n".join(ul.format_trace(steps)) and "SECRETTOKEN" not in ul.trace_verdict(steps)
+
+
+def test_a_refused_content_frame_is_named_as_the_second_request(google):
+    steps = trace(google, "/t/frame-blocked-wrapper")
+    assert [s["state"] for s in steps] == ["ok", "blocked"] and steps[1]["kind"] == "frame"
+    assert "refused at the page's own content frame" in ul.trace_verdict(steps)
+
+
+def test_an_answer_with_no_content_frame_says_the_second_request_could_not_be_tested(google):
+    steps = trace(google, "/t/no-frame")
+    assert [s["kind"] for s in steps] == ["hop"] and "No separate content frame was found" in ul.trace_verdict(steps)
+
+
+def test_a_redirect_loop_stops_at_the_limit_instead_of_running_forever(google):
+    steps = trace(google, "/t/loop", max_hops=4)
+    assert len(steps) == 4 and all(s["status"] == 302 for s in steps)
+
+
+def test_a_redirect_to_a_google_sign_in_is_reported_and_followed_no_further(google):
+    steps = trace(google, "/t/to-signin")
+    assert [s["state"] for s in steps] == ["signin"] and "refused at the first request" in ul.trace_verdict(steps)
+
+
+def test_an_unreachable_address_is_one_step_that_could_not_be_made(google):
+    steps = REAL_TRACE("http://127.0.0.1:1/never", frame_hosts=("127.0.0.1",))
+    assert len(steps) == 1 and steps[0]["state"] == "unknown" and steps[0]["error"] and "not conclusive" in ul.trace_verdict(steps)
+
+
+def test_a_slow_answer_is_a_step_that_could_not_be_made_not_a_refusal(google):
+    steps = REAL_TRACE(google + "/slow", timeout=1)
+    assert steps[0]["state"] == "unknown" and "error" in steps[0]
+
+
+def stub_trace(monkeypatch, steps):
+    monkeypatch.setattr(outreach, "trace_unsubscribe_link", lambda url, timeout=20, expect=(), frame_hosts=ul.FRAME_HOSTS, max_hops=6: steps)
+
+
+OK_STEPS = [{"kind": "hop", "where": "script.google.com/macros/s/ID/exec", "status": 200, "state": "ok", "size": 5000, "content_type": "text/html; charset=utf-8", "location": "", "cookies": ["NID"], "frame_options": ""},
+            {"kind": "frame", "where": "n-1-script.googleusercontent.com/userCodeAppPanel", "status": 200, "state": "ok", "size": 900, "content_type": "text/html", "location": "", "cookies": [], "frame_options": ""}]
+
+
+def test_the_run_prints_the_trace_and_its_verdict_and_stays_green_when_every_step_opens(tmp_path, monkeypatch, capsys, page_on):
+    stub_trace(monkeypatch, OK_STEPS)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "Browser-style trace of the exact link (cookies kept, each redirect followed one step at a time, then the page's own content frame requested):" in out
+    assert "  step 1 (request) script.google.com/macros/s/ID/exec -> HTTP 200 [OK]" in out and "step 2 (content frame) n-1-script.googleusercontent.com/userCodeAppPanel -> HTTP 200 [OK]" in out
+    assert "TRACE VERDICT: every step opened, including the page's own content frame." in out and "NOT TESTED HERE: a request made while signed in to a Google account" in out and "PROBLEM" not in out
+
+
+def test_a_refused_content_frame_turns_the_run_red_even_when_both_earlier_checks_were_ok(tmp_path, monkeypatch, capsys, page_on):
+    stub_trace(monkeypatch, [OK_STEPS[0], {**OK_STEPS[1], "status": 200, "state": "blocked"}])
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 1 and "step 2 (content frame)" in out and "[BLOCKED]" in out and "TRACE VERDICT: refused at the page's own content frame" in out and "PROBLEM" in out and len(_Sent.calls) == 1
+
+
+def test_a_trace_that_could_not_be_made_is_reported_but_does_not_fail_the_run(tmp_path, monkeypatch, capsys, page_on):
+    stub_trace(monkeypatch, [{"kind": "hop", "where": "script.google.com/x", "error": "timed out", "state": "unknown"}])
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "could not be made (timed out)" in out and "TRACE VERDICT: not conclusive" in out and "PROBLEM" not in out
+
+
+def test_the_trace_runs_on_the_exact_link_in_the_email_and_only_when_the_page_is_on(tmp_path, monkeypatch, capsys, page_on):
+    seen = []
+    monkeypatch.setattr(outreach, "trace_unsubscribe_link", lambda url, timeout=20, expect=(), frame_hosts=ul.FRAME_HOSTS, max_hops=6: seen.append((url, expect)) or OK_STEPS)
+    run_command(tmp_path, monkeypatch, capsys)
+    assert len(seen) == 1 and seen[0][0] == _Sent.calls[0]["unsubscribe_url"] and seen[0][1] == ul.LINK_MARKERS
+    seen.clear()
+    monkeypatch.delenv("UNSUBSCRIBE_URL")
+    monkeypatch.delenv("UNSUBSCRIBE_SECRET")
+    run_command(tmp_path, monkeypatch, capsys)
+    run_command(tmp_path, monkeypatch, capsys, fmt="text")
+    assert seen == []
