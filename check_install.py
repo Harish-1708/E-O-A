@@ -22,7 +22,7 @@ EXPECTED = {
     "apps_script/Code.gs": "3e95840ca55d6724307f8c24f2eb65f9273d6db5be2ea72cf65d692008e29d81",
     "apps_script/test_unsubscribe.js": "5cc9404001177bb2499f093ac5b1628851bba4bdfaf15723a3ddf1c6b27baf18",
     "html_campaign_logic.py": "c8993d1f3a2cf66cdb479595c583328d6001fc6b2b12efdf50ea6b865435bef5",
-    "outreach.py": "173f055f3002f96fc90ea52b8b95e01e1aba856a3e7f10c934d87a31a42d7bd9",
+    "outreach.py": "116c0009543107c356eb5c91107b63ee4859e4f5ee37eec5c6978af2857a660d",
     "response_status.py": "2e7ef196adfab78cf3b277cb062ec9f621cf2fda60f83af8aee65ad94026bd64",
     "streamlit_app/accounts_logic.py": "f7c55364ccb83fbc3170e030fbfc2eb7fc21cb19748cd3e93028625af7db6d17",
     "streamlit_app/app.py": "94b723f762c8ef223f9ab28372b6c2b2e6d25bd9e8d268e70efd618521a2cab7",
@@ -170,10 +170,10 @@ EXPECTED = {
     "tests/test_html_campaigns_engine.py": "444df83020246b2e0893e82f8d718e44188828486576fe1146fe4a1043c0540d",
     "tests/test_response_status.py": "131a1e040c34be625a968fbf6485e0d1a4e4b535dbe1513f093e7ce7e4dd4aaf",
     "tests/test_stage_wait_overrides.py": "b784bda4227086834a5dd811387b9c02419ead37f91af743416debf17ac811b4",
-    "tests/test_unsubscribe_engine.py": "29edee491e477a04903fc9f0c886f3c057e0544b1393152f5dbf1ac3ce1d1605",
-    "tests/test_unsubscribe_logic.py": "931bd79910622e448208f58f5dbd6e9efef120555b9f54835cb054472c329ea9",
+    "tests/test_unsubscribe_engine.py": "5698730ed752cad0a77bcaddbf29d92128d95b2b8b0c642a923f623a0c250c9e",
+    "tests/test_unsubscribe_logic.py": "481dfd0555c81ff004e2c511048405806f821fb4ceb1ca9e73e1db50de313ceb",
     "tests/test_unsubscribe_workflows.py": "642d354a10078a7cbefbc933bbadf64152f3871c5c5c33457272b6e7e841199b",
-    "unsubscribe_logic.py": "7f79f60642618db13bc5fa563caca30674ee4284f2850f58c2e372f18c06dd82",
+    "unsubscribe_logic.py": "7714cd024db06675b4459703c618f6a8c8156579d0deb871f1623a551f782f86",
 }
 
 
