@@ -22,12 +22,22 @@
  *   6. CHECK FROM OUTSIDE: open the Web app URL on its own (nothing after /exec) in a private (incognito) window where you are not signed in to Google. It must show a card saying
  *      "This link is not valid". If Google shows "unable to open the file" instead, the access setting or the address is wrong: go back to step 4.
  *   7. Send yourself a test email from the app. The run's summary also opens the page from GitHub and says OK or PROBLEM. Then click Unsubscribe in the email (a test link records nothing).
+ *
+ * TROUBLESHOOTING (a link opens for you but a recipient sees Google's "unable to open the file"):
+ *   Add a script property DIAGNOSTICS = on, have the recipient click the link again, then open the "Unsubscribe diagnostics" tab of your Sheet:
+ *     no new row            = the request never reached this script (Google refused it first: an access or sign-in problem, not this code);
+ *     "opened" only         = the script answered but the page did not finish loading in their browser;
+ *     "opened" + "rendered" = the page opened fine in their browser (the error came from something else they clicked).
+ *   It records no email address, no lead and no link. Delete the property afterwards: while it is on, every visit adds a row.
  *   When you change this code later: Deploy > Manage deployments > Edit > New version > Deploy (the address stays the same).
  */
 
 var TAB_NAME = 'Unsubscribes';
 var COLUMNS = ['Timestamp', 'Email', 'Brand', 'BrandKey', 'Campaign', 'LeadID', 'Reason', 'Details', 'Source'];
 var REASONS = ['Too many emails', 'Not relevant to me', 'I never signed up', 'Other'];
+var DIAG_TAB = 'Unsubscribe diagnostics';
+var DIAG_COLUMNS = ['Time', 'Event', 'State', 'Brand', 'Campaign', 'QueryLength', 'TokenLength', 'ParamNames'];
+var DIAG_STATES = ['valid', 'invalid', 'test', 'not set up'];
 var MAX_REASON = 60;
 var MAX_DETAILS = 500;
 var MIN_SECRET_LENGTH = 16;
@@ -111,6 +121,48 @@ function readProps_() {
 }
 
 
+/* ------------------------------------------------------------------ troubleshooting log (off unless the DIAGNOSTICS property is "on") */
+
+function diagnosticsOn_() {
+  return String(PropertiesService.getScriptProperties().getProperty('DIAGNOSTICS') || '').trim().toLowerCase() === 'on';
+}
+
+/** One row per visit, with NO address, lead or link in it: only what the visit looked like. Never throws, never waits long, never changes what the visitor sees. */
+function logDiag_(eventName, state, payload, e) {
+  try {
+    if (!diagnosticsOn_()) { return; }
+    var sheetId = readProps_().sheetId;
+    if (!sheetId) { return; }
+    var parameter = e && e.parameter ? e.parameter : null;
+    var token = parameter && parameter.t ? String(parameter.t) : '';
+    var lock = LockService.getScriptLock();
+    if (!lock.tryLock(5000)) { return; }
+    try {
+      var spreadsheet = SpreadsheetApp.openById(sheetId);
+      var sheet = spreadsheet.getSheetByName(DIAG_TAB);
+      if (!sheet) {
+        sheet = spreadsheet.insertSheet(DIAG_TAB);
+        sheet.appendRow(DIAG_COLUMNS);
+        sheet.setFrozenRows(1);
+      }
+      sheet.appendRow([Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd HH:mm:ss'), eventName, state, safeCell_(cleanText_(payload ? payload.b : '', 120)), safeCell_(cleanText_(payload ? payload.c : '', 120)),
+        e && e.queryString !== undefined ? String(e.queryString).length : '', e ? token.length : '', parameter ? Object.keys(parameter).join(',') : '']);
+    } finally {
+      lock.releaseLock();
+    }
+  } catch (error) {
+    // diagnostics must never break the page
+  }
+}
+
+/** Called by the page itself, only while diagnostics are on, once its content has actually run in the visitor's browser. */
+function recordRendered(state) {
+  if (DIAG_STATES.indexOf(String(state)) < 0) { return false; }
+  logDiag_('rendered', String(state), null, null);
+  return true;
+}
+
+
 /* ------------------------------------------------------------------ the Sheet */
 
 function getTab_(sheetId) {
@@ -184,10 +236,12 @@ function record_(payload, source, reason, details, props) {
 /** Opening the link: shows the page. Changes nothing. */
 function doGet(e) {
   var props = readProps_();
-  if (!props.ok) { return page_(shell_('UNSUBSCRIBE', unavailableBody_(), '')); }
+  if (!props.ok) { logDiag_('opened', 'not set up', null, e); return page_(shell_('UNSUBSCRIBE', unavailableBody_(), '', 'not set up')); }
   var payload = verifyToken_(e && e.parameter ? e.parameter.t : '', props.secret);
-  if (!payload) { return page_(shell_('UNSUBSCRIBE', invalidBody_(), 'No information was recorded.')); }
-  return page_(shell_(payload.b ? payload.b.toUpperCase() : 'UNSUBSCRIBE', confirmBody_(payload, e.parameter.t), footerLine_(payload)));
+  if (!payload) { logDiag_('opened', 'invalid', null, e); return page_(shell_('UNSUBSCRIBE', invalidBody_(), 'No information was recorded.', 'invalid')); }
+  var state = payload.t === 1 ? 'test' : 'valid';
+  logDiag_('opened', state, payload, e);
+  return page_(shell_(payload.b ? payload.b.toUpperCase() : 'UNSUBSCRIBE', confirmBody_(payload, e.parameter.t), footerLine_(payload), state));
 }
 
 /** A mail app's one-tap Unsubscribe (RFC 8058): a POST with List-Unsubscribe=One-Click to the link's own address. */
@@ -197,9 +251,10 @@ function doPost(e) {
     var props = readProps_();
     if (!props.ok) { return text_('Not set up'); }
     var payload = verifyToken_(params.t, props.secret);
-    if (!payload) { return text_('Invalid link'); }
+    if (!payload) { logDiag_('one-tap', 'invalid', null, e); return text_('Invalid link'); }
     if (String(params['List-Unsubscribe'] || '') !== 'One-Click') { return text_('Unsupported request'); }
     record_(payload, 'one-click', '', '', props);
+    logDiag_('one-tap', payload.t === 1 ? 'test' : 'valid', payload, e);
     return text_('Unsubscribed');
   } catch (error) {
     return text_('Error');
@@ -212,7 +267,9 @@ function submitUnsubscribe(token, reason, details) {
   if (!props.ok) { throw new Error('The unsubscribe page is not set up.'); }
   var payload = verifyToken_(token, props.secret);
   if (!payload) { throw new Error('This link is not valid.'); }
-  return record_(payload, 'page', reason, details, props);
+  var result = record_(payload, 'page', reason, details, props);
+  logDiag_('confirmed', result.test ? 'test' : 'valid', payload, null);
+  return result;
 }
 
 function page_(html) {
@@ -239,9 +296,10 @@ var PAGE_CSS = '*{box-sizing:border-box}body{margin:0;background:#eef0f4;font-fa
   '.warn{width:54px;height:54px;border-radius:50%;background:#fff4e5;color:#b45309;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:800;margin:6px 0 16px}' +
   '.small{font-size:12.5px;color:#6b7280}.test{background:#fff4e5;color:#92400e;border-radius:8px;padding:10px 12px;font-size:13px;margin:0 0 16px}.err{color:#b91c1c;font-size:13.5px;margin:10px 0 0}';
 
-function shell_(heading, body, footer) {
+function shell_(heading, body, footer, diagState) {
+  var beacon = diagState && diagnosticsOn_() ? '<script>try{google.script.run.withFailureHandler(function(){}).recordRendered(' + JSON.stringify(String(diagState)) + ');}catch(e){}</script>' : '';
   return '<!doctype html><html><head><meta charset="utf-8"><style>' + PAGE_CSS + '</style></head><body><div class="card"><div class="top">' + escapeHtml_(heading) + '</div><div class="bd" id="bd">' + body + '</div>' +
-    (footer ? '<div class="ft">' + escapeHtml_(footer) + '</div>' : '') + '</div></body></html>';
+    (footer ? '<div class="ft">' + escapeHtml_(footer) + '</div>' : '') + '</div>' + beacon + '</body></html>';
 }
 
 function footerLine_(payload) {
