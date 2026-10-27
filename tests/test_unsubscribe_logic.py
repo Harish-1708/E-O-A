@@ -439,3 +439,127 @@ def test_the_link_made_from_a_tidied_address_has_the_clean_path_and_nothing_else
     config = ul.configuration({"UNSUBSCRIBE_URL": f"https://script.google.com/macros/u/6/s/{ID}/exec", "UNSUBSCRIBE_SECRET": "s" * 20})
     token = ul.make_token(SECRET, campaign="C", lead_id="L", email="a@b.com", brand="B", key="b")
     assert ul.page_url(config.url, token) == f"{CANONICAL}?t={token}"
+
+
+
+# ================================================================ the static page on GitHub Pages
+
+PAGES = "https://harish-1708.github.io/E-O-A/unsubscribe.html"
+
+
+def with_page(page, url=CANONICAL):
+    return ul.configuration_status({"UNSUBSCRIBE_URL": url, "UNSUBSCRIBE_SECRET": "s" * 20, "UNSUBSCRIBE_PAGE_URL": page})
+
+
+def test_without_a_page_address_recipients_open_the_google_page_as_before():
+    config, note = ul.configuration_status({"UNSUBSCRIBE_URL": CANONICAL, "UNSUBSCRIBE_SECRET": "s" * 20})
+    assert config.page == "" and note == "" and ul.PageConfig("u", "s").page == ""
+
+
+def test_a_github_pages_address_is_kept_exactly_and_without_a_warning():
+    config, note = with_page(PAGES)
+    assert config.page == PAGES and config.url == CANONICAL and note == ""
+    assert with_page("  " + PAGES + " \n")[0].page == PAGES
+
+
+@pytest.mark.parametrize("page, words", [("https://script.google.com/macros/s/X/exec", "is a Google address"), ("http://harish.github.io/u.html", "must start with https://"), ("harish.github.io/u.html", "must start with https://"),
+                                         (PAGES + "?a=1", "with nothing after it"), (PAGES + "#top", "with nothing after it"), ("https://harish.github.io/u .html", "space or a line break"),
+                                         ("https://SCRIPT.google.com/x", "is a Google address")])
+def test_an_unusable_page_address_is_ignored_with_the_reason_and_recipients_get_the_google_page_instead(page, words):
+    config, note = with_page(page)
+    assert config is not None and config.page == "" and config.url == CANONICAL and words in note and "is NOT used" in note and "Google page instead" in note
+
+
+def test_the_page_address_alone_never_turns_anything_on():
+    assert ul.configuration_status({"UNSUBSCRIBE_PAGE_URL": PAGES}) == (None, "")
+    assert ul.configuration_status({"UNSUBSCRIBE_PAGE_URL": PAGES, "UNSUBSCRIBE_URL": CANONICAL})[0] is None
+
+
+def test_the_page_note_and_an_address_tidying_note_can_come_together():
+    config, note = with_page("http://x.example/u.html", url=f"https://script.google.com/macros/u/6/s/{ID}/exec")
+    assert config.url == CANONICAL and config.page == "" and "contained /u/6/" in note and "must start with https://" in note
+
+
+@pytest.mark.parametrize("url, expected", [(PAGES, ""), ("https://unsubscribe.kelson.agency/", ""), ("https://x.example/a/b.html", "")])
+def test_other_https_hosts_are_fine_as_a_page_address(url, expected):
+    assert ul.page_address_problem(url) == expected
+
+
+def test_the_token_and_the_origin_are_read_from_a_link():
+    assert ul.token_from_url(f"{PAGES}?t=abc.def_-9") == "abc.def_-9" and ul.token_from_url(f"{PAGES}?x=1&t=abc") == "abc" and ul.token_from_url(PAGES) == "" and ul.token_from_url(None) == ""
+    assert ul.origin_of(PAGES) == "https://harish-1708.github.io" and ul.origin_of("") == "" and ul.origin_of("not a url") == "" and ul.origin_of("http://127.0.0.1:8080/x") == "http://127.0.0.1:8080"
+
+
+@pytest.mark.parametrize("status, body, state, words", [(200, "<!-- unsubscribe-page-v1 --> hello", "ok", "served the unsubscribe page"), (200, "<html>some other page</html>", "blocked", "not the unsubscribe page"),
+                                                        (404, "", "blocked", "not being served"), (403, "", "blocked", "not being served"), (410, "", "blocked", "not being served"), (500, "", "unknown", "unexpected status")])
+def test_the_static_page_is_classified_by_what_github_pages_answers(status, body, state, words):
+    got_state, message = ul.classify_page(status, body)
+    assert got_state == state and words in message
+    assert ("Settings > Pages" in message) == (state == "blocked")                                       # a problem says how to turn the page on
+
+
+def test_a_check_that_could_not_be_made_is_not_a_verdict_on_the_page():
+    assert ul.classify_page(None, "", error="timed out")[0] == "unknown"
+
+
+ORIGIN = "https://harish-1708.github.io"
+
+
+def hop(status=200, acao="*", body="", where="script.google.com/macros/s/X/exec"):
+    return {"where": where, "status": status, "acao": acao, "body": body}
+
+
+GOOD_JSON = '{"ok": true, "state": "test", "brand": "B"}'
+
+
+def test_every_answer_on_the_way_allowing_the_page_and_ending_in_data_is_ok():
+    state, message = ul.classify_api([hop(302, "*"), hop(200, "*", GOOD_JSON)], ORIGIN)
+    assert state == "ok" and "every answer (2 steps) allows a page on" in message and ORIGIN in message
+    assert ul.classify_api([hop(200, ORIGIN, GOOD_JSON)], ORIGIN)[0] == "ok" and "1 step)" in ul.classify_api([hop(200, "*", GOOD_JSON)], ORIGIN)[1]
+
+
+@pytest.mark.parametrize("hops, step", [([hop(302, ""), hop(200, "*", GOOD_JSON)], 1), ([hop(302, "*"), hop(200, "", GOOD_JSON)], 2), ([hop(200, "https://other.example", GOOD_JSON)], 1),
+                                       ([hop(302, "*"), hop(302, None), hop(200, "*", GOOD_JSON)], 2)])
+def test_a_missing_or_wrong_permission_on_any_step_names_that_step_and_blocks(hops, step):
+    state, message = ul.classify_api(hops, ORIGIN)
+    assert state == "blocked" and f"step {step} " in message and "Access-Control-Allow-Origin" in message and "browser would refuse to read the answer" in message
+
+
+def test_an_answer_that_is_a_web_page_instead_of_data_points_at_the_deployed_version():
+    state, message = ul.classify_api([hop(200, "*", "<!doctype html><html>page</html>")], ORIGIN)
+    assert state == "blocked" and "web page instead of data" in message and "NEW VERSION" in message
+
+
+@pytest.mark.parametrize("body, words", [('{"ok": false, "state": "invalid"}', "did not accept the link"), ("[]", "did not accept the link"), ('{"ok": true, "state": "valid"}', "state 'valid' where 'test' was expected")])
+def test_data_that_is_not_the_expected_answer_blocks_with_the_reason(body, words):
+    state, message = ul.classify_api([hop(200, "*", body)], ORIGIN)
+    assert state == "blocked" and words in message
+    assert ("same text" in message) == ("did not accept" in words)
+
+
+def test_the_post_answer_has_no_state_to_compare_and_is_ok_when_it_says_ok():
+    assert ul.classify_api([hop(302), hop(200, "*", '{"ok": true, "masked": "a***@x.com", "test": true}')], ORIGIN, expect_state="")[0] == "ok"
+
+
+def test_a_last_step_that_is_not_ok_or_a_step_that_could_not_be_made_is_reported_apart():
+    assert ul.classify_api([hop(302), hop(500, "*", "")], ORIGIN)[0] == "blocked" and "HTTP 500" in ul.classify_api([hop(302), hop(500, "*", "")], ORIGIN)[1]
+    assert ul.classify_api([hop(302), {"where": "x", "error": "timed out"}], ORIGIN) == ("unknown", "step 2 could not be made (timed out).")
+    assert ul.classify_api([], ORIGIN)[0] == "unknown"
+
+
+def test_the_google_address_in_a_pages_config_js_is_read_whatever_the_quotes():
+    assert ul.config_js_address('window.UNSUBSCRIBE_API = "https://a/exec";') == "https://a/exec" and ul.config_js_address("window.UNSUBSCRIBE_API='https://a/exec' ;") == "https://a/exec"
+    assert ul.config_js_address("// window.UNSUBSCRIBE_API = 'x'\nwindow.UNSUBSCRIBE_API = \"https://real/exec\";") in ("x", "https://real/exec")
+    assert ul.config_js_address("") == "" and ul.config_js_address(None) == "" and ul.config_js_address("var other = 1;") == ""
+
+
+@pytest.mark.parametrize("found, status, state, words", [(CANONICAL, 200, "ok", "names the same Google script"), (CANONICAL + "/", 200, "ok", "same Google script"), (f"https://script.google.com/macros/u/6/s/{ID}/exec", 200, "ok", "same"),
+                                                         ("https://script.google.com/macros/s/OTHER/exec", 200, "blocked", "points at"), ("", 200, "blocked", "does not set window.UNSUBSCRIBE_API"),
+                                                         (CANONICAL, 404, "blocked", "HTTP 404"), (CANONICAL, 500, "blocked", "HTTP 500")])
+def test_the_pages_config_must_name_the_same_google_script_as_the_secret(found, status, state, words):
+    got_state, message = ul.classify_config(found, CANONICAL, status)
+    assert got_state == state and words in message
+
+
+def test_a_config_that_could_not_be_read_is_unknown():
+    assert ul.classify_config("", CANONICAL, None, error="timed out")[0] == "unknown"
