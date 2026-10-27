@@ -129,6 +129,23 @@ test('a brand name full of markup is shown as plain text', () => {
   const lower = html.toLowerCase();          // the top band shows the brand in capitals, so look for it in either case
   assert.ok(!lower.includes('<script>alert(1)') && !lower.includes('<img src=x') && !html.includes('</div><b>x</b>') && html.includes('&lt;script&gt;alert(1)&lt;/script&gt;') && html.includes('&lt;SCRIPT&gt;ALERT(1)&lt;/SCRIPT&gt;'));
 });
+test('the page opens for ANY recipient address: the recipient never decides whether it works', () => {
+  const w = makeWorld(); withTab(w);
+  ['ann@example.com', 'first.last+tag@sub.example.co.uk', 'UPPER@EXAMPLE.COM', 'zoë@exämple.com', 'x@y.io', 'a'.repeat(60) + '@' + 'b'.repeat(60) + '.com', "o'brien@example.com", 'a_b-c@example.org'].forEach((address) => {
+    const html = get(w, makeToken(SECRET, { e: address, l: 'L-' + address.length }));
+    assert.ok(html.includes('Unsubscribe me') && html.includes('This link is not valid') === false, address);
+    assert.strictEqual(submit(w, makeToken(SECRET, { e: address }), '', '').ok, true);
+  });
+  assert.strictEqual(rowsOf(w).length, 8);
+});
+test('the bare address with nothing after it shows the not-valid card, never an error, so it can be used to check the deployment from outside', () => {
+  const w = makeWorld(); withTab(w);
+  [{ parameter: {} }, {}, undefined, { parameter: { t: '' } }, { parameter: null }, { parameter: { other: 'x' } }].forEach((request) => {
+    const html = w.call('doGet', request).getContent();
+    assert.ok(html.includes('This link is not valid') && html.includes('reply <b>unsubscribe</b>') && !html.includes('Unsubscribe me'));
+  });
+  assert.strictEqual(rowsOf(w).length, 0);
+});
 test('a link with no brand uses neutral wording', () => {
   const w = makeWorld(); const html = get(w, makeToken(SECRET, { b: '', a: '' }));
   assert.ok(html.includes('stop receiving emails from this sender at') && html.includes('>UNSUBSCRIBE<') && !html.includes('class="ft"'));
