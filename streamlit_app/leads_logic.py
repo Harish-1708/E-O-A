@@ -83,8 +83,28 @@ def display_name(lead: Dict) -> str:
 
 # ---------------------------------------------------------------- status
 
-def status_summary(lead: Dict) -> Tuple[str, str]:
-    """(label, colour family) for the status pill — what is true of the lead right now."""
+_NEVER_COMPLETED_STATUSES = (STATUS_REMOVED, STATUS_PAUSED)      # (and anything that starts with "Stopped"): the lead's outcome was already decided
+
+
+def sequence_completed(lead: Dict, count: int) -> bool:
+    """True when the lead has been sent the LAST email of the sequence (`count` stages) and nothing else has decided its outcome. It is the rule Home's counts use, so Home,
+    the Data tab and Performance always agree. A reply, a bounce, an unsubscribe, a manual stop, a pause or a removal always wins, so a lead that finished the sequence and
+    LATER replies stops being 'completed' straight away: the answer is worked out from the lead's columns every time and is never stored."""
+    if count <= 0 or not str(lead.get("Email") or "").strip():
+        return False
+    status = str(lead.get("Status") or "").strip()
+    if status in _NEVER_COMPLETED_STATUSES or status.startswith("Stopped"):
+        return False
+    if str(lead.get("ReplyStatus") or "").strip() == "Replied":
+        return False
+    if status == STATUS_COMPLETED:
+        return True
+    return bool(str(lead.get(sent_column(count - 1)) or "").strip())
+
+
+def status_summary(lead: Dict, count: Optional[int] = None) -> Tuple[str, str]:
+    """(label, colour family) for the status pill — what is true of the lead right now. With `count` (how many stages the campaign has) a lead that has been sent its last
+    email, and has not replied or been stopped, shows as Completed instead of 'In sequence'."""
     status = str(lead.get("Status") or "").strip()
     contacted = bool(str(lead.get("IntroSentAt") or "").strip())
     if status == STATUS_REMOVED:
@@ -96,6 +116,8 @@ def status_summary(lead: Dict) -> Tuple[str, str]:
     if status == STATUS_PAUSED:
         return "Paused", KIND_WAITING
     if status == STATUS_COMPLETED:
+        return "Completed", KIND_NEUTRAL
+    if count is not None and sequence_completed(lead, count):
         return "Completed", KIND_NEUTRAL
     if status.startswith("Stopped"):
         return status.replace("Stopped - ", "Stopped · ", 1) if status.startswith("Stopped - ") else status, KIND_NEUTRAL
@@ -151,7 +173,7 @@ def last_sent(lead: Dict, count: int) -> str:
 # ---------------------------------------------------------------- one row, one panel
 
 def lead_row(lead: Dict, count: int, today: Optional[date] = None) -> Dict:
-    label, kind = status_summary(lead)
+    label, kind = status_summary(lead, count)
     return {
         "name": display_name(lead), "company": str(lead.get("Company") or "").strip(), "email": str(lead.get("Email") or "").strip(),
         "status": label, "status_kind": kind, "progress": sequence_progress(lead, count),
@@ -168,6 +190,7 @@ def timeline(lead: Dict, labels: List[str], today: Optional[date] = None) -> Lis
         if raw:
             events.append((_parse(raw), raw, "📨", f"{label} sent"))
     status = str(lead.get("Status") or "").strip()
+    finished = sequence_completed(lead, len(labels))
     reply_raw = str(lead.get("ReplyAt") or lead.get("LastInboundAt") or "").strip()
     if str(lead.get("ReplyStatus") or "").strip() == "Replied" or status == STATUS_REPLIED:
         events.append((_parse(reply_raw), reply_raw, "💬", "Replied"))
@@ -182,10 +205,13 @@ def timeline(lead: Dict, labels: List[str], today: Optional[date] = None) -> Lis
         events.append((None, "", "⏹️", "Follow-ups stopped automatically"))
     elif status == STATUS_COMPLETED:
         events.append((_parse(stopped_raw), stopped_raw, "✅", "Sequence completed"))
+    elif finished:
+        last_raw = str(lead.get(sent_column(len(labels) - 1)) or "").strip()
+        events.append((_parse(last_raw), last_raw, "✅", "Sequence completed"))             # the last email went out and nothing has happened since
     elif status == STATUS_PAUSED:
         events.append((_parse(stopped_raw), stopped_raw, "⏸️", "Paused"))
     due_raw = str(lead.get("NextEligibleAt") or "").strip()
-    active = (not status.startswith("Stopped") and status not in (STATUS_REMOVED, STATUS_COMPLETED, STATUS_PAUSED)
+    active = (not status.startswith("Stopped") and status not in (STATUS_REMOVED, STATUS_COMPLETED, STATUS_PAUSED) and not finished
               and str(lead.get("ReplyStatus") or "").strip() != "Replied")
     if due_raw and active:
         events.append((_parse(due_raw), due_raw, "⏳", "Next follow-up due"))
