@@ -192,7 +192,7 @@ def status(url):
 
 
 @pytest.mark.parametrize("url", ["https://script.google.com/macros/s/AKfycbx123/exec", "https://script.google.com/macros/s/AKfycbx123/exec/", "https://SCRIPT.GOOGLE.COM/macros/s/AKfy/exec",
-                                 "https://script.google.com/macros/s/AKfy/exec?a=1", "https://unsubscribe.kelson.agency/page", "https://example.com/dev"])
+                                 "https://unsubscribe.kelson.agency/page?a=1", "https://unsubscribe.kelson.agency/page", "https://example.com/dev"])
 def test_a_proper_page_address_is_accepted_without_a_warning(url):
     config, note = status(url)
     assert config is not None and note == "" and config.url == url
@@ -383,3 +383,59 @@ def test_an_address_written_entirely_in_unicode_escapes_is_read_whole():
 
 def test_both_kinds_of_escape_can_be_mixed_in_one_address():
     assert ul.find_frame_urls('https:\\/\\/n-1.googleusercontent.com\\x2fp\\u003fa\\x3d1&amp;b=2') == ["https://n-1.googleusercontent.com/p?a=1&b=2"]
+
+
+# ================================================================ a browser's own account position is not part of the page address
+
+ID = "AKfycbytTNqD3rf05EYnWiuuVMzzrGP24nhxCBHs7UzBnUj3yxJwL2VZoeIwohb6lcMli_g9"
+CANONICAL = f"https://script.google.com/macros/s/{ID}/exec"
+
+
+@pytest.mark.parametrize("given, canonical, removed", [
+    (CANONICAL, CANONICAL, []), (f"https://script.google.com/macros/u/6/s/{ID}/exec", CANONICAL, ["/u/6/"]), (f"https://script.google.com/macros/u/0/s/{ID}/exec", CANONICAL, ["/u/0/"]),
+    (f"https://script.google.com/macros/u/12/s/{ID}/exec", CANONICAL, ["/u/12/"]), (f"{CANONICAL}?authuser=6", CANONICAL, ["?authuser=6"]), (f"{CANONICAL}#top", CANONICAL, ["#top"]),
+    (f"https://script.google.com/macros/u/6/s/{ID}/exec?authuser=6&x=1#top", CANONICAL, ["/u/6/", "?authuser=6&x=1", "#top"]),
+    (f"https://SCRIPT.google.com/macros/u/3/s/{ID}/exec", f"https://SCRIPT.google.com/macros/s/{ID}/exec", ["/u/3/"]),
+    (f"https://script.google.com/macros/u/6/s/{ID}/dev", f"https://script.google.com/macros/s/{ID}/dev", ["/u/6/"])])
+def test_what_only_means_something_in_the_browser_it_was_copied_from_is_taken_out_of_a_google_address(given, canonical, removed):
+    assert ul.canonical_address(given) == (canonical, removed)
+
+
+@pytest.mark.parametrize("url", ["https://example.com/macros/u/6/s/X/exec?y=1#z", "https://unsubscribe.kelson.agency/u/6/page?a=1", f"https://script.google.com.evil.example/macros/u/6/s/{ID}/exec",
+                                 f"https://script.google.com/a/macros/kelson.agency/s/{ID}/exec", f"https://script.google.com/macros/s/{ID}/exec/u/6/", f"https://script.google.com/macros/s/u/6/s/{ID}/exec"])
+def test_any_other_host_or_shape_is_left_exactly_as_given(url):
+    assert ul.canonical_address(url) == (url, [])
+
+
+def test_tidying_twice_changes_nothing_more():
+    once = ul.canonical_address(f"https://script.google.com/macros/u/6/s/{ID}/exec?authuser=6")[0]
+    assert ul.canonical_address(once) == (once, [])
+
+
+def test_an_address_copied_from_a_browser_is_used_in_its_clean_form_and_the_person_is_told():
+    config, note = ul.configuration_status({"UNSUBSCRIBE_URL": f"https://script.google.com/macros/u/6/s/{ID}/exec", "UNSUBSCRIBE_SECRET": "s" * 20})
+    assert config is not None and config.url == CANONICAL
+    assert "contained /u/6/" in note and "your position among the Google accounts signed in there" in note and f"the address used is {CANONICAL}" in note
+    assert "never from the browser's address bar" in note and "Deploy dialog or Manage deployments" in note
+
+
+def test_a_clean_address_gets_no_tidying_note():
+    assert ul.configuration_status({"UNSUBSCRIBE_URL": CANONICAL, "UNSUBSCRIBE_SECRET": "s" * 20}) == (ul.PageConfig(CANONICAL, "s" * 20), "")
+
+
+def test_the_test_address_is_still_refused_after_the_tidying_and_a_pasted_line_break_is_still_caught_first():
+    config, note = ul.configuration_status({"UNSUBSCRIBE_URL": f"https://script.google.com/macros/u/6/s/{ID}/dev", "UNSUBSCRIBE_SECRET": "s" * 20})
+    assert config is None and "ends in /dev" in note and "contained" not in note
+    config, note = ul.configuration_status({"UNSUBSCRIBE_URL": f"https://script.google.com/macros/u/6/s/{ID}/exec\nhttps://x", "UNSUBSCRIBE_SECRET": "s" * 20})
+    assert config is None and "space or a line break" in note
+
+
+def test_the_tidying_note_and_a_workspace_warning_can_come_together():
+    config, note = ul.configuration_status({"UNSUBSCRIBE_URL": f"https://script.google.com/a/macros/kelson.agency/s/{ID}/exec?authuser=2", "UNSUBSCRIBE_SECRET": "s" * 20})
+    assert config is not None and "contained ?authuser=2" in note and "/a/macros/" in note and "Who has access" in note
+
+
+def test_the_link_made_from_a_tidied_address_has_the_clean_path_and_nothing_else_changed():
+    config = ul.configuration({"UNSUBSCRIBE_URL": f"https://script.google.com/macros/u/6/s/{ID}/exec", "UNSUBSCRIBE_SECRET": "s" * 20})
+    token = ul.make_token(SECRET, campaign="C", lead_id="L", email="a@b.com", brand="B", key="b")
+    assert ul.page_url(config.url, token) == f"{CANONICAL}?t={token}"
