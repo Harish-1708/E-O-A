@@ -658,15 +658,16 @@ def _render_data_tab(campaign_cfg, leads):
             search_query = st.text_input("Search", key="data_search", placeholder="🔍 Search name, email or company…", label_visibility="collapsed")
         with add_column:
             st.button("＋ Add leads", key="ld_add_leads", on_click=_open_import_panel, use_container_width=True)
-        option_counts = filter_counts(leads, FILTER_OPTIONS, filter_leads)
+        stage_names = [s.get("name") for s in (campaign_cfg.get("stages") or [])]
+        shown_stage_count = stage_count(stage_names, leads)
+        # the chips know how many stages the campaign has, so a lead sent its LAST email shows under Completed, not In Progress
+        option_counts = filter_counts(leads, FILTER_OPTIONS, lambda subset, option: filter_leads(subset, option, shown_stage_count))
         status_filter = st.radio("Filter", FILTER_OPTIONS, key="data_filter", horizontal=True, label_visibility="collapsed",
                                  format_func=lambda option: f"{option} · {option_counts[option]}")
 
-        stage_names = [s.get("name") for s in (campaign_cfg.get("stages") or [])]
         sender_filter, stage_filter, recency_filter = render_extra_filters(leads, stage_names)
 
-        shown_stage_count = stage_count(stage_names, leads)
-        filtered = apply_extra_filters(search_leads(filter_leads(leads, status_filter), search_query), shown_stage_count,
+        filtered = apply_extra_filters(search_leads(filter_leads(leads, status_filter, shown_stage_count), search_query), shown_stage_count,
                                        stage_labels(stage_names, shown_stage_count), sender_filter, stage_filter, recency_filter)
         render_clear_filters(any_extra_filter(sender_filter, stage_filter, recency_filter) or bool(search_query.strip()) or status_filter != FILTER_OPTIONS[0])
     if st.session_state.get("ld_import_open"):
