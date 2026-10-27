@@ -16,7 +16,7 @@ import hmac
 import json
 import re
 import unicodedata
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from typing import Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 UNSUBSCRIBE_TAB = "Unsubscribes"
@@ -31,8 +31,9 @@ _REQUIRED_FIELDS = ("c", "l", "e", "b", "k", "a")
 
 
 class PageConfig(NamedTuple):
-    url: str
+    url: str                  # the Google script's Web app address: the mail app's one-tap unsubscribe goes here
     secret: str
+    page: str = ""            # the static page on GitHub Pages that recipients open (UNSUBSCRIBE_PAGE_URL); empty = recipients open the Google page itself
 
 
 def canonical_address(url: str) -> Tuple[str, List[str]]:
@@ -75,6 +76,21 @@ def address_problem(url: str) -> Tuple[bool, str]:
     return False, ""
 
 
+def page_address_problem(url: str) -> str:
+    """Why an UNSUBSCRIBE_PAGE_URL cannot be used (empty when it can). It must be the GitHub Pages address, on its own: a Google address would bring back the very problem it avoids."""
+    if re.search(r"\s", url):
+        return "UNSUBSCRIBE_PAGE_URL contains a space or a line break (check it was pasted whole, on one line)."
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.netloc:
+        return "UNSUBSCRIBE_PAGE_URL must start with https://."
+    if (parts.hostname or "").lower() == "script.google.com":
+        return ("UNSUBSCRIBE_PAGE_URL is a Google address, which is what recipients signed in to several Google accounts cannot open. Use the GitHub Pages address of docs/unsubscribe.html "
+                "(it looks like https://<your-name>.github.io/<repository>/unsubscribe.html).")
+    if parts.query or parts.fragment:
+        return "UNSUBSCRIBE_PAGE_URL should be the page address on its own, with nothing after it (no ? and no #)."
+    return ""
+
+
 def configuration_status(environ) -> Tuple[Optional[PageConfig], str]:
     """(config, note). `config` is None unless BOTH settings are present and usable; `note` says why (empty when it is simply not set up, which is a normal state: the emails then
     use the email-based unsubscribe exactly as before). A half-done or malformed set-up is reported, never guessed at. A warning can also come WITH a usable config."""
@@ -98,7 +114,13 @@ def configuration_status(environ) -> Tuple[Optional[PageConfig], str]:
         tidied = (f"UNSUBSCRIBE_URL contained {', '.join(removed)}, which only mean something in the browser it was copied from (for example, /u/6/ is your position among the Google accounts signed in there). "
                   f"It was removed, and the address used is {url}. Copy the Web app URL from the Deploy dialog or Manage deployments, never from the browser's address bar.")
         note = (tidied + " " + note).strip()
-    return PageConfig(url, secret), note
+    page = str(environ.get("UNSUBSCRIBE_PAGE_URL") or "").strip()
+    if page:
+        problem = page_address_problem(page)
+        if problem:
+            note = (note + " " + problem + " The page on GitHub Pages is NOT used: recipients are sent to the Google page instead.").strip()
+            page = ""
+    return PageConfig(url, secret, page), note
 
 
 def configuration(environ) -> Optional[PageConfig]:
@@ -300,3 +322,83 @@ def format_trace(steps: List[Dict]) -> List[str]:
         extras.append(f"{step.get('size', 0)} bytes")
         lines.append(f"  step {number} ({label}) {step['where']} -> HTTP {step['status']} [{step.get('state', '?').upper()}]" + ("; " + "; ".join(extras) if extras else ""))
     return lines
+
+
+# ---------------------------------------------------------------- the static page's two requests, checked against the REAL Google from GitHub
+
+def classify_api(hops: List[Dict], origin: str, expect_state: str = "test") -> Tuple[str, str]:
+    """(state, message) for the page's request to the Google script, made the way a browser on `origin` makes it (no cookies), hop by hop. Every answer on the way, redirects included,
+    must allow `origin` (Access-Control-Allow-Origin), or the browser refuses to read it; and the last answer must be the script's DATA (JSON), not a web page. State: ok, blocked, unknown."""
+    if not hops:
+        return "unknown", "no request could be made."
+    for number, hop in enumerate(hops, 1):
+        if hop.get("error"):
+            return "unknown", f"step {number} could not be made ({hop['error']})."
+    for number, hop in enumerate(hops, 1):
+        allowed = str(hop.get("acao") or "").strip()
+        if allowed not in ("*", origin):
+            return "blocked", (f"step {number} ({hop.get('where', '?')}, HTTP {hop.get('status')}) carries no permission for a page on {origin} "
+                               f"(Access-Control-Allow-Origin is {allowed or 'missing'}), so a browser would refuse to read the answer and the unsubscribe page could not work.")
+    last = hops[-1]
+    body = str(last.get("body") or "")
+    if last.get("status") != 200:
+        return "blocked", f"the last step answered HTTP {last.get('status')} instead of the script's data."
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return "blocked", ("the Google script answered with a web page instead of data. The deployed version is probably older than the page interface: "
+                           "paste the new Code.gs and deploy a NEW VERSION (Deploy > Manage deployments > Edit > New version > Deploy).")
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        return "blocked", f"the Google script did not accept the link (it answered {str(data)[:80]}). The secret in the script and the UNSUBSCRIBE_SECRET in GitHub must be the same text."
+    if expect_state and data.get("state") not in (expect_state, None):
+        return "blocked", f"the Google script answered state '{data.get('state')}' where '{expect_state}' was expected."
+    return "ok", f"every answer ({len(hops)} step{'s' if len(hops) != 1 else ''}) allows a page on {origin}, and the last one is the script's data."
+
+
+def config_js_address(text: str) -> str:
+    """The Google address written in the page's config.js (window.UNSUBSCRIBE_API = "..."), or ''."""
+    match = re.search(r"window\.UNSUBSCRIBE_API\s*=\s*[\"']([^\"']*)[\"']", str(text or ""))
+    return match.group(1).strip() if match else ""
+
+
+def classify_config(found: str, expected: str, status: Optional[int] = 200, error: str = "") -> Tuple[str, str]:
+    """(state, message) for whether the page's config.js points at the same Google script as the secret."""
+    if error:
+        return "unknown", f"could not read the page's config.js ({error})."
+    if status != 200:
+        return "blocked", f"the page's config.js answered HTTP {status}: GitHub Pages is not serving docs/ yet, or config.js was not uploaded."
+    if not found:
+        return "blocked", "the page's config.js does not set window.UNSUBSCRIBE_API."
+    cleaned = canonical_address(found)[0].rstrip("/")
+    if cleaned != expected.rstrip("/"):
+        return "blocked", f"the page's config.js points at {found}, but UNSUBSCRIBE_URL is {expected}. Edit docs/config.js so both name the same script."
+    return "ok", "the page's config.js names the same Google script as UNSUBSCRIBE_URL."
+
+
+def token_from_url(url: str) -> str:
+    """The link's token (the t= part of its address), or ''."""
+    values = parse_qs(urlsplit(str(url or "")).query).get("t") or [""]
+    return values[0]
+
+
+def origin_of(url: str) -> str:
+    parts = urlsplit(str(url or ""))
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+
+
+PAGES_FIX = ("In GitHub open the repository's Settings > Pages, choose Source: Deploy from a branch, Branch: main, Folder: /docs, and Save; it can take a minute or two to start. "
+             "Then check docs/unsubscribe.html, docs/unsubscribe.js and docs/config.js are in the repository.")
+PAGE_MARKER = "unsubscribe-page-v1"
+
+
+def classify_page(status: Optional[int], body: str, error: str = "") -> Tuple[str, str]:
+    """(state, message) for the static page on GitHub Pages opened as a visitor would: ok, blocked or unknown."""
+    if error:
+        return "unknown", f"could not check the page from here ({error})."
+    if status in (404, 403, 410):
+        return "blocked", f"GitHub Pages answered HTTP {status}: the page is not being served. " + PAGES_FIX
+    if status == 200:
+        if PAGE_MARKER in str(body or ""):
+            return "ok", "GitHub Pages served the unsubscribe page (HTTP 200)."
+        return "blocked", "the address answered HTTP 200 but it is not the unsubscribe page (the wrong address or folder?). " + PAGES_FIX
+    return "unknown", f"the page address answered with an unexpected status ({status})."
