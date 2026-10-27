@@ -22,7 +22,8 @@ EXPECTED = {
     "apps_script/Code.gs": "34d2fe1aaad9f5504f497849189d3fe8fa05965ff1cd541568080483338736f0",
     "apps_script/test_unsubscribe.js": "6fcc800908939c7e489f27925efbcbaa6b8d06306a0da133295d35b81483285c",
     "docs/config.js": "a7a4afbe3cbb92e56dac5b48ef315ddc939b49c779e16ee96e0bb34bd2d5fd70",
-    "docs/unsubscribe.html": "67d20ebb89e59b68a7df1381bbefc3f4f883b382987520823bd6e161af53c967",
+    "docs/index.html": "7eeff80630c33138bf1f7da657893966c2e4c75cdcb8760690982e70b2f173ea",
+    "docs/unsubscribe.html": "7eeff80630c33138bf1f7da657893966c2e4c75cdcb8760690982e70b2f173ea",
     "docs/unsubscribe.js": "f596d19540d59e00bd75919a3705f17368443db10baf36d703ceb59e8a16e92b",
     "html_campaign_logic.py": "c8993d1f3a2cf66cdb479595c583328d6001fc6b2b12efdf50ea6b865435bef5",
     "outreach.py": "cd2ba0b3aa90dbb750341606996db03e82e4d43a98677f82ba5f347d4c6d5430",
@@ -173,11 +174,11 @@ EXPECTED = {
     "tests/test_html_campaigns_engine.py": "444df83020246b2e0893e82f8d718e44188828486576fe1146fe4a1043c0540d",
     "tests/test_response_status.py": "131a1e040c34be625a968fbf6485e0d1a4e4b535dbe1513f093e7ce7e4dd4aaf",
     "tests/test_stage_wait_overrides.py": "b784bda4227086834a5dd811387b9c02419ead37f91af743416debf17ac811b4",
-    "tests/test_static_page.py": "3a5327b7ba6268014cd2827f416ce3fdfc6822e2ccd0bfc41f6020dc6cb4da73",
-    "tests/test_unsubscribe_engine.py": "92cfb4367eb8c81ef607aeb76ae92778912032da9167d9384c936072061f17f5",
-    "tests/test_unsubscribe_logic.py": "60b49d1273a732ea7bd7bca58ce1076a0df0b209f6562c3ea4cdff35e3779c3a",
+    "tests/test_static_page.py": "aa78cff9a97f01e213eebfe011167031d55570f28deb9de630ac352ab04a681d",
+    "tests/test_unsubscribe_engine.py": "79002b46417e97bbd65f5d4c04cab925427896ff9839a5c739ba8b90465b4622",
+    "tests/test_unsubscribe_logic.py": "323d49b076db69db6e7e73a975a94ad088a2e827bd7b129d47ed1fecb0d55a96",
     "tests/test_unsubscribe_workflows.py": "35f5d4098f42adfed7182526d7cb6bd83598b43cd768769e5494f33128ab416a",
-    "unsubscribe_logic.py": "52f15f1329c85a11f20178b8c8bd4c566954e8401196786e6eabd8dcca8b04cb",
+    "unsubscribe_logic.py": "79980e9105efb7db3630a64f36bcb922177cde4c36c3efefb92d013ef6b0d177",
 }
 
 
