@@ -24,6 +24,10 @@
  *      "This link is not valid". If Google shows "unable to open the file" instead, the access setting or the address is wrong: go back to step 4.
  *   7. Send yourself a test email from the app. The run's summary also opens the page from GitHub and says OK or PROBLEM. Then click Unsubscribe in the email (a test link records nothing).
  *
+ * CAMPAIGN CODES: the links carry a short code ('~' and 10 characters) instead of your campaign's name, so recipients cannot read your campaign names. The engine lists each code next to its name
+ *   in a tab called "Campaign codes" (made for you the first time a campaign sends); this script only READS that tab, to write the name into the Campaign column. If a code is not listed
+ *   there, the Campaign column shows the code: the "Campaign codes" tab always tells you which campaign it stands for.
+ *
  * TROUBLESHOOTING (a link opens for you but a recipient sees Google's "unable to open the file"):
  *   Add a script property DIAGNOSTICS = on, have the recipient click the link again, then open the "Unsubscribe diagnostics" tab of your Sheet:
  *     no new row            = the request never reached this script (Google refused it first: an access or sign-in problem, not this code);
@@ -39,6 +43,8 @@
 var TAB_NAME = 'Unsubscribes';
 var COLUMNS = ['Timestamp', 'Email', 'Brand', 'BrandKey', 'Campaign', 'LeadID', 'Reason', 'Details', 'Source'];
 var REASONS = ['Too many emails', 'Not relevant to me', 'I never signed up', 'Other'];
+var CODES_TAB = 'Campaign codes';
+var CAMPAIGN_CODE_PATTERN = /^~[A-Za-z0-9_-]{10}$/;
 var DIAG_TAB = 'Unsubscribe diagnostics';
 var DIAG_COLUMNS = ['Time', 'Event', 'State', 'Brand', 'Campaign', 'QueryLength', 'TokenLength', 'ParamNames'];
 var DIAG_STATES = ['valid', 'invalid', 'test', 'not set up'];
@@ -125,6 +131,29 @@ function readProps_() {
 }
 
 
+/* ------------------------------------------------------------------ campaign codes */
+
+/** The campaign's NAME, for the Campaign column. A link carries a short code ('~' and 10 characters) instead of the name, so a recipient cannot read your campaign names; the ENGINE lists each code
+ *  next to its name in the 'Campaign codes' tab (made automatically) and this script only reads it. A link from before codes existed carries the name itself. Never throws: if the code is not
+ *  listed or the tab cannot be read, the code itself is recorded, which still identifies the campaign. */
+function campaignLabel_(value, sheetId) {
+  var text = String(value || '');
+  if (!CAMPAIGN_CODE_PATTERN.test(text)) { return text; }
+  try {
+    var sheet = SpreadsheetApp.openById(sheetId).getSheetByName(CODES_TAB);
+    if (sheet) {
+      var values = sheet.getDataRange().getValues();
+      for (var row = 1; row < values.length; row++) {
+        if (String(values[row][0]).trim() === text && String(values[row][1] || '').trim()) { return String(values[row][1]).trim(); }
+      }
+    }
+  } catch (error) {
+    // fall back to the code
+  }
+  return text;
+}
+
+
 /* ------------------------------------------------------------------ troubleshooting log (off unless the DIAGNOSTICS property is "on") */
 
 function diagnosticsOn_() {
@@ -149,7 +178,7 @@ function logDiag_(eventName, state, payload, e) {
         sheet.appendRow(DIAG_COLUMNS);
         sheet.setFrozenRows(1);
       }
-      sheet.appendRow([Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd HH:mm:ss'), eventName, state, safeCell_(cleanText_(payload ? payload.b : '', 120)), safeCell_(cleanText_(payload ? payload.c : '', 120)),
+      sheet.appendRow([Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd HH:mm:ss'), eventName, state, safeCell_(cleanText_(payload ? payload.b : '', 120)), safeCell_(cleanText_(payload ? campaignLabel_(payload.c, sheetId) : '', 120)),
         e && e.queryString !== undefined ? String(e.queryString).length : '', e ? token.length : '', parameter ? Object.keys(parameter).join(',') : '']);
     } finally {
       lock.releaseLock();
@@ -222,7 +251,7 @@ function record_(payload, source, reason, details, props) {
     line[index.Email] = safeCell_(cleanText_(payload.e, 254));
     line[index.Brand] = safeCell_(cleanText_(payload.b, 120));
     line[index.BrandKey] = safeCell_(cleanText_(payload.k, 120));
-    line[index.Campaign] = safeCell_(cleanText_(payload.c, 120));
+    line[index.Campaign] = safeCell_(cleanText_(campaignLabel_(payload.c, props.sheetId), 120));
     line[index.LeadID] = safeCell_(cleanText_(payload.l, 80));
     line[index.Reason] = cleanReason;
     line[index.Details] = safeCell_(cleanDetails);
