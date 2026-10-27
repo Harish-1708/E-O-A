@@ -24,13 +24,14 @@ def test_the_workflows_that_build_emails_pass_both_secrets_under_the_names_the_e
     carrying = [env for env in env_blocks(load(name)) if "UNSUBSCRIBE_URL" in env or "UNSUBSCRIBE_SECRET" in env]
     assert len(carrying) == 1
     assert carrying[0]["UNSUBSCRIBE_URL"] == "${{ secrets.UNSUBSCRIBE_URL }}" and carrying[0]["UNSUBSCRIBE_SECRET"] == "${{ secrets.UNSUBSCRIBE_SECRET }}"
+    assert carrying[0]["UNSUBSCRIBE_PAGE_URL"] == "${{ secrets.UNSUBSCRIBE_PAGE_URL }}"
     assert "EMAIL_ACCOUNTS_JSON" in carrying[0]                                  # the very step that sends
 
 
 @pytest.mark.parametrize("path", sorted(p for p in glob.glob(os.path.join(WORKFLOWS, "*.yml")) if os.path.basename(p) not in BUILD_EMAILS))
 def test_no_other_workflow_is_given_the_secrets(path):
     text = open(path, encoding="utf-8").read()
-    assert "UNSUBSCRIBE_URL" not in text and "UNSUBSCRIBE_SECRET" not in text
+    assert "UNSUBSCRIBE_URL" not in text and "UNSUBSCRIBE_SECRET" not in text and "UNSUBSCRIBE_PAGE_URL" not in text
 
 
 def test_the_engine_reads_exactly_the_names_the_workflows_pass():
