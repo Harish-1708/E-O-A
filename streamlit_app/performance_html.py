@@ -19,6 +19,8 @@ SENT_COLOUR, REPLIES_COLOUR = "#2563eb", "#16a34a"
 INTENT_COLOURS = {"Interested": "#16a34a", "Lead / Needs Follow-up": "#2563eb", "Not Interested": "#dc2626",
                   "Unclear": "#9ca3af", "Not classified": "#d1d5db"}
 DEFAULT_COLOUR = "#9ca3af"
+OUTCOME_COLOURS = {"Not contacted yet": "#cbd5e1", "In progress": "#2563eb", "Completed": "#64748b", "Replied": "#16a34a", "Bounced": "#dc2626", "Unsubscribed": "#d97706",
+                   "Declined": "#b45309", "Stopped by hand": "#9ca3af", "Paused": "#f59e0b", "Removed": "#94a3b8", "No email address": "#e5e7eb"}
 _CONTROL_AND_BIDI = re.compile(r"[\x00-\x1f\x7f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 
@@ -265,7 +267,7 @@ def glance_table_html(rows: Sequence[dict], totals: dict) -> str:
                 f'<td><div class="pg-num">{r["replies"]}{best}</div><div class="pg-sub">replied · {int(r.get("positive") or 0)} positive</div></td>'
                 f'<td><div class="pg-num pg-rate">{esc(r["reply_rate_text"])}</div>{_bar(round(rate * 100) if rate is not None else 0)}</td>'
                 f'<td>{_bounce_chip(r["hard"], "hard", "bad")}{_bounce_chip(r["soft"], "soft", "warn")}</td>'
-                f'<td><div class="pg-num">{esc(r["completion_text"])}</div>{_bar(round((r["completion"] or 0) * 100), "g")}<div class="pg-sub">{r["completed"]} completed the sequence</div></td></tr>')
+                f'<td><div class="pg-num">{esc(r["completion_text"])}</div>{_bar(round((r["completion"] or 0) * 100), "g")}<div class="pg-sub">{r["completed"]} reached the last email</div></td></tr>')
     t = totals
     total_row = (f'<tr class="pg-total"><td>All {t["campaigns"]} campaign{"" if t["campaigns"] == 1 else "s"}</td><td>{t["contacted"]} <span class="pg-of">of {t["leads"]}</span></td><td>{t["sent"]}</td>'
                  f'<td>{t["replies"]}</td><td class="pg-rate">{esc(t["reply_rate_text"])}</td><td>{_bounce_chip(t["hard"], "hard", "bad")}{_bounce_chip(t["soft"], "soft", "warn")}</td>'
