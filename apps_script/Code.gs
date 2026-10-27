@@ -30,6 +30,9 @@
  *     "opened" only         = the script answered but the page did not finish loading in their browser;
  *     "opened" + "rendered" = the page opened fine in their browser (the error came from something else they clicked).
  *   It records no email address, no lead and no link. Delete the property afterwards: while it is on, every visit adds a row.
+ *   THE PAGE ON GITHUB PAGES: recipients are sent to a small static page (docs/unsubscribe.html in the repo, shown by GitHub Pages) that asks THIS script for the data with a plain request
+ *   (?api=info&t=...) and sends the confirmation as JSON. No Google sign-in is involved, which is why it works for people signed in to several Google accounts. The Google page below it
+ *   (HtmlService) stays as a fallback and for the mail app's one-tap unsubscribe.
  *   When you change this code later: Deploy > Manage deployments > Edit > New version > Deploy (the address stays the same).
  */
 
@@ -234,8 +237,49 @@ function record_(payload, source, reason, details, props) {
 
 /* ------------------------------------------------------------------ what the web app answers */
 
-/** Opening the link: shows the page. Changes nothing. */
+/** The data interface used by the page on GitHub Pages (a plain request from the visitor's browser with no Google sign-in involved). Reads only: changes nothing. */
+function info_(e) {
+  var props = readProps_();
+  if (!props.ok) { logDiag_('opened', 'not set up', null, e); return { ok: false, state: 'not set up' }; }
+  var payload = verifyToken_(e && e.parameter ? e.parameter.t : '', props.secret);
+  if (!payload) { logDiag_('opened', 'invalid', null, e); return { ok: false, state: 'invalid' }; }
+  var state = payload.t === 1 ? 'test' : 'valid';
+  logDiag_('opened', state, payload, e);
+  return { ok: true, state: state, brand: payload.b, masked: maskEmail_(payload.e), address: payload.a, reasons: REASONS.slice(), test: payload.t === 1 };
+}
+
+/** Records an opt-out for the page on GitHub Pages. `body` is the request's JSON. Never throws; says what happened in plain fields. */
+function confirmApi_(body) {
+  try {
+    var props = readProps_();
+    if (!props.ok) { return { ok: false, error: 'not set up' }; }
+    var payload = verifyToken_(body.t, props.secret);
+    if (!payload) { return { ok: false, error: 'invalid' }; }
+    var result = record_(payload, 'page', body.reason, body.details, props);
+    logDiag_('confirmed', result.test ? 'test' : 'valid', payload, null);
+    return result;
+  } catch (error) {
+    return { ok: false, error: 'failed' };
+  }
+}
+
+function parseBody_(e) {
+  try {
+    if (!e || !e.postData || !e.postData.contents) { return null; }
+    var parsed = JSON.parse(e.postData.contents);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function json_(object) {
+  return ContentService.createTextOutput(JSON.stringify(object)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/** Opening the link: shows the page. Changes nothing. (With api=info it answers with data instead of a page: see info_.) */
 function doGet(e) {
+  if (e && e.parameter && e.parameter.api === 'info') { return json_(info_(e)); }
   var props = readProps_();
   if (!props.ok) { logDiag_('opened', 'not set up', null, e); return page_(shell_('UNSUBSCRIBE', unavailableBody_(), '', 'not set up')); }
   var payload = verifyToken_(e && e.parameter ? e.parameter.t : '', props.secret);
@@ -248,6 +292,8 @@ function doGet(e) {
 /** A mail app's one-tap Unsubscribe (RFC 8058): a POST with List-Unsubscribe=One-Click to the link's own address. */
 function doPost(e) {
   try {
+    var body = parseBody_(e);
+    if (body && body.api === 'confirm') { return json_(confirmApi_(body)); }
     var params = (e && e.parameter) || {};
     var props = readProps_();
     if (!props.ok) { return text_('Not set up'); }
