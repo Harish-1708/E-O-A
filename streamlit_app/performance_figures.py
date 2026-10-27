@@ -9,7 +9,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from leads_logic import humanize_stage
-from performance_logic import INTENT_ORDER, INTENT_NOT_CLASSIFIED, format_duration_hours, format_rate
+from performance_logic import INTENT_ORDER, INTENT_NOT_CLASSIFIED, OUTCOME_NAMES, OUTCOME_ORDER, format_duration_hours, format_rate
 
 _DASH = "—"
 
@@ -90,6 +90,10 @@ def build_performance_csv(perf: Dict, title: str = "Performance") -> str:
 
     writer.writerow([safe_cell(f"{title} — Performance")])
     section("Headline figures", ["Figure", "Value", "Note"], [[f["label"], f["value"], f["caption"] + (f" · {f['trend'][0]}" if f["trend"] else "")] for f in headline_figures(perf)])
+    outcomes = perf.get("outcomes") or {}
+    total_leads = max(int(perf.get("total_leads") or 0), 0)
+    section("Where the leads are now", ["Where", "Leads", "Share of leads"],
+            [[OUTCOME_NAMES.get(label, label), outcomes.get(label, 0), format_rate(outcomes.get(label, 0) / total_leads) if total_leads else _DASH] for label in OUTCOME_ORDER])
     section("What the replies say", ["Reading", "Creators"], [[label, perf["intents"][label]] for label in INTENT_ORDER] + [[INTENT_NOT_CLASSIFIED, perf["intents"][INTENT_NOT_CLASSIFIED]]])
     rate_header = ["Emails sent", "Replies", "Reply rate", "Positive", "Positive rate"]
     rate = lambda r: [r["sent"], r["replies"], format_rate(r["reply_rate"]), r["positive"], format_rate(r["positive_rate"])]      # noqa: E731
