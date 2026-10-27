@@ -34,6 +34,9 @@ import outreach  # noqa: E402
 from campaign_status_logic import compute_campaign_status  # noqa: E402
 from campaign_analytics_logic import build_error_summary  # noqa: E402
 from parallel_logic import run_in_parallel  # noqa: E402
+from work_queue_logic import (  # noqa: E402
+    not_in_play_label, LABEL_COMPLETED, LABEL_REPLIED, LABEL_BOUNCED, LABEL_UNSUBSCRIBED, LABEL_DECLINED, LABEL_STOPPED_MANUALLY, LABEL_PAUSED, LABEL_REMOVED, LABEL_NO_EMAIL,
+)
 
 # A ranking of two things on a handful of emails is noise, not insight. The
 # "what worked best" report only ranks groups with at least this many.
@@ -119,6 +122,27 @@ def reply_rate_trend(sent_rows: List[Dict], answered_emails, today: Optional[dat
 
 
 # ---------------------------------------------------------------- one campaign
+
+# Where every lead is right now: each lead is in exactly ONE of these, so they add up to the campaign's leads. Worked out with the very rule Home's counts use
+# (work_queue_logic.not_in_play_label), so Home, the Data tab and this page cannot disagree.
+OUTCOME_NOT_CONTACTED, OUTCOME_IN_PROGRESS = "Not contacted yet", "In progress"
+OUTCOME_COMPLETED = LABEL_COMPLETED
+OUTCOME_ORDER = [OUTCOME_NOT_CONTACTED, OUTCOME_IN_PROGRESS, OUTCOME_COMPLETED, LABEL_REPLIED, LABEL_BOUNCED, LABEL_UNSUBSCRIBED, LABEL_DECLINED, LABEL_STOPPED_MANUALLY,
+                 LABEL_PAUSED, LABEL_REMOVED, LABEL_NO_EMAIL]
+OUTCOME_NAMES = {OUTCOME_COMPLETED: "Completed", LABEL_STOPPED_MANUALLY: "Stopped by hand", LABEL_NO_EMAIL: "No email address"}
+
+
+def lead_outcomes(leads: List[Dict], stages: List[Dict]) -> Dict[str, int]:
+    """{outcome: how many leads} for every outcome in OUTCOME_ORDER (zeros included, so the export has a stable shape). A lead that has been sent its last email is Completed
+    unless it replied, bounced, unsubscribed or was stopped, paused or removed, which always win: a completed lead that later replies is counted under Replied from then on."""
+    counts = {label: 0 for label in OUTCOME_ORDER}
+    for lead in leads:
+        label = not_in_play_label(lead, stages)
+        if label is None:
+            label = OUTCOME_IN_PROGRESS if str(lead.get("IntroSentAt") or "").strip() else OUTCOME_NOT_CONTACTED
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
 
 def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses: List[Dict],
                                send_log: List[Dict], error_log: Optional[List[Dict]] = None, today: Optional[date] = None) -> Dict:
@@ -266,6 +290,8 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
         except (TypeError, ValueError):
             error_rows.append({"error_type": item["error_type"], "count": 0})
 
+    outcomes = lead_outcomes(leads, stages)                    # where each lead is now (one place each): the "Where your leads are now" card
+    # "Sequence completion" is the ENGINE's own funnel figure (the Sheet's Dashboard tab shows the same): every lead sent the last email, including ones that replied afterwards.
     last_stage_field = outreach.stage_field_names(len(stages) - 1)["sent_at"] if stages else None
     completed = sum(1 for l in leads if last_stage_field and (l.get(last_stage_field) or "").strip())
     return {
@@ -273,6 +299,7 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
         **totals,
         "pending": max(totals["total_leads"] - totals["contacted"], 0),
         "completed": completed,
+        "outcomes": outcomes,
         "sequence_completion": rate(completed, totals["contacted"]),
         "sender_rows": sender_rows,
         "error_rows": error_rows,
@@ -387,6 +414,7 @@ def combine_performance(perfs: List[Dict], name: str = "All campaigns") -> Dict:
     return {
         "campaign": name,
         "pending": total("pending"), "completed": total("completed"),
+        "outcomes": {label: sum(int((p.get("outcomes") or {}).get(label, 0)) for p in perfs) for label in OUTCOME_ORDER},
         "sequence_completion": rate(total("completed"), contacted),
         "sender_rows": sender_rows, "error_rows": error_rows,
         "error_log_read": all(p["error_log_read"] for p in perfs),
