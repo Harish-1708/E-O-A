@@ -2,6 +2,7 @@
 Every test that matters is paired with the plain-text case beside it, because a text campaign must never use any of this."""
 import argparse
 import email
+import json
 import os
 import sys
 
@@ -18,6 +19,7 @@ from test_outreach import ACCOUNTS, FakeSheets, make_lead  # noqa: E402
 SECRET = "test-secret-1234567890"
 PAGE = "https://script.google.com/macros/s/ID/exec"
 REAL_TRACE = outreach.trace_unsubscribe_link
+REAL_STATIC, REAL_CONFIG, REAL_API = outreach.probe_static_page, outreach.probe_page_config, outreach.probe_unsubscribe_api
 REAL_PROBE = outreach.probe_unsubscribe_page                                 # the real function, kept before every test stubs it: no test may reach the internet
 
 
@@ -32,6 +34,9 @@ def no_network(monkeypatch):
     """The page check is stubbed for every test (it answers 'ok' unless a test says otherwise) and its calls are recorded."""
     calls = []
     monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20, expect=(): calls.append(url) or ul.classify_probe(200, url, "<div>This link is not valid</div>", expect=expect))
+    monkeypatch.setattr(outreach, "probe_static_page", lambda url, timeout=20: ("ok", "GitHub Pages served the unsubscribe page (HTTP 200)."))
+    monkeypatch.setattr(outreach, "probe_page_config", lambda page_url, expected_api, timeout=20: ("ok", "the page's config.js names the same Google script as UNSUBSCRIBE_URL."))
+    monkeypatch.setattr(outreach, "probe_unsubscribe_api", lambda api_url, token, origin, post=False, timeout=20, max_hops=6: ("ok", "every answer (2 steps) allows a page on " + origin + ", and the last one is the script's data."))
     monkeypatch.setattr(outreach, "trace_unsubscribe_link", lambda url, timeout=20, expect=(), frame_hosts=ul.FRAME_HOSTS, max_hops=6: [
         {"kind": "hop", "where": "script.google.com/macros/s/ID/exec", "status": 200, "state": "ok", "size": 100, "content_type": "text/html", "location": "", "cookies": [], "frame_options": ""}])
     return calls
@@ -560,7 +565,7 @@ class Google(http.server.BaseHTTPRequestHandler):
         pass
 
     def reply(self, code, body="", location=None, headers=()):
-        SEEN.append({"path": self.path, "headers": dict(self.headers)})
+        SEEN.append({"method": self.command, "path": self.path, "headers": dict(self.headers), "body": getattr(self, "request_body", "")})
         self.send_response(code)
         if location:
             self.send_header("Location", location)
@@ -570,7 +575,46 @@ class Google(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
 
+    def do_POST(self):
+        self.request_body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8")
+        star = [("Access-Control-Allow-Origin", "*")]
+        if self.path.startswith("/api/post-good"):
+            return self.reply(302, location="/api/echo-post", headers=star)
+        if self.path.startswith("/api/post-no-acao"):
+            return self.reply(302, location="/api/echo-post")
+        return self.reply(404, "")
+
     def do_GET(self):
+        star = [("Access-Control-Allow-Origin", "*")]
+        route = self.path.split("?")[0]
+        if route == "/api/good":
+            return self.reply(302, location="/api/echo-good", headers=star)
+        if route == "/api/echo-good":
+            return self.reply(200, '{"ok": true, "state": "test", "brand": "Harish"}', headers=star + [("Content-Type", "application/json")])
+        if route == "/api/echo-post":
+            return self.reply(200, '{"ok": true, "masked": "h***@gmail.com", "test": true}', headers=star)
+        if route == "/api/no-acao-redirect":
+            return self.reply(302, location="/api/echo-good")
+        if route == "/api/no-acao-final":
+            return self.reply(302, location="/api/echo-plain", headers=star)
+        if route == "/api/echo-plain":
+            return self.reply(200, '{"ok": true, "state": "test"}')
+        if route == "/api/html":
+            return self.reply(200, "<!doctype html><html>the page</html>", headers=star)
+        if route == "/api/invalid":
+            return self.reply(200, '{"ok": false, "state": "invalid"}', headers=star)
+        if route == "/api/wrong-state":
+            return self.reply(200, '{"ok": true, "state": "valid"}', headers=star)
+        if route == "/page/good/unsubscribe.html":
+            return self.reply(200, "<!doctype html><!-- unsubscribe-page-v1 --><html></html>")
+        if route == "/page/other/unsubscribe.html":
+            return self.reply(200, "<html>some other page</html>")
+        if route == "/page/good/config.js":
+            return self.reply(200, 'window.UNSUBSCRIBE_API = "https://script.google.com/macros/s/AKfycbyID/exec";')
+        if route == "/page/other/config.js":
+            return self.reply(200, 'window.UNSUBSCRIBE_API = "https://script.google.com/macros/s/OTHER/exec";')
+        if route == "/page/empty/config.js":
+            return self.reply(200, "var nothing = 1;")
         routes = {"/valid": (200, "<html><div>This link is not valid</div></html>"), "/plain": (200, "<html>hello</html>"),
                   "/error-page": (200, "<html>Sorry, unable to open the file at present. Please check the address and try again.</html>"), "/missing": (404, "<html>Not found</html>"),
                   "/forbidden": (403, "<html>no</html>"), "/server-error": (500, "<html>oops</html>"), "/accounts.google.com/ServiceLogin": (200, "<html>Sign in</html>")}
@@ -1013,3 +1057,200 @@ def test_the_test_address_with_an_account_position_still_turns_the_page_off(tmp_
     monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
     out, code = run_command(tmp_path, monkeypatch, capsys)
     assert code == 0 and "Unsubscribe page: OFF. UNSUBSCRIBE_URL ends in /dev" in out and "unsubscribe_url" not in _Sent.calls[0]
+
+
+
+# ================================================================ the static page on GitHub Pages: links, emails and checks
+
+STATIC_PAGE = "https://harish-1708.github.io/E-O-A/unsubscribe.html"
+GOOGLE = "https://script.google.com/macros/s/AKfycbyID/exec"
+
+
+@pytest.fixture
+def pages_on(monkeypatch):
+    monkeypatch.setenv("UNSUBSCRIBE_URL", GOOGLE)
+    monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
+    monkeypatch.setenv("UNSUBSCRIBE_PAGE_URL", STATIC_PAGE)
+
+
+def test_with_a_page_address_the_footer_link_goes_to_github_pages_and_the_header_link_stays_on_google(tmp_path, pages_on):
+    header, footer = outreach.unsubscribe_links(html_cfg(tmp_path), make_lead(LeadID="L1", Email="a@x.com"))
+    assert header.startswith(GOOGLE + "?t=") and footer.startswith(STATIC_PAGE + "?t=") and header.split("?t=")[1] == footer.split("?t=")[1]
+    assert ul.verify_token(SECRET, footer.split("?t=")[1])["e"] == "a@x.com"
+
+
+def test_without_a_page_address_both_links_are_the_google_page_exactly_as_before(tmp_path, page_on):
+    header, footer = outreach.unsubscribe_links(html_cfg(tmp_path), make_lead(LeadID="L1", Email="a@x.com"))
+    assert header == footer and header.startswith(PAGE + "?t=")
+
+
+def test_the_link_for_the_mail_apps_header_is_always_the_google_address(tmp_path, pages_on):
+    assert outreach.unsubscribe_page_link(html_cfg(tmp_path), make_lead(LeadID="L1", Email="a@x.com")).startswith(GOOGLE + "?t=")
+
+
+def test_an_unusable_page_address_means_the_footer_stays_on_the_google_page(tmp_path, monkeypatch, page_on):
+    monkeypatch.setenv("UNSUBSCRIBE_PAGE_URL", "https://script.google.com/macros/s/X/exec")
+    header, footer = outreach.unsubscribe_links(html_cfg(tmp_path), make_lead(LeadID="L1", Email="a@x.com"))
+    assert header == footer and header.startswith(PAGE + "?t=")
+
+
+def test_the_design_gets_the_github_pages_link_in_its_footer_and_plain_text(tmp_path, pages_on):
+    out = outreach.render_email_html(str(tmp_path), "intro", "A", make_lead(FirstName="Ann", LeadID="L1", Email="a@x.com"), html_cfg(tmp_path))
+    assert out["unsubscribe_footer_url"].startswith(STATIC_PAGE + "?t=") and out["unsubscribe_url"].startswith(GOOGLE + "?t=")
+    assert f'href="{out["unsubscribe_footer_url"]}"' in out["html"] and out["unsubscribe_url"] not in out["html"] and hc.UNSUBSCRIBE_TOKEN not in out["html"]
+    assert f"Unsubscribe ({out['unsubscribe_footer_url']})" in hc.html_to_text(out["html"])
+
+
+def test_a_real_email_has_the_pages_link_in_the_footer_and_the_google_link_in_the_one_tap_header(tmp_path, monkeypatch, pages_on):
+    send(html_cfg(tmp_path), ListSheets(leads_of("a@x.com")), monkeypatch)
+    call = _Sent.calls[0]
+    assert call["unsubscribe_url"].startswith(GOOGLE + "?t=") and f'href="{STATIC_PAGE}?t=' in call["html_body"] and f"({STATIC_PAGE}?t=" in call["body"]
+    msg, _ = outreach._build_outbound_message("sales@kelson.agency", "a@x.com", "S", call["body"], html_body=call["html_body"], unsubscribe_url=call["unsubscribe_url"])
+    assert msg["List-Unsubscribe"].startswith(f"<{GOOGLE}?t=") and msg["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click" and STATIC_PAGE not in msg["List-Unsubscribe"]
+
+
+def test_both_links_in_one_email_name_the_same_person_brand_and_lead(tmp_path, monkeypatch, pages_on):
+    send(html_cfg(tmp_path), ListSheets(leads_of("a@x.com")), monkeypatch)
+    call = _Sent.calls[0]
+    footer_token = call["html_body"].split(STATIC_PAGE + "?t=")[1].split('"')[0]
+    assert footer_token == call["unsubscribe_url"].split("?t=")[1] and ul.verify_token(SECRET, footer_token)["l"] == "L0"
+
+
+def test_a_plain_text_campaign_gets_no_link_of_any_kind_even_with_the_page_on(tmp_path, monkeypatch, pages_on):
+    assert outreach.unsubscribe_links(text_cfg(tmp_path), make_lead(LeadID="L1", Email="a@x.com")) is None
+    send(text_cfg(tmp_path), ListSheets(leads_of("a@x.com")), monkeypatch)
+    assert all(key not in _Sent.calls[0] for key in ("unsubscribe_url", "html_body"))
+
+
+def test_the_test_email_reports_both_links_and_that_the_footer_link_is_in_every_copy(tmp_path, monkeypatch, pages_on):
+    _capture_smtp(monkeypatch)
+    sent = outreach.send_test_email(_test_cfg(tmp_path, "html"), ACCOUNTS, "intro", "A", "team@kelson.agency")
+    assert sent["unsubscribe_url"].startswith(GOOGLE + "?t=") and sent["unsubscribe_footer_url"].startswith(STATIC_PAGE + "?t=") and sent["link_in_every_copy"] is True
+    assert sent["unsubscribe_footer_url"] in _Sent.calls[0]["body"] and ul.verify_token(SECRET, ul.token_from_url(sent["unsubscribe_footer_url"]))["t"] == 1
+
+
+# ---------------------------------------------------------------- the probes, against a local server that imitates Google's redirects and permission headers
+
+TOKEN = "abc.def_-9"
+
+
+@pytest.mark.parametrize("path, state", [("/page/good/unsubscribe.html", "ok"), ("/page/other/unsubscribe.html", "blocked"), ("/page/missing/unsubscribe.html", "blocked")])
+def test_the_real_static_page_check_reports_what_github_pages_answers(google, path, state):
+    assert REAL_STATIC(google + path)[0] == state
+
+
+def test_the_real_static_page_check_sends_no_cookie_and_an_unreachable_page_is_unknown(google):
+    REAL_STATIC(google + "/page/good/unsubscribe.html")
+    assert "cookie" not in {name.lower() for name in SEEN[0]["headers"]} and REAL_STATIC("http://127.0.0.1:1/x")[0] == "unknown"
+
+
+@pytest.mark.parametrize("folder, state, words", [("good", "ok", "same Google script"), ("other", "blocked", "points at"), ("empty", "blocked", "does not set window.UNSUBSCRIBE_API"), ("missing", "blocked", "HTTP 404")])
+def test_the_real_config_check_compares_the_pages_config_with_the_secret(google, folder, state, words):
+    got_state, message = REAL_CONFIG(f"{google}/page/{folder}/unsubscribe.html", "https://script.google.com/macros/s/AKfycbyID/exec")
+    assert got_state == state and words in message
+
+
+def test_an_unreachable_config_is_unknown(google):
+    assert REAL_CONFIG("http://127.0.0.1:1/unsubscribe.html", GOOGLE)[0] == "unknown"
+
+
+def test_the_real_data_request_follows_google_style_redirects_and_checks_permission_on_every_step(google):
+    state, message = REAL_API(google + "/api/good", TOKEN, "https://harish.github.io")
+    assert state == "ok" and "every answer (2 steps) allows a page on https://harish.github.io" in message
+    assert [(hit["method"], hit["path"]) for hit in SEEN] == [("GET", f"/api/good?api=info&t={TOKEN}"), ("GET", "/api/echo-good")]
+    assert all(hit["headers"]["Origin"] == "https://harish.github.io" and "Cookie" not in hit["headers"] and "cookie" not in hit["headers"] for hit in SEEN)
+    assert TOKEN not in message
+
+
+@pytest.mark.parametrize("path, words", [("/api/no-acao-redirect", "step 1 "), ("/api/no-acao-final", "step 2 "), ("/api/html", "web page instead of data"), ("/api/invalid", "did not accept the link"),
+                                         ("/api/wrong-state", "state 'valid' where 'test' was expected")])
+def test_the_real_data_request_blocks_with_the_reason_when_google_would_refuse_the_page(google, path, words):
+    state, message = REAL_API(google + path, TOKEN, "https://harish.github.io")
+    assert state == "blocked" and words in message
+
+
+def test_the_real_confirm_request_is_a_plain_text_post_then_a_get_after_the_redirect_with_no_cookies(google):
+    state, message = REAL_API(google + "/api/post-good", TOKEN, "https://harish.github.io", post=True)
+    assert state == "ok"
+    first, second = SEEN[0], SEEN[1]
+    assert first["method"] == "POST" and first["headers"]["Content-Type"].startswith("text/plain") and json.loads(first["body"]) == {"api": "confirm", "t": TOKEN, "reason": "", "details": ""}
+    assert second["method"] == "GET" and second["body"] == "" and "Content-Type" not in second["headers"] and all("Cookie" not in hit["headers"] for hit in SEEN)
+
+
+def test_a_confirm_redirect_without_permission_is_blocked_and_an_unreachable_script_is_unknown(google):
+    assert REAL_API(google + "/api/post-no-acao", TOKEN, "https://harish.github.io", post=True)[0] == "blocked"
+    assert REAL_API("http://127.0.0.1:1/exec", TOKEN, "https://harish.github.io")[0] == "unknown"
+
+
+def test_the_redirect_limit_stops_a_loop_in_the_data_request(google):
+    state, message = REAL_API(google + "/loop-not-an-api", TOKEN, "https://harish.github.io", max_hops=3)
+    assert state in ("blocked", "unknown")
+
+
+# ---------------------------------------------------------------- the printed checks
+
+
+def with_probe_results(monkeypatch, static=("ok", "GitHub Pages served the unsubscribe page (HTTP 200)."), config=("ok", "the page's config.js names the same Google script as UNSUBSCRIBE_URL."),
+                       get=("ok", "every answer (2 steps) allows a page on https://harish-1708.github.io, and the last one is the script's data."), post=("ok", "every answer (2 steps) allows a page on https://harish-1708.github.io, and the last one is the script's data.")):
+    calls = {"static": [], "config": [], "api": []}
+    monkeypatch.setattr(outreach, "probe_static_page", lambda url, timeout=20: calls["static"].append(url) or static)
+    monkeypatch.setattr(outreach, "probe_page_config", lambda page_url, expected_api, timeout=20: calls["config"].append((page_url, expected_api)) or config)
+    monkeypatch.setattr(outreach, "probe_unsubscribe_api", lambda api_url, token, origin, post_flag=False, timeout=20, max_hops=6, post=False: calls["api"].append((api_url, token, origin, post)) or (post_result if post else get))
+    post_result = post
+    return calls
+
+
+def test_the_run_prints_the_footer_link_and_the_four_static_page_checks_and_stays_green(tmp_path, monkeypatch, capsys, pages_on):
+    with_probe_results(monkeypatch)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    footer = _Sent.calls[0]["html_body"].split('href="')[1].split('"')[0]
+    assert code == 0 and f"Footer link (what recipients click, on GitHub Pages): {footer}" in out and footer.startswith(STATIC_PAGE + "?t=")
+    for label in ("A, the page is being served: OK.", "B, its config.js names the same Google script: OK.", "C, the script answers the page's data request (GET) and allows a page on https://harish-1708.github.io: OK.",
+                  "D, the script accepts the page's confirm request (POST, with this TEST link: records nothing): OK."):
+        assert label in out, label
+    assert "PAGE VERDICT: everything the page needs works from here" in out and "NOT TESTED HERE: a real browser" in out and "PROBLEM" not in out
+
+
+def test_the_checks_are_made_on_the_footer_link_the_config_the_google_address_and_the_pages_origin(tmp_path, monkeypatch, capsys, pages_on):
+    calls = with_probe_results(monkeypatch)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    footer = _Sent.calls[0]["html_body"].split('href="')[1].split('"')[0]
+    token = ul.token_from_url(footer)
+    assert calls["static"] == [footer] and calls["config"] == [(STATIC_PAGE, GOOGLE)]
+    assert calls["api"] == [(GOOGLE, token, "https://harish-1708.github.io", False), (GOOGLE, token, "https://harish-1708.github.io", True)] and ul.verify_token(SECRET, token)["t"] == 1
+
+
+@pytest.mark.parametrize("which, label", [("static", "A, the page is being served: BLOCKED."), ("config", "B, its config.js names the same Google script: BLOCKED."),
+                                          ("get", "(GET) and allows a page on https://harish-1708.github.io: BLOCKED."), ("post", "(POST, with this TEST link: records nothing): BLOCKED.")])
+def test_any_blocked_static_page_check_fails_the_run_after_the_email_was_sent_and_says_which(tmp_path, monkeypatch, capsys, pages_on, which, label):
+    with_probe_results(monkeypatch, **{which: ("blocked", "the reason in plain words")})
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 1 and label in out and "the reason in plain words" in out and "PAGE VERDICT: at least one thing the page needs is not working" in out and "PROBLEM" in out and len(_Sent.calls) == 1
+
+
+def test_a_check_that_could_not_be_made_is_not_conclusive_and_does_not_fail_the_run(tmp_path, monkeypatch, capsys, pages_on):
+    with_probe_results(monkeypatch, get=("unknown", "step 1 could not be made (timed out)."))
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "PAGE VERDICT: not conclusive" in out and "UNKNOWN. step 1 could not be made" in out and "PROBLEM" not in out
+
+
+def test_without_a_page_address_the_run_says_why_one_is_needed_and_makes_none_of_the_page_checks(tmp_path, monkeypatch, capsys, page_on):
+    calls = with_probe_results(monkeypatch)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "Note: UNSUBSCRIBE_PAGE_URL is not set, so recipients open the Google page itself" in out and "/u/N/" in out and "PAGE VERDICT" not in out and "Static page checks" not in out
+    assert calls == {"static": [], "config": [], "api": []} and "OFF" not in out
+
+
+def test_an_unusable_page_address_is_reported_and_the_google_page_is_used(tmp_path, monkeypatch, capsys, page_on):
+    monkeypatch.setenv("UNSUBSCRIBE_PAGE_URL", "http://not-secure.example/u.html")
+    calls = with_probe_results(monkeypatch)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "WARNING:" in out and "UNSUBSCRIBE_PAGE_URL must start with https://" in out and "Google page instead" in out and calls["api"] == []
+
+
+def test_a_plain_text_test_run_and_a_page_that_is_off_never_make_the_page_checks(tmp_path, monkeypatch, capsys, pages_on):
+    calls = with_probe_results(monkeypatch)
+    run_command(tmp_path, monkeypatch, capsys, fmt="text")
+    monkeypatch.delenv("UNSUBSCRIBE_URL")
+    run_command(tmp_path, monkeypatch, capsys)
+    assert calls == {"static": [], "config": [], "api": []}
