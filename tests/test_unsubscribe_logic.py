@@ -471,11 +471,18 @@ def test_a_bare_domain_gets_its_slash_so_the_link_is_clean():
     assert with_page("https://unsubscribe.kelson.agency/x")[0].page == "https://unsubscribe.kelson.agency/x"
 
 
-@pytest.mark.parametrize("page", [PAGES, "https://someone.github.io/", "https://SOMEONE.GitHub.io/repo/unsubscribe.html"])
-def test_a_github_io_address_still_works_but_the_person_is_told_it_shows_their_github_name(page):
+@pytest.mark.parametrize("page", [PAGES, "https://someone.github.io/repo/", "https://SOMEONE.GitHub.io/repo/unsubscribe.html"])
+def test_a_github_io_address_with_a_repository_in_its_path_still_works_but_is_warned_about_it(page):
     config, note = with_page(page)
-    assert config.page == page and "is a github.io address" in note and "read your GitHub name in the link" in note and "spam filters" in note
-    assert "CNAME record" in note and "Settings > Pages > Custom domain" in note and "Enforce HTTPS" in note and "https://unsubscribe.kelson.agency/" in note
+    assert config.page == page and "repository name in its path" in note and "your GitHub account name and your repository name" in note
+    assert "neutral GitHub organisation" in note and "https://<organisation>.github.io/" in note and "or use your own domain" in note and "reminder" not in note
+
+
+@pytest.mark.parametrize("page, host", [("https://kelson-mail.github.io/", "kelson-mail.github.io"), ("https://someone.github.io", "someone.github.io"), ("https://SOMEONE.github.io/", "someone.github.io")])
+def test_a_github_io_address_at_the_root_gets_only_a_reminder_to_keep_the_name_neutral(page, host):
+    config, note = with_page(page)
+    assert config.page == page.rstrip("/") + "/" and f"recipients can read its name ({host}) in every link" in note and "neutral one (an organisation named for the agency)" in note
+    assert "not if it is your personal GitHub name" in note and "repository" not in note
 
 
 def test_a_github_io_lookalike_on_another_domain_is_not_warned_about():
@@ -484,7 +491,7 @@ def test_a_github_io_lookalike_on_another_domain_is_not_warned_about():
 
 def test_an_unusable_github_io_address_gets_the_reason_but_not_the_domain_warning():
     config, note = with_page("http://someone.github.io/")
-    assert config.page == "" and "must start with https://" in note and "is a github.io address" not in note
+    assert config.page == "" and "must start with https://" in note and "github.io" not in note.replace("someone.github.io", "")
 
 
 @pytest.mark.parametrize("page, words", [("https://script.google.com/macros/s/X/exec", "is a Google address"), ("http://harish.github.io/u.html", "must start with https://"), ("harish.github.io/u.html", "must start with https://"),
