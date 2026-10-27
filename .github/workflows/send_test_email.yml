@@ -48,6 +48,7 @@ jobs:
           EMAIL_ACCOUNT_SLOT_10: ${{ secrets.EMAIL_ACCOUNT_SLOT_10 }}
           UNSUBSCRIBE_URL: ${{ secrets.UNSUBSCRIBE_URL }}
           UNSUBSCRIBE_SECRET: ${{ secrets.UNSUBSCRIBE_SECRET }}
+          UNSUBSCRIBE_PAGE_URL: ${{ secrets.UNSUBSCRIBE_PAGE_URL }}
         run: |
           set -o pipefail
           python outreach.py send-test --campaign "${{ github.event.inputs.campaign }}" \
