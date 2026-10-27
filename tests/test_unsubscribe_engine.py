@@ -3,6 +3,7 @@ Every test that matters is paired with the plain-text case beside it, because a 
 import argparse
 import email
 import json
+import re
 import os
 import sys
 
@@ -102,7 +103,7 @@ def test_with_the_page_set_up_each_lead_gets_its_own_signed_link_in_the_footer(t
     out = outreach.render_email_html(str(tmp_path), "intro", "A", make_lead(FirstName="Ann", LeadID="L-9", Email="ann@x.com"), cfg)
     assert out["unsubscribe_url"].startswith(PAGE + "?t=") and out["unsubscribe_url"] in out["html"] and hc.UNSUBSCRIBE_TOKEN not in out["html"]
     record = ul.verify_token(SECRET, out["unsubscribe_url"].split("?t=")[1])
-    assert record == {"v": 1, "c": "Spring_Launch", "l": "L-9", "e": "ann@x.com", "b": "Kelson Agency", "k": "kelsonagency", "a": "12 Example Street, New York, NY"}
+    assert record == {"v": 1, "c": ul.campaign_code(SECRET, "Spring_Launch"), "l": "L-9", "e": "ann@x.com", "b": "Kelson Agency", "k": "kelsonagency", "a": "12 Example Street, New York, NY"}
 
 
 def test_two_leads_get_two_different_links(tmp_path, page_on):
@@ -1286,3 +1287,207 @@ def test_a_neutral_organisation_address_on_github_io_works_with_only_a_reminder_
     assert code == 0 and footer.startswith("https://kelson-mail.github.io/?t=") and "recipients can read its name (kelson-mail.github.io)" in out and "repository" not in out.split("WARNING:")[1].split("\n")[0]
     msg, _ = outreach._build_outbound_message("sales@kelson.agency", "a@x.com", "S", call["body"], html_body=call["html_body"], unsubscribe_url=call["unsubscribe_url"])
     assert "harish-1708" not in msg.as_string().lower() and "e-o-a" not in msg.as_string().lower()
+
+
+
+# ================================================================ the link carries a short CODE, not the campaign's name
+
+def decoded(link):
+    return json.loads(ul._unb64(ul.token_from_url(link).split(".")[0]).decode("utf-8"))
+
+
+def test_the_link_carries_the_campaigns_code_and_nowhere_in_it_is_the_name(tmp_path, pages_on):
+    header, footer = outreach.unsubscribe_links(html_cfg(tmp_path, name="Kelson_Creators_Licensing_17SEP"), make_lead(LeadID="L1", Email="a@x.com"))
+    record = decoded(footer)
+    assert record["c"] == ul.campaign_code(SECRET, "Kelson_Creators_Licensing_17SEP") and re.match(ul.CAMPAIGN_CODE_PATTERN, record["c"])
+    for text in (header, footer, json.dumps(record), ul._unb64(ul.token_from_url(footer).split(".")[0]).decode()):
+        assert "kelson_creators" not in text.lower() and "licensing" not in text.lower() and "17sep" not in text.lower()
+    assert ul.verify_token(SECRET, ul.token_from_url(footer)) == record and record["l"] == "L1" and record["e"] == "a@x.com"
+
+
+def test_two_campaigns_get_two_different_codes_and_the_same_campaign_always_the_same(tmp_path, page_on):
+    def code(name, lead="L1"):
+        return decoded(outreach.unsubscribe_links(html_cfg(tmp_path, name=name), make_lead(LeadID=lead, Email="a@x.com"))[0])["c"]
+    assert code("Spring_Launch") != code("Autumn_Launch") and code("Spring_Launch") == code("Spring_Launch", lead="L2")
+
+
+def test_no_part_of_a_real_email_names_the_campaign(tmp_path, monkeypatch, page_on):
+    send(html_cfg(tmp_path, name="Kelson_Creators_Licensing_17SEP"), ListSheets(leads_of("a@x.com")), monkeypatch)
+    call = _Sent.calls[0]
+    msg, _ = outreach._build_outbound_message("sales@kelson.agency", "a@x.com", "S", call["body"], html_body=call["html_body"], unsubscribe_url=call["unsubscribe_url"])
+    everything = (msg.as_string() + call["html_body"] + call["body"]).lower()
+    assert "kelson_creators" not in everything and "17sep" not in everything and decoded(call["unsubscribe_url"])["c"] == ul.campaign_code(SECRET, "Kelson_Creators_Licensing_17SEP")
+
+
+def test_a_campaign_with_no_name_gets_no_code_not_a_code_of_nothing(tmp_path, page_on):
+    cfg = html_cfg(tmp_path)
+    cfg.pop("_campaign_name")
+    assert decoded(outreach.unsubscribe_links(cfg, make_lead(LeadID="L1", Email="a@x.com"))[0])["c"] == ""
+
+
+def test_a_link_made_before_codes_existed_still_opens_and_shows_its_name():
+    old = ul.make_token(SECRET, campaign="Spring_Launch", lead_id="L1", email="a@x.com", brand="B", key="b")
+    assert ul.verify_token(SECRET, old)["c"] == "Spring_Launch" and not re.match(ul.CAMPAIGN_CODE_PATTERN, "Spring_Launch")
+
+
+# ---------------------------------------------------------------- the code list is published before a campaign sends
+
+class CodeSheets(ListSheets):
+    def __init__(self, leads, fail=None, **kw):
+        super().__init__(leads, **kw)
+        self.published, self.publish_fail, self.sent_when_published = [], fail, []
+
+    def ensure_campaign_codes(self, wanted):
+        self.sent_when_published.append(len(_Sent.calls))
+        if self.publish_fail:
+            raise self.publish_fail
+        self.published.append(dict(wanted))
+        return len(wanted)
+
+
+def test_the_code_is_listed_with_its_name_before_the_first_email_goes_out(tmp_path, monkeypatch, page_on):
+    sheets = CodeSheets(leads_of("a@x.com", "b@x.com"))
+    send(html_cfg(tmp_path, name="Spring_Launch"), sheets, monkeypatch)
+    assert sheets.published == [{ul.campaign_code(SECRET, "Spring_Launch"): "Spring_Launch"}] and sheets.sent_when_published == [0] and len(_Sent.calls) == 2
+
+
+def test_if_the_code_cannot_be_listed_the_emails_still_go_out_and_the_person_is_told(tmp_path, monkeypatch, capsys, page_on):
+    sheets = CodeSheets(leads_of("a@x.com"), fail=RuntimeError("quota"))
+    send(html_cfg(tmp_path, name="Spring_Launch"), sheets, monkeypatch)
+    out = capsys.readouterr().out
+    assert len(_Sent.calls) == 1 and "WARNING: could not list the campaign code" in out and "(quota)" in out and "Campaign column" in out and "Nobody is affected." in out
+
+
+def test_the_code_is_not_listed_when_it_would_not_be_used(tmp_path, monkeypatch, page_on):
+    sheets = CodeSheets(leads_of("a@x.com"))
+    send(text_cfg(tmp_path), sheets, monkeypatch)
+    monkeypatch.delenv("UNSUBSCRIBE_URL")
+    send(html_cfg(tmp_path), sheets, monkeypatch)
+    nameless = html_cfg(tmp_path)
+    nameless.pop("_campaign_name")
+    monkeypatch.setenv("UNSUBSCRIBE_URL", PAGE)
+    send(nameless, sheets, monkeypatch)
+    assert sheets.published == []
+
+
+def test_a_sheet_without_the_listing_feature_is_simply_skipped(tmp_path, monkeypatch, page_on):
+    send(html_cfg(tmp_path), ListSheets(leads_of("a@x.com")), monkeypatch)
+    assert len(_Sent.calls) == 1
+
+
+def test_the_code_list_is_published_on_every_run_with_the_same_content(tmp_path, monkeypatch, page_on):
+    sheets = CodeSheets(leads_of("a@x.com"))
+    cfg = html_cfg(tmp_path, name="Spring_Launch")
+    send(cfg, sheets, monkeypatch)
+    send(cfg, sheets, monkeypatch)
+    assert len(sheets.published) == 2 and sheets.published[0] == sheets.published[1]
+
+
+# ---------------------------------------------------------------- the real connector writes the 'Campaign codes' tab
+
+class CodesTab:
+    def __init__(self, records=()):
+        self.records, self.header = [dict(r) for r in records], None
+
+    def get_all_records(self):
+        return [dict(r) for r in self.records]
+
+    def append_row(self, row, *args, **kwargs):
+        if self.header is None and not self.records and row == ul.CODES_COLUMNS:
+            self.header = list(row)
+            return
+        self.records.append(dict(zip(ul.CODES_COLUMNS, row)))
+
+
+class CodesSpreadsheet:
+    def __init__(self, existing=None, add_fails=False):
+        self.tabs, self.added, self.add_fails = dict(existing or {}), [], add_fails
+
+    def add_worksheet(self, title, rows, cols):
+        self.added.append((title, rows, cols))
+        if self.add_fails:
+            raise RuntimeError("a sheet with that name already exists")
+        self.tabs[title] = CodesTab()
+        return self.tabs[title]
+
+    def worksheet(self, title):
+        return self.tabs[title]
+
+
+def codes_connector(spreadsheet, known=None):
+    shell = object.__new__(outreach.SheetsConnector)
+    shell._known_tabs, shell._spreadsheet = dict(known or {}), spreadsheet
+    return shell
+
+
+def test_the_first_time_the_tab_is_made_with_its_header_and_the_row(page_on):
+    spreadsheet = CodesSpreadsheet()
+    shell = codes_connector(spreadsheet)
+    assert shell.ensure_campaign_codes({"~abc": "Spring_Launch"}) == 1
+    tab = spreadsheet.tabs[ul.CODES_TAB]
+    assert tab.header == ul.CODES_COLUMNS and tab.records == [{"Code": "~abc", "Campaign": "Spring_Launch"}] and spreadsheet.added[0][0] == "Campaign codes" and shell._known_tabs[ul.CODES_TAB] is tab
+
+
+def test_a_code_already_listed_is_not_added_again_and_other_rows_are_left_alone():
+    tab = CodesTab([{"Code": "~abc", "Campaign": "Spring_Launch"}, {"Code": "~zzz", "Campaign": "Other"}])
+    shell = codes_connector(CodesSpreadsheet(), {ul.CODES_TAB: tab})
+    assert shell.ensure_campaign_codes({"~abc": "Spring_Launch"}) == 0 and len(tab.records) == 2
+    assert shell.ensure_campaign_codes({"~abc": "Spring_Launch", "~new": "Autumn"}) == 1 and tab.records[-1] == {"Code": "~new", "Campaign": "Autumn"} and tab.records[1] == {"Code": "~zzz", "Campaign": "Other"}
+
+
+def test_a_code_listed_against_a_different_name_is_reported_and_never_overwritten(capsys):
+    tab = CodesTab([{"Code": "~abc", "Campaign": "Spring_Launch"}])
+    assert codes_connector(CodesSpreadsheet(), {ul.CODES_TAB: tab}).ensure_campaign_codes({"~abc": "Someone_Else"}) == 0
+    assert tab.records == [{"Code": "~abc", "Campaign": "Spring_Launch"}] and "already listed" in capsys.readouterr().out
+
+
+def test_a_tab_made_by_another_run_a_moment_ago_is_used_instead_of_failing():
+    existing = CodesTab([{"Code": "~abc", "Campaign": "Spring_Launch"}])
+    spreadsheet = CodesSpreadsheet({ul.CODES_TAB: existing}, add_fails=True)
+    shell = codes_connector(spreadsheet)
+    assert shell.ensure_campaign_codes({"~abc": "Spring_Launch", "~new": "Autumn"}) == 1 and shell._known_tabs[ul.CODES_TAB] is existing and existing.records[-1]["Code"] == "~new"
+
+
+def test_a_failure_reading_the_tab_is_not_hidden_inside_the_connector():
+    class Broken:
+        def get_all_records(self):
+            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"):
+        codes_connector(CodesSpreadsheet(), {ul.CODES_TAB: Broken()}).ensure_campaign_codes({"~abc": "x"})
+
+
+# ---------------------------------------------------------------- the test run says whether the name is hidden
+
+def test_the_test_run_says_the_campaign_name_is_hidden_and_what_else_is_still_readable(tmp_path, monkeypatch, capsys, page_on):
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    line = next(l for l in out.splitlines() if l.startswith("Campaign name in the link:"))
+    assert code == 0 and "HIDDEN, the link carries only the code ~" in line and "the recipient's own address, the brand, the lead ID" in line and "only the campaign name is replaced" in line
+
+
+def test_the_test_run_says_not_hidden_when_the_link_does_not_carry_the_code(tmp_path, monkeypatch, capsys, page_on):
+    real = outreach.send_test_email
+
+    def fake(*args, **kwargs):
+        sent = real(*args, **kwargs)
+        token = ul.make_token(SECRET, campaign="Spring_Launch", lead_id="TEST", email="t@x.com", brand="B", key="b", test=True)
+        return {**sent, "unsubscribe_url": ul.page_url(PAGE, token)}
+    monkeypatch.setattr(outreach, "send_test_email", fake)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert "Campaign name in the link: NOT hidden." in out
+
+
+def test_publishing_the_code_is_decided_by_the_function_itself_not_only_by_its_caller(tmp_path, page_on, monkeypatch):
+    sheets = CodeSheets(leads_of("a@x.com"))
+    outreach.publish_campaign_code(text_cfg(tmp_path), sheets)
+    nameless = html_cfg(tmp_path)
+    nameless.pop("_campaign_name")
+    outreach.publish_campaign_code(nameless, sheets)
+    blank = html_cfg(tmp_path, name="   ")
+    outreach.publish_campaign_code(blank, sheets)
+    assert sheets.published == []
+    monkeypatch.delenv("UNSUBSCRIBE_SECRET")
+    outreach.publish_campaign_code(html_cfg(tmp_path), sheets)
+    assert sheets.published == []
+    monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
+    outreach.publish_campaign_code(html_cfg(tmp_path, name="Spring_Launch"), sheets)
+    assert sheets.published == [{ul.campaign_code(SECRET, "Spring_Launch"): "Spring_Launch"}]
