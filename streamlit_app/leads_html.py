@@ -23,7 +23,7 @@ LEADS_CSS = """
 .ld-pill-good { color: #15803d; border-color: #bbe3c9; background: #f0fbf4; } .ld-pill-active { color: #1d4ed8; border-color: #c7d7fb; background: #f3f7ff; }
 .ld-pill-bad { color: #b91c1c; border-color: #f3c4c4; background: #fff5f5; } .ld-pill-waiting { color: #b45309; border-color: #f3d9a8; background: #fffaf0; }
 .ld-pill-neutral { color: #4b5563; background: #f9fafb; }
-.ld-dots { display: flex; flex-wrap: wrap; gap: 5px; row-gap: 4px; align-items: center; } .ld-dot { width: 9px; height: 9px; border-radius: 50%; background: #e5e7eb; display: inline-block; }
+.ld-dots { display: flex; flex-wrap: wrap; gap: 3px; row-gap: 4px; align-items: center; }       /* 11 dots (the longest sequence) need 129px */ .ld-dot { width: 9px; height: 9px; border-radius: 50%; background: #e5e7eb; display: inline-block; }
 .ld-dot-sent { background: #2563eb; } .ld-dot-replied { background: #16a34a; }
 .ld-empty { padding: 28px 16px; text-align: center; color: #6b7280; font-size: 14px; }
 .ld-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px 20px; }
