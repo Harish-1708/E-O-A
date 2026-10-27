@@ -372,7 +372,7 @@ def test_the_table_has_the_seven_columns_one_row_per_campaign_and_a_total_row():
 
 def test_a_row_shows_its_figures_with_a_note_or_a_bar_where_a_comparison_helps():
     markup = P.glance_table_html([_grow()], _GTOTAL)
-    assert "39 <span class=\"pg-of\">of 39</span>" in markup and "233 delivered (est.)" in markup and "15 completed the sequence" in markup and "none pending" in markup
+    assert "39 <span class=\"pg-of\">of 39</span>" in markup and "233 delivered (est.)" in markup and "15 reached the last email" in markup and "none pending" in markup
     assert re.findall(r'style="width:(\d+)%"', markup) == ["100", "51", "39"]                      # contacted of leads, reply rate, sequence completion, in that order
 
 
