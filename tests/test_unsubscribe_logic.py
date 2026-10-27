@@ -3,6 +3,7 @@ Python that makes a link and the Google script that checks it are proved to agre
 import base64
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -595,3 +596,54 @@ def test_the_pages_config_must_name_the_same_google_script_as_the_secret(found, 
 
 def test_a_config_that_could_not_be_read_is_unknown():
     assert ul.classify_config("", CANONICAL, None, error="timed out")[0] == "unknown"
+
+
+
+# ================================================================ a short code instead of a campaign's name
+
+def test_a_code_is_a_tilde_and_ten_url_safe_characters():
+    code = ul.campaign_code(SECRET, "Spring_Launch")
+    assert re.match(ul.CAMPAIGN_CODE_PATTERN, code) and len(code) == 11 and code[0] == "~"
+
+
+def test_the_same_campaign_always_gets_the_same_code_whatever_surrounds_the_name():
+    assert ul.campaign_code(SECRET, "Spring_Launch") == ul.campaign_code(SECRET, "Spring_Launch") == ul.campaign_code(SECRET, "  Spring_Launch \n")
+
+
+def test_a_different_campaign_or_a_different_secret_gives_a_different_code():
+    assert ul.campaign_code(SECRET, "Spring_Launch") != ul.campaign_code(SECRET, "Spring_launch") != ul.campaign_code(SECRET, "Autumn_Launch")
+    assert ul.campaign_code(SECRET, "Spring_Launch") != ul.campaign_code("another-secret-of-20-chars!", "Spring_Launch")
+
+
+def test_a_code_never_contains_any_part_of_the_name_it_stands_for():
+    for name in ("Spring_Launch", "Kelson_Creators_Licensing_17SEP", "Harish_Testing", "A", "DubeRobe_Q4"):
+        code = ul.campaign_code(SECRET, name).lower()
+        assert not any(name.lower()[i:i + 3] in code for i in range(len(name) - 2)) or len(name) < 3
+
+
+def test_no_two_of_two_thousand_campaign_names_share_a_code():
+    codes = {ul.campaign_code(SECRET, f"Campaign_{number}") for number in range(2000)}
+    assert len(codes) == 2000
+
+
+def test_a_code_looks_nothing_like_a_real_campaign_name_so_the_two_are_never_confused():
+    assert not re.match(ul.CAMPAIGN_CODE_PATTERN, "Spring_Launch") and not re.match(ul.CAMPAIGN_CODE_PATTERN, "~Spring_Launch") and not re.match(r"^[A-Za-z0-9_]+$", ul.campaign_code(SECRET, "x"))
+
+
+def test_a_link_carrying_a_code_is_read_exactly_like_one_carrying_a_name():
+    token = ul.make_token(SECRET, campaign=ul.campaign_code(SECRET, "Spring_Launch"), lead_id="L1", email="a@x.com", brand="B", key="b")
+    assert ul.verify_token(SECRET, token)["c"] == ul.campaign_code(SECRET, "Spring_Launch")
+
+
+@pytest.mark.parametrize("existing, wanted, add, conflicts", [
+    ([], {"~a": "A"}, [("~a", "A")], []), ([{"Code": "~a", "Campaign": "A"}], {"~a": "A"}, [], []),
+    ([{"Code": "~a", "Campaign": "A"}], {"~a": "A", "~b": "B"}, [("~b", "B")], []), ([{"Code": "~a", "Campaign": "A"}], {"~a": "Z"}, [], ["~a"]),
+    ([{"Code": "~a", "Campaign": ""}], {"~a": "A"}, [("~a", "A")], []), ([{"Code": " ~a ", "Campaign": " A "}], {"~a": "A"}, [], []),
+    ([{"Code": "", "Campaign": "A"}, {"Code": "~a"}], {"~a": "A"}, [("~a", "A")], []), ([], {"~b": "B", "~a": "A"}, [("~a", "A"), ("~b", "B")], []),
+    ([{"Code": "~a", "Campaign": ""}, {"Code": "~a", "Campaign": "A"}], {"~a": "A"}, [], [])])
+def test_what_to_add_to_the_code_list_and_what_is_in_conflict(existing, wanted, add, conflicts):
+    assert ul.plan_code_rows(existing, wanted) == (add, conflicts)
+
+
+def test_the_code_list_tab_is_named_and_laid_out_as_the_google_page_expects():
+    assert ul.CODES_TAB == "Campaign codes" and ul.CODES_COLUMNS == ["Code", "Campaign"] and ul.CAMPAIGN_CODE_PATTERN == r"^~[A-Za-z0-9_-]{10}$"
