@@ -179,7 +179,7 @@ def test_the_filter_offers_the_same_options_as_before_each_with_its_count():
     leads = [lead(1, Status="Stopped - Replied"), lead(2, Status="Stopped - Bounced"), lead(3, Status="Removed"), lead(4, IntroSentAt="2026-10-01 10:00:00", Status="Intro Sent"), lead(5, Approval="")]
     with data_tab(leads) as (at, _):
         options = at.radio(key="data_filter").options
-        assert options == ["All · 5", "In Progress · 1", "Replied · 1", "Bounced · 1", "Removed · 1"]
+        assert options == ["All · 5", "In Progress · 1", "Completed · 0", "Replied · 1", "Bounced · 1", "Removed · 1"]
 
 
 def test_the_filter_counts_ignore_the_search_but_follow_the_real_filter_rules():
@@ -731,3 +731,60 @@ def test_the_diagnose_tool_from_the_more_menu_still_compares_the_cached_and_the_
         _click(at, "data_tab_live_diagnostic")
         assert list(at.exception) == [] and any("Leads actually on the Sheet right now, read live:** 2" in m.value for m in at.markdown)
         assert any("These numbers match" in i.value for i in at.info)
+
+
+
+# ================================================================ Completed: a lead sent the LAST email of the sequence
+
+def finished(i, **kw):
+    """A lead that has been sent every email of the campaign's sequence."""
+    import leads_logic
+    sent = {leads_logic.sent_column(k): f"2026-10-0{min(k + 1, 9)} 09:00:00" for k in range(_stage_count())}
+    return lead(i, **{**sent, **kw})
+
+
+def test_a_lead_sent_its_last_email_shows_as_completed_not_in_sequence():
+    leads = [finished(1), lead(2, IntroSentAt="2026-10-01 09:00:00"), lead(3)]
+    with data_tab(leads) as (at, _):
+        statuses = {r["name"]: r["status"] for r in _rows(at)}
+        assert statuses == {"First1 Last1": "Completed", "First2 Last2": "In sequence", "First3 Last3": "Not contacted"}
+
+
+def test_the_completed_chip_counts_and_lists_them_and_in_progress_no_longer_does():
+    leads = [finished(1), finished(2), lead(3, IntroSentAt="2026-10-01 09:00:00"), lead(4, Status="Stopped - Replied"), lead(5)]
+    with data_tab(leads) as (at, _):
+        assert at.radio(key="data_filter").options == ["All · 5", "In Progress · 1", "Completed · 2", "Replied · 1", "Bounced · 0", "Removed · 0"]
+        at.radio(key="data_filter").set_value("Completed")
+        at.run(timeout=30)
+        assert _open_keys(at) == ["1", "2"] and {r["status"] for r in _rows(at)} == {"Completed"} and "Showing 1–2 of 2" in _caption(at)
+        at.radio(key="data_filter").set_value("In Progress")
+        at.run(timeout=30)
+        assert _open_keys(at) == ["3"]
+
+
+def test_a_completed_lead_that_later_replies_moves_to_replied_and_leaves_completed():
+    leads = [finished(1), finished(2, ReplyStatus="Replied", Status="Stopped - Replied")]
+    with data_tab(leads) as (at, _):
+        assert {r["name"]: r["status"] for r in _rows(at)} == {"First1 Last1": "Completed", "First2 Last2": "Replied"}
+        assert "Completed · 1" in at.radio(key="data_filter").options and "Replied · 1" in at.radio(key="data_filter").options
+
+
+def test_a_completed_leads_panel_says_the_sequence_completed_and_a_lead_in_the_sequence_does_not():
+    with data_tab([finished(1), lead(2, IntroSentAt="2026-10-01 09:00:00")]) as (at, _):
+        _click(at, "data_open_1")
+        assert "Sequence completed" in _panel(at)
+        _click(at, "data_open_2")
+        assert "Sequence completed" not in _panel(at)
+
+
+def test_the_progress_dots_of_a_completed_lead_are_all_sent():
+    with data_tab([finished(1)]) as (at, _):
+        assert _rows(at)[0]["dots"] == ["sent"] * _stage_count()
+
+
+def test_showing_completed_leads_never_writes_anything():
+    with data_tab([finished(1), finished(2)]) as (at, captured):
+        at.radio(key="data_filter").set_value("Completed")
+        at.run(timeout=30)
+        _click(at, "data_open_1")
+        assert "commits" not in captured and "dispatches" not in captured and list(at.exception) == []
