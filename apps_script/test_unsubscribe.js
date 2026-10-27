@@ -498,6 +498,72 @@ test('the page-interface calls are written into the script\'s own description', 
   assert.ok(CODE.includes('THE PAGE ON GITHUB PAGES') && CODE.includes('?api=info&t=') && CODE.includes('docs/unsubscribe.html'));
 });
 
+// ================================================================ campaign codes: the link carries a code, the Sheet shows the name
+const CCODE = '~abcDEF_123';
+function withCodes(world, rows) { world.sheets['Campaign codes'] = world.makeSheet([['Code', 'Campaign']].concat(rows)); }
+function coded(extra) { return makeToken(SECRET, Object.assign({ c: CCODE }, extra || {})); }
+function recordFrom(world, token) { return confirmJson(world, { api: 'confirm', t: token, reason: '', details: '' }); }
+
+test('a listed code is written to the Campaign column as the campaign\'s NAME', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [[CCODE, 'Kelson_Creators_Licensing_17SEP']]);
+  assert.strictEqual(recordFrom(w, coded()).ok, true); assert.strictEqual(rowsOf(w)[0][4], 'Kelson_Creators_Licensing_17SEP');
+});
+test('the name is written by every way an opt-out can arrive: the page, the Google page and the one-tap post', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [[CCODE, 'Spring_Launch']]);
+  recordFrom(w, coded({ e: 'a@x.com' })); submit(w, coded({ e: 'b@x.com' }), '', ''); post(w, coded({ e: 'c@x.com' }));
+  assert.deepStrictEqual(rowsOf(w).map((r) => r[4]), ['Spring_Launch', 'Spring_Launch', 'Spring_Launch']);
+});
+test('a code that is not listed is written as the code itself', () => {
+  const w = makeWorld(); withTab(w); recordFrom(w, coded());
+  assert.strictEqual(rowsOf(w)[0][4], CCODE);
+  withCodes(w, [['~someOtherCd', 'Other']]); recordFrom(w, coded({ e: 'z@x.com' })); assert.strictEqual(rowsOf(w)[1][4], CCODE);
+});
+test('a link from before codes existed still records the name it carries', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [[CCODE, 'Spring_Launch']]); recordFrom(w, makeToken(SECRET, { c: 'Older_Campaign_Name' }));
+  assert.strictEqual(rowsOf(w)[0][4], 'Older_Campaign_Name');
+});
+test('only a value shaped exactly like a code is looked up', () => {
+  ['~short', '~abcDEF_1234', 'abcDEF_1234a', '~abc DEF_12', '~abcDEF_12!', '~~abcDEF_123', ' ~abcDEF_123'].forEach((value, i) => {
+    const w = makeWorld(); withTab(w); withCodes(w, [[value.trim(), 'LOOKED_UP']]); recordFrom(w, makeToken(SECRET, { c: value, e: `u${i}@x.com` }));
+    assert.notStrictEqual(rowsOf(w)[0][4], 'LOOKED_UP', JSON.stringify(value));
+  });
+});
+test('a listed name with nothing in it falls back to the code, and a later row with a name is used', () => {
+  const blank = makeWorld(); withTab(blank); withCodes(blank, [[CCODE, ''], [CCODE, '   ']]); recordFrom(blank, coded()); assert.strictEqual(rowsOf(blank)[0][4], CCODE);
+  const later = makeWorld(); withTab(later); withCodes(later, [[CCODE, ''], [CCODE, 'Real_Name']]); recordFrom(later, coded()); assert.strictEqual(rowsOf(later)[0][4], 'Real_Name');
+});
+test('the code and the name are matched after trimming spaces', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [['  ' + CCODE + ' ', '  Spring_Launch  ']]); recordFrom(w, coded());
+  assert.strictEqual(rowsOf(w)[0][4], 'Spring_Launch');
+});
+test('a tab that cannot be read never stops an opt-out being recorded', () => {
+  const w = makeWorld(); withTab(w); w.sheets['Campaign codes'] = { getDataRange() { throw new Error('boom'); } };
+  const j = recordFrom(w, coded()); assert.strictEqual(j.ok, true); assert.strictEqual(rowsOf(w).length, 1); assert.strictEqual(rowsOf(w)[0][4], CCODE);
+});
+test('a name read from the tab is cleaned like anything else written to the Sheet', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [[CCODE, '=HYPERLINK("http://evil","x")']]); recordFrom(w, coded());
+  assert.ok(rowsOf(w)[0][4].startsWith("'=")); const long = makeWorld(); withTab(long); withCodes(long, [[CCODE, 'N'.repeat(500)]]); recordFrom(long, coded()); assert.strictEqual(rowsOf(long)[0][4].length, 120);
+});
+test('the tab is only read for a real opt-out: a test link and a bare look read nothing', () => {
+  const w = makeWorld(); let reads = 0; w.sheets['Campaign codes'] = { getDataRange() { reads++; return { getValues: () => [['Code', 'Campaign']] }; } };
+  recordFrom(w, coded({ t: 1 })); info(w, coded()); get(w, coded()); assert.strictEqual(reads, 0);
+});
+test('a code is looked up inside the same lock as the write and the lock is still released', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [[CCODE, 'Spring_Launch']]); recordFrom(w, coded());
+  assert.deepStrictEqual(plain(w.locks), { waited: 1, tried: 0, released: 1 });
+});
+test('the data the page receives holds neither the code nor the campaign\'s name', () => {
+  const w = makeWorld(); withCodes(w, [[CCODE, 'Kelson_Creators_Licensing_17SEP']]); const text = info(w, coded()).getContent() + confirmCall(w, { api: 'confirm', t: coded({ t: 1 }) }).getContent();
+  [CCODE, 'Kelson_Creators', '17SEP'].forEach((secret) => assert.ok(!text.includes(secret), secret));
+});
+test('the diagnostics log shows the name when the code is listed and the code when it is not', () => {
+  const w = diagWorld(); withTab(w); withCodes(w, [[CCODE, 'Spring_Launch']]); info(w, coded()); info(w, coded({ c: '~unlistedCd1' }));
+  assert.deepStrictEqual(diagRows(w).map((r) => [r[1], r[4]]), [['opened', 'Spring_Launch'], ['opened', '~unlistedCd1']]);
+});
+test('the code list is described in the script\'s own steps', () => {
+  assert.ok(CODE.includes('CAMPAIGN CODES:') && CODE.includes('"Campaign codes"') && CODE.includes('this script only READS that tab'));
+});
+
 let failed = 0;
 tests.forEach(([name, fn]) => {
   try { fn(); console.log('PASS  ' + name); } catch (error) { failed++; console.log('FAIL  ' + name + '\n      ' + String(error && error.message).split('\n')[0]); }
