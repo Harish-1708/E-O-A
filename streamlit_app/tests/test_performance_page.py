@@ -247,7 +247,7 @@ def test_every_figure_the_old_overview_page_showed_is_still_in_the_at_a_glance_t
     table = _glance_markup(at)
     assert FIXTURE_CAMPAIGN in table and "3 <span class=\"pg-of\">of 4</span>" in table and "1 pending" in table                 # contacted of leads, pending
     assert "<div class=\"pg-num\">4</div><div class=\"pg-sub\">4 delivered (est.)</div>" in table and "66.7%" in table and "All 1 campaign<" in table      # emails sent, delivered, reply rate, total row
-    assert "0 hard" in table and "0 soft" in table and "completed the sequence" in table
+    assert "0 hard" in table and "0 soft" in table and "reached the last email" in table and "completed the sequence" not in table
 
 
 def test_the_glance_csv_has_every_column_the_old_table_had_and_the_rows_in_the_order_shown(fixture_repo):
@@ -377,7 +377,9 @@ def test_the_stage_and_variant_tables_show_the_right_counts(fixture_repo):
 
 
 def test_the_reply_breakdown_bars_are_scaled_to_the_largest_and_zero_stays_empty(fixture_repo):
-    assert _bars(_one_campaign(_realistic_sheet())) == {
+    bars = _bars(_one_campaign(_realistic_sheet()))                       # the page also draws the "Where your leads are now" bars, so read only the reply breakdown's own
+    reply_labels = ("Interested", "Lead / Needs Follow-up", "Not Interested", "Unclear", "Not classified")
+    assert {label: bars[label] for label in reply_labels} == {
         "Interested": (100, 1), "Lead / Needs Follow-up": (0, 0), "Not Interested": (100, 1), "Unclear": (0, 0), "Not classified": (0, 0)}
 
 
@@ -672,3 +674,57 @@ def test_the_chosen_sort_is_what_the_table_is_built_with(fixture_repo):
     with patch("performance_logic.glance_rows", spy):
         at = _run_page(_realistic_sheet(), interact=lambda a: a.selectbox(key="performance_glance_sort").set_value("Emails sent"))
     assert seen[0] == "Reply rate" and seen[-1] == "Emails sent" and list(at.exception) == []
+
+
+
+# ================================================================ where every lead is now
+
+def _stage_sent_columns():
+    import preview_logic
+    import leads_logic
+    return {leads_logic.sent_column(k): f"2026-10-0{min(k + 1, 9)} 09:00:00" for k in range(len(preview_logic.get_campaign_cfg(FIXTURE_CAMPAIGN)["stages"]))}
+
+
+def _outcome_sheet():
+    done = _stage_sent_columns()
+    leads = [
+        {"LeadID": "1", "Email": "a@x.com", **done, "Status": ""},                                                                         # finished, no reply: Completed
+        {"LeadID": "2", "Email": "b@x.com", **done, "ReplyStatus": "Replied", "Status": "Stopped - Replied"},                              # finished, THEN replied: Replied
+        {"LeadID": "3", "Email": "c@x.com", "IntroSentAt": "2026-10-01 09:00:00", "Status": ""},                                          # still going
+        {"LeadID": "4", "Email": "d@x.com", "Status": ""},                                                                                 # not contacted
+    ]
+    return _sheet(leads, [], [])
+
+
+def test_the_page_shows_where_every_lead_is_now_with_completed_and_in_progress_separate(fixture_repo):
+    at = _run_page(_outcome_sheet())
+    assert list(at.exception) == [] and "Where your leads are now" in _card_titles(at)
+    bars = _bars(at)
+    assert {label: bars[label][1] for label in ("Not contacted yet", "In progress", "Completed", "Replied")} == {"Not contacted yet": 1, "In progress": 1, "Completed": 1, "Replied": 1}
+    assert "add up to your 4 leads" in _markup(at)
+
+
+
+def test_the_sequence_completion_headline_is_still_the_engines_figure(fixture_repo):
+    at = _run_page(_outcome_sheet())
+    headline, _card = _headline_and_card_metrics(at)
+    assert headline["Sequence completion"] == "66.7%"                                                       # 2 of the 3 contacted leads reached the final email, replied or not
+    assert "2 reached the final stage" in _markup(at)
+
+
+def test_the_export_lists_where_the_leads_are_now(fixture_repo):
+    import performance_figures as F
+    import performance_logic as PL
+    import preview_logic
+    cfg = preview_logic.get_campaign_cfg(FIXTURE_CAMPAIGN)
+    done = _stage_sent_columns()
+    leads = [{"LeadID": "1", "Email": "a@x.com", **done, "Status": ""}, {"LeadID": "2", "Email": "b@x.com", "Status": ""}]
+    perf = PL.build_campaign_performance(cfg, leads, [], [])
+    rows = F.build_performance_csv(perf, "Camp").split("\n")
+    block = rows[rows.index("Where the leads are now") + 2: rows.index("Where the leads are now") + 4]
+    assert block == ["Not contacted yet,1,50.0%", "In progress,0,0.0%"] and any(r == "Completed,1,50.0%" for r in rows)
+
+
+def test_a_campaign_with_no_leads_shows_no_where_card(fixture_repo):
+    at = _run_page(_sheet([], [], []))
+    assert list(at.exception) == [] and "Where your leads are now" not in _card_titles(at)
