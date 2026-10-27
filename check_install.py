@@ -13,16 +13,19 @@ import os
 import sys
 
 EXPECTED = {
-    ".github/workflows/auto_send.yml": "f066db4a371bf6caea37d2778d2e6dc62b2b54822f039a95eeb49618194b79ac",
+    ".github/workflows/auto_send.yml": "7584f63dbabb1ca5f56c9323f206f991289bc564d4be62aa2fc1bfc3fed18047",
     ".github/workflows/label_replies_from_words.yml": "d4acf5d6abdba83599a86a0945bbc4d95ec6c49a2083746ffafcd304dd27860a",
-    ".github/workflows/send_batch.yml": "54f6ee98b1f1b7f7000bfbccf7b17928684b506f1ad9d78c7049d699806b3127",
-    ".github/workflows/send_test_email.yml": "ac2607bf4fcd02163b61f4bc1d8cf66b9ab21c601a27e45f5062537836c1bb37",
+    ".github/workflows/send_batch.yml": "ca7f34e6f23a21030bd13aa1b5e52e59183ef40ca715f86c315fd6f727d654ef",
+    ".github/workflows/send_test_email.yml": "767572a564b7d9b13eb72146076605d44d43190502cc38a857a79ec6d0d8ed84",
     ".github/workflows/set_response_status.yml": "895c5c3587bed5a90595fcd75f0cfb3efe68ba4fc3fc97b64c2ceb926441defe",
     ".streamlit/config.toml": "8b79d77aa2549b1d5f4fb329d5d915d1b3608de1d6302c73b0adce76dc3c22fe",
-    "apps_script/Code.gs": "9182f6ecc5fb5326ca3e5078659f7a3190ed6fea53e653b1c45f9efde217967c",
-    "apps_script/test_unsubscribe.js": "34899c49c6467b1ce540d4773bf54973a8f75ddb092c5573b6a6ba1359e581f1",
+    "apps_script/Code.gs": "34d2fe1aaad9f5504f497849189d3fe8fa05965ff1cd541568080483338736f0",
+    "apps_script/test_unsubscribe.js": "6fcc800908939c7e489f27925efbcbaa6b8d06306a0da133295d35b81483285c",
+    "docs/config.js": "a7a4afbe3cbb92e56dac5b48ef315ddc939b49c779e16ee96e0bb34bd2d5fd70",
+    "docs/unsubscribe.html": "67d20ebb89e59b68a7df1381bbefc3f4f883b382987520823bd6e161af53c967",
+    "docs/unsubscribe.js": "f596d19540d59e00bd75919a3705f17368443db10baf36d703ceb59e8a16e92b",
     "html_campaign_logic.py": "c8993d1f3a2cf66cdb479595c583328d6001fc6b2b12efdf50ea6b865435bef5",
-    "outreach.py": "595f20d4a8a1b178b700cef09e7ec90d107bdfba0bfb2d6d29976d209eba4a6e",
+    "outreach.py": "cd2ba0b3aa90dbb750341606996db03e82e4d43a98677f82ba5f347d4c6d5430",
     "response_status.py": "2e7ef196adfab78cf3b277cb062ec9f621cf2fda60f83af8aee65ad94026bd64",
     "streamlit_app/accounts_logic.py": "f7c55364ccb83fbc3170e030fbfc2eb7fc21cb19748cd3e93028625af7db6d17",
     "streamlit_app/app.py": "94b723f762c8ef223f9ab28372b6c2b2e6d25bd9e8d268e70efd618521a2cab7",
@@ -170,10 +173,11 @@ EXPECTED = {
     "tests/test_html_campaigns_engine.py": "444df83020246b2e0893e82f8d718e44188828486576fe1146fe4a1043c0540d",
     "tests/test_response_status.py": "131a1e040c34be625a968fbf6485e0d1a4e4b535dbe1513f093e7ce7e4dd4aaf",
     "tests/test_stage_wait_overrides.py": "b784bda4227086834a5dd811387b9c02419ead37f91af743416debf17ac811b4",
-    "tests/test_unsubscribe_engine.py": "dec9942d02409a1941bd6418998e99b98425939b76ddb1c1157c93cb9ae23ff1",
-    "tests/test_unsubscribe_logic.py": "210ae919e5df7c1c5cccc2a0e06d6cb0200261741c289823af307e00ea500534",
-    "tests/test_unsubscribe_workflows.py": "642d354a10078a7cbefbc933bbadf64152f3871c5c5c33457272b6e7e841199b",
-    "unsubscribe_logic.py": "bdc34c66a58642bd1e5a12ed378d5bd4f2aaf96cdcbe129e986e1895b74bf2e0",
+    "tests/test_static_page.py": "3a5327b7ba6268014cd2827f416ce3fdfc6822e2ccd0bfc41f6020dc6cb4da73",
+    "tests/test_unsubscribe_engine.py": "92cfb4367eb8c81ef607aeb76ae92778912032da9167d9384c936072061f17f5",
+    "tests/test_unsubscribe_logic.py": "60b49d1273a732ea7bd7bca58ce1076a0df0b209f6562c3ea4cdff35e3779c3a",
+    "tests/test_unsubscribe_workflows.py": "35f5d4098f42adfed7182526d7cb6bd83598b43cd768769e5494f33128ab416a",
+    "unsubscribe_logic.py": "52f15f1329c85a11f20178b8c8bd4c566954e8401196786e6eabd8dcca8b04cb",
 }
 
 
