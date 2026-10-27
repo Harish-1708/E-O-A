@@ -14,7 +14,9 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import unicodedata
+from urllib.parse import urlsplit
 from typing import Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 UNSUBSCRIBE_TAB = "Unsubscribes"
@@ -30,9 +32,30 @@ class PageConfig(NamedTuple):
     secret: str
 
 
+def address_problem(url: str) -> Tuple[bool, str]:
+    """(refuse, note) for a page address that is usable as a web address but is the wrong KIND of Google address. A Google web app has a TEST address (ends in /dev) that opens only for the
+    script's owner: pasted into the secret it works when YOU test it and shows everybody else 'Sorry, unable to open the file'. Refused. An address for people inside one Google
+    Workspace (/a/macros/...) is kept but flagged, because it may not open for people outside it."""
+    if re.search(r"\s", url):
+        return True, "UNSUBSCRIBE_URL contains a space or a line break (check it was pasted whole, on one line), so the unsubscribe page is OFF."
+    parts = urlsplit(url)
+    if (parts.hostname or "").lower() != "script.google.com":
+        return False, ""                                                  # some other host: nothing Google-specific to check
+    path = parts.path.rstrip("/")
+    if path.endswith("/dev"):
+        return True, ("UNSUBSCRIBE_URL ends in /dev, which is Google's TEST address: it opens only for the script's owner and shows everyone else 'unable to open the file'. "
+                      "Use the Web app URL from Deploy > Manage deployments (it ends in /exec), so the unsubscribe page is OFF.")
+    if not path.endswith("/exec"):
+        return True, "UNSUBSCRIBE_URL should end in /exec (the Web app URL from Deploy > Manage deployments), so the unsubscribe page is OFF."
+    if "/a/macros/" in path:
+        return False, ("UNSUBSCRIBE_URL contains /a/macros/, an address for people inside one Google Workspace. If people outside it see 'unable to open the file', set 'Who has access' to Anyone "
+                       "and use the address that starts https://script.google.com/macros/s/.")
+    return False, ""
+
+
 def configuration_status(environ) -> Tuple[Optional[PageConfig], str]:
     """(config, note). `config` is None unless BOTH settings are present and usable; `note` says why (empty when it is simply not set up, which is a normal state: the emails then
-    use the email-based unsubscribe exactly as before). A half-done or malformed set-up is reported, never guessed at."""
+    use the email-based unsubscribe exactly as before). A half-done or malformed set-up is reported, never guessed at. A warning can also come WITH a usable config."""
     url = str(environ.get("UNSUBSCRIBE_URL") or "").strip()
     secret = str(environ.get("UNSUBSCRIBE_SECRET") or "").strip()
     if not url and not secret:
@@ -43,7 +66,10 @@ def configuration_status(environ) -> Tuple[Optional[PageConfig], str]:
         return None, "UNSUBSCRIBE_URL must start with https:// (mail apps only use secure links), so the unsubscribe page is OFF."
     if len(secret) < MIN_SECRET_LENGTH:
         return None, f"UNSUBSCRIBE_SECRET is too short (use at least {MIN_SECRET_LENGTH} characters), so the unsubscribe page is OFF."
-    return PageConfig(url, secret), ""
+    refuse, note = address_problem(url)
+    if refuse:
+        return None, note
+    return PageConfig(url, secret), note
 
 
 def configuration(environ) -> Optional[PageConfig]:
@@ -130,3 +156,26 @@ def is_suppressed(email: str, key: str, pairs: Set[Tuple[str, str]]) -> bool:
 
 def suppressed_leads(leads: List[Dict], key: str, pairs: Set[Tuple[str, str]]) -> List[Dict]:
     return [lead for lead in leads if is_suppressed(lead.get("Email", ""), key, pairs)]
+
+
+# ---------------------------------------------------------------- can an outsider open the page?
+
+PROBE_FIX = ("Almost always the deployment is not set to 'Who has access: Anyone', or the address is the test one. Fix: in Google, Deploy > Manage deployments > Edit > Who has access: Anyone > "
+             "Version: New version > Deploy, then copy the Web app URL (ending /exec) into the UNSUBSCRIBE_URL secret.")
+
+
+def classify_probe(status: Optional[int], final_url: str, body: str, error: str = "") -> Tuple[str, str]:
+    """(state, message) for what the address answered when opened from the internet WITHOUT signing in, which is exactly what a recipient does. State is 'ok', 'blocked', 'signin' or
+    'unknown'. A best-effort check: only 'blocked' and 'signin' are reported as problems, and 'unknown' never blocks anything."""
+    text = str(body or "").lower()
+    if error:
+        return "unknown", f"could not check the page from here ({error})."
+    if "unable to open the file" in text:
+        return "blocked", "Google answered 'Sorry, unable to open the file at present'. That is what every recipient except you would see. " + PROBE_FIX
+    if "accounts.google.com" in str(final_url or "").lower():
+        return "signin", "Google asked for a sign-in, so a recipient who is not signed in to Google could not open it. " + PROBE_FIX
+    if status in (401, 403, 404, 410):
+        return "blocked", f"Google answered {status}, so recipients could not open the page. " + PROBE_FIX
+    if status == 200:
+        return "ok", ("Opened from the internet without signing in: Google served the page" + (" and it answered as the unsubscribe page." if "this link is not valid" in text else "."))
+    return "unknown", f"the address answered with an unexpected status ({status})."
