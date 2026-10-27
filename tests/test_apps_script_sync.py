@@ -79,3 +79,23 @@ def test_the_set_up_steps_name_every_secret_and_the_deploy_settings(code):
     for words in ("private (incognito) window", "unable to open the file", "/dev", "This link is not valid", 'NOT "Only myself"'):
         assert words in head, words                       # the two settings that make a page open for you and for nobody else are named in the steps
     assert head.count("UNSUBSCRIBE_SECRET") >= 2          # once for the script's own settings (step 2) and once for GitHub (step 5): the same text in both places
+
+
+def test_the_troubleshooting_log_is_named_the_same_on_both_sides(code):
+    assert js_string(code, "DIAG_TAB") == ul.DIAGNOSTICS_TAB and js_list(code, "DIAG_COLUMNS") == ul.DIAGNOSTICS_COLUMNS
+    assert js_list(code, "DIAG_STATES") == ["valid", "invalid", "test", "not set up"]
+    for event in ul.DIAGNOSTIC_EVENTS:
+        assert f"'{event}'" in code, event
+
+
+def test_the_troubleshooting_log_is_off_unless_asked_for_and_says_so_in_the_steps(code):
+    head = code.split("var TAB_NAME")[0]
+    assert "String(PropertiesService.getScriptProperties().getProperty('DIAGNOSTICS') || '').trim().toLowerCase() === 'on'" in code
+    for words in ("DIAGNOSTICS = on", "Unsubscribe diagnostics", "no new row", "opened", "rendered", "It records no email address, no lead and no link"):
+        assert words in head, words
+
+
+def test_the_troubleshooting_log_is_written_without_any_address_lead_or_link(code):
+    block = code.split("function logDiag_")[1].split("function recordRendered")[0]
+    assert "payload.e" not in block and "payload.l" not in block and "parameter.t" in block and "token.length" in block and "String(e.queryString).length" in block
+    assert "Reason" not in block and "details" not in block.lower()
