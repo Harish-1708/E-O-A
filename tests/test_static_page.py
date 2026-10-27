@@ -139,3 +139,14 @@ def test_what_the_page_says_is_what_the_google_page_says(words):
 
 def test_the_thank_you_promises_only_what_the_system_does():
     assert "emails like this one" in SCRIPT and "all Kelson" not in SCRIPT and "from all" not in SCRIPT.lower()
+
+
+
+# ================================================================ the page at the root of your own domain
+
+def test_the_root_page_is_exactly_the_unsubscribe_page_so_https_your_domain_slash_works():
+    assert read("docs", "index.html") == HTML and f"<!-- {ul.PAGE_MARKER}:" in read("docs", "index.html")
+
+
+def test_the_pages_files_name_no_github_address_anywhere():
+    assert "github" not in (HTML + SCRIPT + CONFIG).lower()
