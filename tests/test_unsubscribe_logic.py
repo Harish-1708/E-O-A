@@ -262,3 +262,52 @@ def test_a_problem_on_our_side_is_never_a_verdict_on_the_page():
 
 def test_only_unknown_is_not_a_problem():
     assert {ul.classify_probe(200, "u", "")[0], ul.classify_probe(500, "u", "")[0]} == {"ok", "unknown"}
+
+
+# ================================================================ the exact link, and what two checks together mean
+
+def test_where_a_request_ended_up_never_includes_the_links_token():
+    assert ul._where("https://script.google.com/macros/s/AKfy/exec?t=SECRET.TOKEN") == "script.google.com/macros/s/AKfy/exec"
+    assert ul._where("https://x.example/p") == "x.example/p" and ul._where("") == "" and ul._where(None) == ""
+
+
+def test_every_answer_says_the_http_status_and_where_it_ended_but_never_the_token():
+    for status, body in ((200, "x"), (404, ""), (200, "unable to open the file")):
+        message = ul.classify_probe(status, "https://script.google.com/macros/s/AKfy/exec?t=SECRET.TOKEN", body)[1]
+        assert f"HTTP {status}" in message and "script.google.com/macros/s/AKfy/exec" in message and "SECRET" not in message
+
+
+def test_when_the_real_pages_text_is_expected_an_ok_answer_says_whether_it_was_seen():
+    seen = ul.classify_probe(200, "https://x/p", "<button>Unsubscribe me</button>", expect=ul.LINK_MARKERS)
+    unseen = ul.classify_probe(200, "https://x/p", "<html>hello</html>", expect=ul.LINK_MARKERS)
+    assert seen[0] == unseen[0] == "ok" and "served the unsubscribe page itself" in seen[1] and "could not see the unsubscribe page's own text" in unseen[1]
+    assert "served the unsubscribe page itself" not in unseen[1]
+
+
+def test_the_test_banner_text_also_counts_as_the_real_page():
+    assert "served the unsubscribe page itself" in ul.classify_probe(200, "https://x", "This is a test link from your team. Nothing will be recorded.", expect=ul.LINK_MARKERS)[1]
+
+
+def test_expecting_text_never_turns_a_refusal_into_ok():
+    assert ul.classify_probe(200, "https://x", "Sorry, unable to open the file at present. Unsubscribe me", expect=ul.LINK_MARKERS)[0] == "blocked"
+    assert ul.classify_probe(404, "https://x", "Unsubscribe me", expect=ul.LINK_MARKERS)[0] == "blocked"
+
+
+@pytest.mark.parametrize("bare, exact, words", [("blocked", "blocked", "page address itself is refused"), ("signin", "ok", "page address itself is refused"), ("blocked", "unknown", "page address itself is refused"),
+                                                ("ok", "blocked", "the exact link in the email does NOT"), ("ok", "signin", "the exact link in the email does NOT"),
+                                                ("ok", "ok", "BOTH open for an anonymous visitor"), ("ok", "unknown", "not conclusive"), ("unknown", "ok", "not conclusive"), ("unknown", "unknown", "not conclusive")])
+def test_the_two_checks_together_say_where_the_problem_is(bare, exact, words):
+    assert words in ul.compare_probes(bare, exact) and ul.compare_probes(bare, exact).startswith("DIAGNOSIS:")
+
+
+def test_each_diagnosis_gives_the_next_step_for_its_own_situation():
+    assert "deployment or the address in the secret" in ul.compare_probes("blocked", "ok")
+    assert "the link (its length or its token), not the deployment" in ul.compare_probes("ok", "blocked") and "printed above" in ul.compare_probes("ok", "blocked")
+    both = ul.compare_probes("ok", "ok")
+    assert "several Google accounts signed in at once" in both and "company account that blocks outside web apps" in both and "in-app browser" in both and "private window" in both
+
+
+def test_the_page_texts_the_check_looks_for_are_really_in_the_google_script():
+    with open(os.path.join(os.path.dirname(__file__), "..", "apps_script", "Code.gs"), encoding="utf-8") as handle:
+        code = handle.read()
+    assert all(marker in code for marker in ul.LINK_MARKERS)
