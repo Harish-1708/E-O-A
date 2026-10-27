@@ -17,12 +17,21 @@ from test_outreach import ACCOUNTS, FakeSheets, make_lead  # noqa: E402
 
 SECRET = "test-secret-1234567890"
 PAGE = "https://script.google.com/macros/s/ID/exec"
+REAL_PROBE = outreach.probe_unsubscribe_page                                 # the real function, kept before every test stubs it: no test may reach the internet
 
 
 @pytest.fixture
 def page_on(monkeypatch):
     monkeypatch.setenv("UNSUBSCRIBE_URL", PAGE)
     monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """The page check is stubbed for every test (it answers 'ok' unless a test says otherwise) and its calls are recorded."""
+    calls = []
+    monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20: calls.append(url) or ul.classify_probe(200, url, "<div>This link is not valid</div>"))
+    return calls
 
 
 @pytest.fixture(autouse=True)
@@ -529,3 +538,151 @@ def test_marking_skips_a_lead_with_no_row_number_and_one_for_another_brand(tmp_p
     leads = [{"Email": "a@x.com"}, make_lead(_row=3, Email="b@x.com")]
     pairs = ul.load_pairs([opted_out("a@x.com"), opted_out("b@x.com", key="duberobe")])
     assert outreach.reconcile_unsubscribes(html_cfg(tmp_path), ListSheets([]), leads, pairs) == []
+
+
+
+# ================================================================ the page check in a test run: can an outsider open it?
+
+import http.server  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+SEEN = []
+
+
+class Google(http.server.BaseHTTPRequestHandler):
+    """A local web server that plays each answer Google might give to a visitor who is not signed in."""
+
+    def log_message(self, *args):
+        pass
+
+    def reply(self, code, body="", location=None):
+        SEEN.append({"path": self.path, "headers": dict(self.headers)})
+        self.send_response(code)
+        if location:
+            self.send_header("Location", location)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+
+    def do_GET(self):
+        routes = {"/valid": (200, "<html><div>This link is not valid</div></html>"), "/plain": (200, "<html>hello</html>"),
+                  "/error-page": (200, "<html>Sorry, unable to open the file at present. Please check the address and try again.</html>"), "/missing": (404, "<html>Not found</html>"),
+                  "/forbidden": (403, "<html>no</html>"), "/server-error": (500, "<html>oops</html>"), "/accounts.google.com/ServiceLogin": (200, "<html>Sign in</html>")}
+        if self.path.split("?")[0] in routes:
+            return self.reply(*routes[self.path.split("?")[0]])
+        if self.path.startswith("/to-valid"):
+            return self.reply(302, location="/valid")
+        if self.path.startswith("/to-signin"):
+            return self.reply(302, location="/accounts.google.com/ServiceLogin")
+        if self.path.startswith("/slow"):
+            time.sleep(3)
+            return self.reply(200, "late")
+        return self.reply(404, "")
+
+
+@pytest.fixture
+def google():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Google)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    SEEN.clear()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+@pytest.mark.parametrize("path, state", [("/valid", "ok"), ("/plain", "ok"), ("/to-valid", "ok"), ("/error-page", "blocked"), ("/missing", "blocked"), ("/forbidden", "blocked"),
+                                         ("/to-signin", "signin"), ("/server-error", "unknown")])
+def test_the_real_check_reports_what_a_visitor_who_is_not_signed_in_would_get(google, path, state):
+    assert REAL_PROBE(google + path)[0] == state
+
+
+def test_the_real_check_sends_nothing_that_would_make_it_more_than_an_outsider(google):
+    REAL_PROBE(google + "/valid?x=1")
+    sent = {name.lower() for name in SEEN[0]["headers"]}
+    assert "authorization" not in sent and "cookie" not in sent and SEEN[0]["headers"]["User-Agent"].startswith("Mozilla/5.0")
+
+
+def test_the_real_check_follows_redirects_as_a_browser_does(google):
+    state, message = REAL_PROBE(google + "/to-valid")
+    assert state == "ok" and "answered as the unsubscribe page" in message and [hit["path"] for hit in SEEN] == ["/to-valid", "/valid"]
+
+
+def test_a_slow_or_unreachable_page_is_unknown_never_blocked(google):
+    assert REAL_PROBE(google + "/slow", timeout=1)[0] == "unknown"
+    assert REAL_PROBE("http://127.0.0.1:1/never")[0] == "unknown"
+
+
+def run_command(tmp_path, monkeypatch, capsys, fmt="html"):
+    _capture_smtp(monkeypatch)
+    monkeypatch.setattr(outreach, "load_email_accounts", lambda: ACCOUNTS)
+    monkeypatch.setattr(outreach, "get_campaign", lambda name, **kw: _test_cfg(tmp_path, fmt))
+    try:
+        outreach.cmd_send_test(argparse.Namespace(campaign="C", stage="intro", variant="A", to="team@kelson.agency", account=""))
+        code = 0
+    except SystemExit as exit_:
+        code = exit_.code
+    return capsys.readouterr().out, code
+
+
+def stub_probe(monkeypatch, state, message="stub"):
+    monkeypatch.setattr(outreach, "probe_unsubscribe_page", lambda url, timeout=20: (state, message))
+
+
+def test_a_test_run_opens_the_page_address_and_reports_it_next_to_the_address_in_use(tmp_path, monkeypatch, capsys, page_on, no_network):
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert no_network == [PAGE] and code == 0
+    assert f"Page address in use: {PAGE}" in out and "Unsubscribe page check (opened from GitHub without signing in): OK." in out and "t=" not in out.split("Page address in use:")[1].split("\n")[0]
+
+
+def test_when_google_refuses_the_page_the_run_says_so_clearly_and_fails_but_the_email_was_sent(tmp_path, monkeypatch, capsys, page_on):
+    stub_probe(monkeypatch, "blocked", "Google answered 'Sorry, unable to open the file at present'. Fix: Deploy > Manage deployments")
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 1 and "Test email sent to team@kelson.agency" in out and len(_Sent.calls) == 1
+    assert "check (opened from GitHub without signing in): BLOCKED." in out and "PROBLEM: recipients would not be able to open the unsubscribe page" in out and "the test email itself was sent" in out
+
+
+def test_a_page_that_wants_a_google_sign_in_also_fails_the_run(tmp_path, monkeypatch, capsys, page_on):
+    stub_probe(monkeypatch, "signin", "Google asked for a sign-in")
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 1 and "SIGNIN." in out and "PROBLEM" in out
+
+
+def test_a_check_that_could_not_be_made_is_reported_but_does_not_fail_the_run(tmp_path, monkeypatch, capsys, page_on):
+    stub_probe(monkeypatch, "unknown", "could not check the page from here (timed out).")
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "UNKNOWN. could not check the page from here" in out and "PROBLEM" not in out
+
+
+def test_a_workspace_address_is_used_but_with_its_warning(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("UNSUBSCRIBE_URL", "https://script.google.com/a/macros/kelson.agency/s/ID/exec")
+    monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "Unsubscribe page: ON" in out and "WARNING: UNSUBSCRIBE_URL contains /a/macros/" in out and len(_Sent.calls) == 1 and "unsubscribe_url" in _Sent.calls[0]
+
+
+def test_googles_test_address_turns_the_page_off_with_the_reason_and_the_email_still_goes_out_the_old_way(tmp_path, monkeypatch, capsys, no_network):
+    monkeypatch.setenv("UNSUBSCRIBE_URL", "https://script.google.com/macros/s/ID/dev")
+    monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "Unsubscribe page: OFF. UNSUBSCRIBE_URL ends in /dev, which is Google's TEST address" in out
+    assert no_network == [] and "unsubscribe_url" not in _Sent.calls[0] and "html_body" in _Sent.calls[0]
+
+
+def test_the_check_is_not_made_when_the_page_is_off_or_for_a_plain_text_campaign(tmp_path, monkeypatch, capsys, no_network):
+    run_command(tmp_path, monkeypatch, capsys)
+    monkeypatch.setenv("UNSUBSCRIBE_URL", PAGE)
+    monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
+    run_command(tmp_path, monkeypatch, capsys, fmt="text")
+    assert no_network == []
+
+
+def test_a_real_send_never_makes_the_page_check(tmp_path, monkeypatch, page_on, no_network):
+    send(html_cfg(tmp_path), ListSheets(leads_of("a@x.com", "b@x.com")), monkeypatch)
+    assert no_network == [] and len(_Sent.calls) == 2
+
+
+def test_the_test_address_in_a_real_send_means_a_plain_email_unsubscribe_and_never_a_link_that_only_the_owner_can_open(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNSUBSCRIBE_URL", "https://script.google.com/macros/s/ID/dev")
+    monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
+    send(html_cfg(tmp_path), ListSheets(leads_of("a@x.com")), monkeypatch)
+    assert "unsubscribe_url" not in _Sent.calls[0] and "html_body" in _Sent.calls[0]
