@@ -1,4 +1,4 @@
-Subject: Write your subject here
+Subject: HI Testing
 
 Hi {{ FirstName }},
 
