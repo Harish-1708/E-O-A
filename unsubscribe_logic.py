@@ -22,6 +22,9 @@ from typing import Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 UNSUBSCRIBE_TAB = "Unsubscribes"
 UNSUBSCRIBE_COLUMNS = ["Timestamp", "Email", "Brand", "BrandKey", "Campaign", "LeadID", "Reason", "Details", "Source"]
 REASONS = ["Too many emails", "Not relevant to me", "I never signed up", "Other"]
+DIAGNOSTICS_TAB = "Unsubscribe diagnostics"            # written by the Google page only while the DIAGNOSTICS script property is "on" (troubleshooting)
+DIAGNOSTICS_COLUMNS = ["Time", "Event", "State", "Brand", "Campaign", "QueryLength", "TokenLength", "ParamNames"]
+DIAGNOSTIC_EVENTS = ["opened", "rendered", "confirmed", "one-tap"]
 TOKEN_VERSION = 1
 MIN_SECRET_LENGTH = 16
 _REQUIRED_FIELDS = ("c", "l", "e", "b", "k", "a")
@@ -210,3 +213,64 @@ def compare_probes(bare_state: str, exact_state: str) -> str:
                 "sign-in (several Google accounts signed in at once, a company account that blocks outside web apps, or an in-app browser). Ask them to open the same link in a private "
                 "window or in their phone's own browser.")
     return "DIAGNOSIS: not conclusive: at least one of the two checks could not be made from here."
+
+
+# ---------------------------------------------------------------- what a BROWSER does after the first answer
+
+FRAME_HOSTS = ("googleusercontent.com",)
+NOT_TESTED = ("NOT TESTED HERE: a request made while signed in to a Google account (the cookies a recipient's browser carries), and the page running its own JavaScript. "
+              "That is what the Unsubscribe diagnostics tab is for.")
+
+
+def _unescape_script_text(text: str) -> str:
+    """Google delivers a web app's content inside a script string, where characters such as = & ? / are written as \\x3d \\x26 \\x3f \\/ or \\u003d; put every one back so web addresses can be read."""
+    text = re.sub(r"\\x([0-9a-fA-F]{2})", lambda match: chr(int(match.group(1), 16)), text)
+    text = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), text)
+    return text.replace("\\/", "/").replace("&amp;", "&")
+
+
+def find_frame_urls(body: str, hosts: Tuple[str, ...] = FRAME_HOSTS) -> List[str]:
+    """The web addresses in Google's answer that a browser would load NEXT (the page's own content frame lives on googleusercontent.com), the 'userCodeAppPanel' one first."""
+    found: List[str] = []
+    for match in re.finditer(r"https?://[A-Za-z0-9._-]+(?::\d+)?(?:/[^\s\"'<>\\]*)?", _unescape_script_text(str(body or ""))):
+        url = match.group(0).rstrip(".,;)")
+        host = urlsplit(url).hostname or ""
+        if any(host == known or host.endswith("." + known) for known in hosts) and url not in found:
+            found.append(url)
+    return sorted(found, key=lambda url: "userCodeAppPanel" not in url)
+
+
+def trace_verdict(steps: List[Dict]) -> str:
+    """One sentence for a step-by-step trace. Each step is {kind: 'hop'|'frame', state: ok|blocked|signin|unknown, error: str}."""
+    for number, step in enumerate(steps, 1):
+        if step.get("state") in ("blocked", "signin"):
+            where = ("the page's own content frame (the second request a browser makes)" if step.get("kind") == "frame" else
+                     "the first request" if number == 1 else f"redirect step {number}")
+            return f"TRACE VERDICT: refused at {where} (step {number}). " + PROBE_FIX + " " + NOT_TESTED
+    problems = [step for step in steps if step.get("error")]
+    if problems:
+        return f"TRACE VERDICT: not conclusive: a step could not be made ({problems[0]['error']}). " + NOT_TESTED
+    if not any(step.get("kind") == "frame" for step in steps):
+        return ("TRACE VERDICT: every step opened. No separate content frame was found in Google's answer, so the second request a browser makes could not be tested. " + NOT_TESTED)
+    return "TRACE VERDICT: every step opened, including the page's own content frame. " + NOT_TESTED
+
+
+def format_trace(steps: List[Dict]) -> List[str]:
+    lines = []
+    for number, step in enumerate(steps, 1):
+        label = "content frame" if step.get("kind") == "frame" else "request"
+        if step.get("error"):
+            lines.append(f"  step {number} ({label}) {step['where']}: could not be made ({step['error']})")
+            continue
+        extras = []
+        if step.get("location"):
+            extras.append(f"redirects to {step['location']}")
+        if step.get("content_type"):
+            extras.append(step["content_type"].split(";")[0])
+        if step.get("cookies"):
+            extras.append("sets cookies: " + ", ".join(step["cookies"]))
+        if step.get("frame_options"):
+            extras.append("X-Frame-Options: " + step["frame_options"])
+        extras.append(f"{step.get('size', 0)} bytes")
+        lines.append(f"  step {number} ({label}) {step['where']} -> HTTP {step['status']} [{step.get('state', '?').upper()}]" + ("; " + "; ".join(extras) if extras else ""))
+    return lines
