@@ -99,3 +99,29 @@ def test_the_troubleshooting_log_is_written_without_any_address_lead_or_link(cod
     block = code.split("function logDiag_")[1].split("function recordRendered")[0]
     assert "payload.e" not in block and "payload.l" not in block and "parameter.t" in block and "token.length" in block and "String(e.queryString).length" in block
     assert "Reason" not in block and "details" not in block.lower()
+
+
+# ================================================================ campaign codes: the engine writes the list, the script reads it
+
+def test_the_code_list_tab_and_the_shape_of_a_code_are_the_same_on_both_sides(code):
+    assert js_string(code, "CODES_TAB") == ul.CODES_TAB and f"var CAMPAIGN_CODE_PATTERN = /{ul.CAMPAIGN_CODE_PATTERN}/;" in code
+
+
+def test_the_script_reads_the_two_columns_the_engine_writes_in_that_order(code):
+    block = code.split("function campaignLabel_")[1].split("function logDiag_")[0] if "function logDiag_" in code.split("function campaignLabel_")[1] else code.split("function campaignLabel_")[1]
+    assert ul.CODES_COLUMNS == ["Code", "Campaign"] and "values[row][0]" in block and "values[row][1]" in block and "getSheetByName(CODES_TAB)" in block
+
+
+def test_the_script_never_lets_a_failed_code_lookup_stop_an_opt_out(code):
+    block = code.split("function campaignLabel_")[1].split("/* ------------------------------------------------------------------ troubleshooting log")[0]
+    assert "try {" in block and "} catch (error) {" in block and block.rstrip().endswith("}") and "throw" not in block
+
+
+def test_the_name_is_written_through_the_same_cleaning_as_everything_else_the_script_writes(code):
+    assert "safeCell_(cleanText_(campaignLabel_(payload.c, props.sheetId), 120))" in code and "campaignLabel_(payload.c, sheetId)" in code
+
+
+def test_the_steps_at_the_top_of_the_script_explain_the_code_list(code):
+    head = code.split("var TAB_NAME")[0]
+    for words in ("CAMPAIGN CODES:", "instead of your campaign's name", "Campaign codes", "this script only READS that tab", "the Campaign column shows the code"):
+        assert words in head, words
