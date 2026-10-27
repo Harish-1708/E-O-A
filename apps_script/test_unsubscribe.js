@@ -58,7 +58,7 @@ function makeWorld(options) {
     },
     LockService: { getScriptLock: () => ({ waitLock: () => { world.locks.waited++; }, tryLock: () => { world.locks.tried++; return !world.lockBusy; }, releaseLock: () => { world.locks.released++; } }) },
     HtmlService: { createHtmlOutput: (html) => { const out = { html, title: '', meta: {}, setTitle(t) { out.title = t; return out; }, addMetaTag(k, v) { out.meta[k] = v; return out; }, getContent: () => html }; return out; } },
-    ContentService: { createTextOutput: (text) => ({ getContent: () => text }) },
+    ContentService: { createTextOutput: (text) => ({ mime: '', getContent: () => text, setMimeType(mime) { this.mime = mime; return this; } }), MimeType: { JSON: 'JSON' } },
     Logger: { log: (message) => world.logs.push(message) },
     console,
   };
@@ -405,6 +405,97 @@ test('a lock taken for the log is always released, even when the log write fails
 });
 test('the troubleshooting steps are written into the script', () => {
   assert.ok(CODE.includes('DIAGNOSTICS = on') && CODE.includes('no new row            = the request never reached this script') && CODE.includes('"opened" + "rendered"'));
+});
+
+// ================================================================ the JSON interface used by the page on GitHub Pages
+function info(world, token, extra) { return world.call('doGet', { parameter: Object.assign(token === undefined ? { api: 'info' } : { api: 'info', t: token }, extra || {}), queryString: 'api=info' + (token === undefined ? '' : '&t=' + token) }); }
+function infoJson(world, token) { return JSON.parse(info(world, token).getContent()); }
+function confirmCall(world, body, type) { return world.call('doPost', { parameter: {}, postData: { contents: typeof body === 'string' ? body : JSON.stringify(body), type: type || 'text/plain' } }); }
+function confirmJson(world, body) { return JSON.parse(confirmCall(world, body).getContent()); }
+
+test('info answers with data, as JSON, never as a page', () => {
+  const w = makeWorld(); withTab(w); const out = info(w, PLAIN);
+  assert.strictEqual(out.mime, 'JSON'); assert.ok(!out.getContent().includes('<'));
+  assert.deepStrictEqual(JSON.parse(out.getContent()), { ok: true, state: 'valid', brand: 'Kelson Agency', masked: 'a***@example.com', address: '12 Example Street, New York, NY', reasons: ['Too many emails', 'Not relevant to me', 'I never signed up', 'Other'], test: false });
+});
+test('info never reveals the full address, the lead or the link, and never changes anything', () => {
+  const w = makeWorld(); withTab(w); const text = info(w, PLAIN).getContent();
+  ['ann@example.com', 'L-17', PLAIN.slice(0, 30), 'Spring_Launch'].forEach((secret) => assert.ok(!text.includes(secret), secret));
+  assert.strictEqual(rowsOf(w).length, 0); assert.deepStrictEqual(plain(w.locks), { waited: 0, tried: 0, released: 0 });
+});
+test('info marks a test link as a test', () => {
+  const j = infoJson(makeWorld(), UNICODE_TEST); assert.strictEqual(j.state, 'test'); assert.strictEqual(j.test, true); assert.strictEqual(j.brand, 'Café Ünïcode ☕');
+});
+test('info says invalid, with no details, for a wrong, missing or empty link', () => {
+  const w = makeWorld();
+  [undefined, '', 'garbage', PLAIN.slice(0, -2), makeToken('another-secret-0987654321', {})].forEach((token) => assert.deepStrictEqual(infoJson(w, token), { ok: false, state: 'invalid' }));
+});
+test('info says "not set up" when the script is not configured', () => {
+  assert.deepStrictEqual(infoJson(makeWorld({ props: {} }), PLAIN), { ok: false, state: 'not set up' });
+});
+test('info has the same brand and wording data for every brand, taken from the signed link only', () => {
+  const j = infoJson(makeWorld(), makeToken(SECRET, { b: '<b>Evil</b>', a: '"><img>', e: 'zed@secret.example' }));
+  assert.strictEqual(j.brand, '<b>Evil</b>'); assert.strictEqual(j.masked, 'z***@secret.example');                         // returned as DATA: the page shows it as text
+});
+test('confirm records one row from the page, like the Google page does', () => {
+  const w = makeWorld(); withTab(w);
+  const j = confirmJson(w, { api: 'confirm', t: PLAIN, reason: 'Too many emails', details: 'weekly is too much' });
+  assert.deepStrictEqual(j, { ok: true, masked: 'a***@example.com', brand: 'Kelson Agency', address: '12 Example Street, New York, NY', already: false, test: false });
+  assert.deepStrictEqual(plain(rowsOf(w)[0].slice(1)), ['ann@example.com', 'Kelson Agency', 'kelsonagency', 'Spring_Launch', 'L-17', 'Too many emails', 'weekly is too much', 'page']);
+});
+test('confirming twice adds no second row and a later reason fills an empty one', () => {
+  const w = makeWorld(); withTab(w);
+  confirmJson(w, { api: 'confirm', t: PLAIN }); const again = confirmJson(w, { api: 'confirm', t: PLAIN, reason: 'Other', details: 'x' });
+  assert.strictEqual(again.already, true); assert.strictEqual(rowsOf(w).length, 1); assert.strictEqual(rowsOf(w)[0][6], 'Other');
+});
+test('confirm is per brand and ignores a reason that is not one of the four', () => {
+  const w = makeWorld(); withTab(w);
+  confirmJson(w, { api: 'confirm', t: makeToken(SECRET, { k: 'duberobe' }), reason: 'Because' }); confirmJson(w, { api: 'confirm', t: makeToken(SECRET, { k: 'swoveralls' }) });
+  assert.deepStrictEqual(plain(rowsOf(w).map((r) => [r[3], r[6]])), [['duberobe', ''], ['swoveralls', '']]);
+});
+test('confirming a test link records nothing', () => {
+  const w = makeWorld(); const j = confirmJson(w, { api: 'confirm', t: UNICODE_TEST, reason: 'Other' });
+  assert.strictEqual(j.ok, true); assert.strictEqual(j.test, true); assert.ok(!w.sheets.Unsubscribes); assert.strictEqual(w.opened.length, 0);
+});
+test('confirm refuses a wrong link and records nothing', () => {
+  const w = makeWorld(); withTab(w);
+  [PLAIN.slice(0, -1), '', undefined, 5, null, makeToken('another-secret-0987654321', {})].forEach((t) => assert.deepStrictEqual(confirmJson(w, { api: 'confirm', t }), { ok: false, error: 'invalid' }));
+  assert.strictEqual(rowsOf(w).length, 0);
+});
+test('confirm when the script is not set up says so', () => {
+  assert.deepStrictEqual(confirmJson(makeWorld({ props: {} }), { api: 'confirm', t: PLAIN }), { ok: false, error: 'not set up' });
+});
+test('a sheet failure while confirming is reported as failed, never thrown, and the lock is released', () => {
+  const w = makeWorld(); withTab(w); w.failWrite = true;
+  assert.deepStrictEqual(confirmJson(w, { api: 'confirm', t: PLAIN }), { ok: false, error: 'failed' }); assert.deepStrictEqual(plain(w.locks), { waited: 1, tried: 0, released: 1 });
+});
+test('typed text from the page is cleaned exactly like the Google page cleans it', () => {
+  const w = makeWorld(); withTab(w);
+  confirmJson(w, { api: 'confirm', t: makeToken(SECRET, { b: '=HYPERLINK("x")' }), reason: 'Other', details: '=IMPORTXML("x")\n\u0000\u202e ' + 'x'.repeat(900) });
+  const row = rowsOf(w)[0]; assert.ok(row[2].startsWith("'=") && row[7].startsWith("'=") && row[7].length <= 502 && !/[\u0000\u202e]/.test(row[7]));
+});
+test('a body that is not the page\'s own request falls through to the mail app path and records nothing', () => {
+  const w = makeWorld(); withTab(w);
+  ['not json', '[]', '{"api":"other","t":"x"}', '', '{"api":"confirm"'].forEach((body) => assert.strictEqual(confirmCall(w, body).getContent(), 'Invalid link'));
+  assert.strictEqual(w.call('doPost', { parameter: { t: PLAIN }, postData: { contents: 'List-Unsubscribe=One-Click', type: 'application/x-www-form-urlencoded' } }).getContent(), 'Unsupported request');
+  assert.strictEqual(rowsOf(w).length, 0);
+});
+test('the mail app one-tap post still works next to the page interface', () => {
+  const w = makeWorld(); withTab(w);
+  assert.strictEqual(w.call('doPost', { parameter: { t: PLAIN, 'List-Unsubscribe': 'One-Click' }, postData: { contents: 'List-Unsubscribe=One-Click', type: 'application/x-www-form-urlencoded' } }).getContent(), 'Unsubscribed');
+  assert.strictEqual(rowsOf(w)[0][8], 'one-click');
+});
+test('opening the Google page without api=info still shows the page, exactly as before', () => {
+  const w = makeWorld(); const html = get(w, PLAIN); assert.ok(html.includes('Unsubscribe me') && html.includes('<!doctype html>'));
+  assert.strictEqual(w.call('doGet', { parameter: { api: 'other', t: PLAIN } }).getContent().includes('Unsubscribe me'), true);
+});
+test('with diagnostics on, the page interface is logged like any other visit and holds nothing personal', () => {
+  const w = diagWorld(); withTab(w); info(w, PLAIN); info(w, 'garbage'); confirmJson(w, { api: 'confirm', t: PLAIN, reason: 'Other', details: 'private words' });
+  assert.deepStrictEqual(diagRows(w).map((r) => [r[1], r[2]]), [['opened', 'valid'], ['opened', 'invalid'], ['confirmed', 'valid']]);
+  const everything = JSON.stringify(w.sheets['Unsubscribe diagnostics'].rows); ['ann@example.com', 'private words', 'L-17'].forEach((x) => assert.ok(!everything.includes(x)));
+});
+test('the page-interface calls are written into the script\'s own description', () => {
+  assert.ok(CODE.includes('THE PAGE ON GITHUB PAGES') && CODE.includes('?api=info&t=') && CODE.includes('docs/unsubscribe.html'));
 });
 
 let failed = 0;
