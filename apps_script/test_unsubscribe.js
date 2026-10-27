@@ -25,7 +25,7 @@ function makeToken(secret, fields) {
 // ---- simulated Google services
 function makeWorld(options) {
   options = options || {};
-  const world = { sheets: {}, opened: [], locks: { waited: 0, released: 0 }, logs: [], failWrite: false };
+  const world = { sheets: {}, opened: [], locks: { waited: 0, tried: 0, released: 0 }, logs: [], failWrite: false, lockBusy: false };
   const signed = (buffer) => Array.from(buffer, (b) => (b > 127 ? b - 256 : b));
   const unsigned = (bytes) => Buffer.from(bytes.map((b) => b & 255));
   function makeSheet(rows) {
@@ -56,7 +56,7 @@ function makeWorld(options) {
         return { getSheetByName: (name) => world.sheets[name] || null, insertSheet: (name) => { world.sheets[name] = makeSheet([]); return world.sheets[name]; } };
       },
     },
-    LockService: { getScriptLock: () => ({ waitLock: () => { world.locks.waited++; }, releaseLock: () => { world.locks.released++; } }) },
+    LockService: { getScriptLock: () => ({ waitLock: () => { world.locks.waited++; }, tryLock: () => { world.locks.tried++; return !world.lockBusy; }, releaseLock: () => { world.locks.released++; } }) },
     HtmlService: { createHtmlOutput: (html) => { const out = { html, title: '', meta: {}, setTitle(t) { out.title = t; return out; }, addMetaTag(k, v) { out.meta[k] = v; return out; }, getContent: () => html }; return out; } },
     ContentService: { createTextOutput: (text) => ({ getContent: () => text }) },
     Logger: { log: (message) => world.logs.push(message) },
@@ -242,10 +242,10 @@ test('typed text is cleaned of control characters and limited in length', () => 
 });
 test('the write happens inside the lock and the lock is released even if the write fails', () => {
   const w = makeWorld(); withTab(w); submit(w, PLAIN, '', '');
-  assert.deepStrictEqual(w.locks, { waited: 1, released: 1 });
+  assert.deepStrictEqual(plain(w.locks), { waited: 1, tried: 0, released: 1 });
   w.failWrite = true;
   assert.throws(() => submit(w, makeToken(SECRET, { e: 'b@x.com' }), '', ''), /write failed/);
-  assert.deepStrictEqual(w.locks, { waited: 2, released: 2 });
+  assert.deepStrictEqual(plain(w.locks), { waited: 2, tried: 0, released: 2 });
 });
 test('a bad link is refused when confirming and nothing is written', () => {
   const w = makeWorld(); withTab(w);
@@ -257,7 +257,7 @@ test('confirming when the page is not set up fails clearly', () => {
 });
 test('a tab with a missing column is refused rather than written into wrongly', () => {
   const w = makeWorld(); w.sheets.Unsubscribes = w.makeSheet([['Timestamp', 'Brand']]);
-  assert.throws(() => submit(w, PLAIN, '', ''), /no "Email" column/); assert.strictEqual(w.sheets.Unsubscribes.rows.length, 1); assert.deepStrictEqual(w.locks, { waited: 1, released: 1 });
+  assert.throws(() => submit(w, PLAIN, '', ''), /no "Email" column/); assert.strictEqual(w.sheets.Unsubscribes.rows.length, 1); assert.deepStrictEqual(plain(w.locks), { waited: 1, tried: 0, released: 1 });
 });
 test('columns are found by name, so a tab with extra or re-ordered columns still works', () => {
   const w = makeWorld(); w.sheets.Unsubscribes = w.makeSheet([['Notes'].concat(HEADER.slice().reverse()).concat(['Extra'])]);
@@ -289,7 +289,7 @@ test('a one-tap post for a test link records nothing and still answers', () => {
 });
 test('a one-tap post never throws, even when the sheet fails', () => {
   const w = makeWorld(); withTab(w); w.failWrite = true;
-  assert.strictEqual(post(w, PLAIN), 'Error'); assert.deepStrictEqual(w.locks, { waited: 1, released: 1 });
+  assert.strictEqual(post(w, PLAIN), 'Error'); assert.deepStrictEqual(plain(w.locks), { waited: 1, tried: 0, released: 1 });
 });
 test('a one-tap post when the page is not set up answers plainly', () => {
   assert.strictEqual(post(makeWorld({ props: {} }), PLAIN), 'Not set up');
@@ -326,6 +326,85 @@ test('setupCheck says exactly what is missing', () => {
   assert.ok(makeWorld({ props: {} }).call('setupCheck').includes('UNSUBSCRIBE_SECRET is missing or shorter than 16') && makeWorld({ props: {} }).call('setupCheck').includes('SHEET_ID is missing'));
   assert.ok(makeWorld({ props: { UNSUBSCRIBE_SECRET: 'short', SHEET_ID: 'S' } }).call('setupCheck').startsWith('PROBLEM'));
   const w = makeWorld(); w.sheets.Unsubscribes = w.makeSheet([['Timestamp']]); assert.ok(w.call('setupCheck').includes('has no "Email" column'));
+});
+
+// ================================================================ the optional troubleshooting log (DIAGNOSTICS = on)
+const DIAG_HEADER = ['Time', 'Event', 'State', 'Brand', 'Campaign', 'QueryLength', 'TokenLength', 'ParamNames'];
+function diagRows(world) { return world.sheets['Unsubscribe diagnostics'] ? world.sheets['Unsubscribe diagnostics'].rows.slice(1).map((r) => plain(r)) : []; }
+function diagWorld(extra) { return makeWorld({ props: Object.assign({ UNSUBSCRIBE_SECRET: SECRET, SHEET_ID: 'SHEET123', DIAGNOSTICS: 'on' }, extra || {}) }); }
+function open(world, token, queryString) { return world.call('doGet', { parameter: token === undefined ? {} : { t: token }, queryString: queryString === undefined ? (token === undefined ? '' : 't=' + token) : queryString }); }
+
+test('diagnostics are OFF by default: opening the page touches no sheet and no lock, and adds no beacon', () => {
+  const w = makeWorld(); const html = open(w, PLAIN).getContent();
+  assert.deepStrictEqual(w.opened, []); assert.deepStrictEqual(plain(w.locks), { waited: 0, tried: 0, released: 0 }); assert.ok(!w.sheets['Unsubscribe diagnostics'] && !html.includes('recordRendered'));
+});
+test('any value but "on" keeps diagnostics off', () => {
+  ['', 'off', 'ON?', 'yes', 'true', '0'].forEach((value) => { const w = diagWorld({ DIAGNOSTICS: value }); open(w, PLAIN); assert.strictEqual(diagRows(w).length, 0, value); });
+  const w = diagWorld({ DIAGNOSTICS: '  On ' }); open(w, PLAIN); assert.strictEqual(diagRows(w).length, 1);
+});
+test('with diagnostics on, opening a valid link adds one row that says what the visit looked like', () => {
+  const w = diagWorld(); open(w, PLAIN);
+  assert.deepStrictEqual(plain(w.sheets['Unsubscribe diagnostics'].rows[0]), DIAG_HEADER);
+  const [row] = diagRows(w); assert.ok(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(row[0]));
+  assert.deepStrictEqual(row.slice(1), ['opened', 'valid', 'Kelson Agency', 'Spring_Launch', ('t=' + PLAIN).length, PLAIN.length, 't']);
+});
+test('a test link, an invalid link and the bare address are each recorded with their own state', () => {
+  const w = diagWorld(); open(w, UNICODE_TEST); open(w, PLAIN.slice(0, -2)); open(w, undefined);
+  assert.deepStrictEqual(diagRows(w).map((r) => [r[1], r[2], r[3], r[4], r[6], r[7]]), [['opened', 'test', 'Café Ünïcode ☕', 'Café_Été', UNICODE_TEST.length, 't'], ['opened', 'invalid', '', '', PLAIN.length - 2, 't'], ['opened', 'invalid', '', '', 0, '']]);
+});
+test('a page that is not set up is recorded as such when a Sheet is known', () => {
+  const w = makeWorld({ props: { SHEET_ID: 'SHEET123', DIAGNOSTICS: 'on' } }); open(w, PLAIN);
+  assert.deepStrictEqual(diagRows(w).map((r) => [r[1], r[2]]), [['opened', 'not set up']]);
+  const none = makeWorld({ props: { DIAGNOSTICS: 'on' } }); assert.doesNotThrow(() => open(none, PLAIN)); assert.deepStrictEqual(none.opened, []);
+});
+test('the query length reveals a link that arrived shorter than it was sent', () => {
+  const w = diagWorld(); open(w, PLAIN, 't=' + PLAIN.slice(0, 40));
+  assert.strictEqual(diagRows(w)[0][5], 42);
+});
+test('the log never holds an address, a lead, a link or anything typed', () => {
+  const w = diagWorld(); open(w, PLAIN); submit(w, PLAIN, 'Too many emails', 'my private comment'); post(w, makeToken(SECRET, { e: 'zed@secret.example', l: 'L-SECRET' }));
+  const everything = JSON.stringify(w.sheets['Unsubscribe diagnostics'].rows);
+  ['ann@example.com', 'zed@secret.example', 'L-17', 'L-SECRET', 'my private comment', 'Too many emails', PLAIN.slice(0, 30), '12 Example Street'].forEach((secret) => assert.ok(!everything.includes(secret), secret));
+});
+test('the page carries a beacon only while diagnostics are on, and the beacon records that the page really ran', () => {
+  const w = diagWorld(); const html = open(w, PLAIN).getContent();
+  assert.ok(html.includes('google.script.run.withFailureHandler(function(){}).recordRendered("valid")'));
+  assert.ok(open(w, UNICODE_TEST).getContent().includes('recordRendered("test")') && open(w, 'garbage').getContent().includes('recordRendered("invalid")'));
+  assert.strictEqual(w.call('recordRendered', 'valid'), true);
+  assert.deepStrictEqual(diagRows(w).filter((r) => r[1] === 'rendered').map((r) => [r[2], r[3], r[4]]), [['valid', '', '']]);
+});
+test('the beacon cannot be used to write anything but the four known states', () => {
+  const w = diagWorld();
+  ['<script>', 'x', '', undefined, null, 'VALID', 'valid; DROP'].forEach((state) => assert.strictEqual(w.call('recordRendered', state), false));
+  assert.strictEqual(diagRows(w).length, 0);
+  ['valid', 'invalid', 'test', 'not set up'].forEach((state) => assert.strictEqual(w.call('recordRendered', state), true));
+  assert.strictEqual(diagRows(w).length, 4);
+});
+test('confirming and the one-tap post are logged as events of their own', () => {
+  const w = diagWorld(); withTab(w); submit(w, PLAIN, '', ''); post(w, makeToken(SECRET, { e: 'b@x.com' })); submit(w, UNICODE_TEST, '', ''); post(w, UNICODE_TEST); post(w, 'garbage');
+  assert.deepStrictEqual(diagRows(w).map((r) => [r[1], r[2]]), [['confirmed', 'valid'], ['one-tap', 'valid'], ['confirmed', 'test'], ['one-tap', 'test'], ['one-tap', 'invalid']]);
+});
+test('a diagnostics failure never changes what the visitor gets or what is recorded', () => {
+  const w = diagWorld(); withTab(w); w.failWrite = true;
+  assert.ok(open(w, PLAIN).getContent().includes('Unsubscribe me'));
+  w.failWrite = false; const real = submit(w, PLAIN, 'Other', 'x'); assert.strictEqual(real.ok, true); assert.strictEqual(rowsOf(w).length, 1);
+  w.failWrite = true; assert.strictEqual(post(w, UNICODE_TEST), 'Unsubscribed');
+});
+test('a busy lock skips the log row quietly and the page is still served', () => {
+  const w = diagWorld(); w.lockBusy = true;
+  assert.ok(open(w, PLAIN).getContent().includes('Unsubscribe me')); assert.strictEqual(diagRows(w).length, 0); assert.strictEqual(w.locks.tried, 1);
+  assert.strictEqual(w.locks.released, 0);
+});
+test('the log tab and its header are made once and the Unsubscribes tab is never touched by it', () => {
+  const w = diagWorld(); open(w, PLAIN); open(w, PLAIN); open(w, 'x');
+  assert.strictEqual(w.sheets['Unsubscribe diagnostics'].rows.length, 4); assert.ok(!w.sheets.Unsubscribes); assert.strictEqual(w.sheets['Unsubscribe diagnostics'].frozen, 1);
+});
+test('a lock taken for the log is always released, even when the log write fails', () => {
+  const w = diagWorld(); w.failWrite = true; open(w, PLAIN);
+  assert.strictEqual(w.locks.tried, 1); assert.strictEqual(w.locks.released, 1);
+});
+test('the troubleshooting steps are written into the script', () => {
+  assert.ok(CODE.includes('DIAGNOSTICS = on') && CODE.includes('no new row            = the request never reached this script') && CODE.includes('"opened" + "rendered"'));
 });
 
 let failed = 0;
