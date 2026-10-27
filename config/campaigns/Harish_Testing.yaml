@@ -2,3 +2,6 @@ format: html
 footer:
   business_name: Harish
   address: Chennai
+sending:
+  delay_min_minutes: 1
+  delay_max_minutes: 3
