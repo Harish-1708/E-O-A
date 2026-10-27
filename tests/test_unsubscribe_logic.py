@@ -456,10 +456,35 @@ def test_without_a_page_address_recipients_open_the_google_page_as_before():
     assert config.page == "" and note == "" and ul.PageConfig("u", "s").page == ""
 
 
-def test_a_github_pages_address_is_kept_exactly_and_without_a_warning():
-    config, note = with_page(PAGES)
-    assert config.page == PAGES and config.url == CANONICAL and note == ""
-    assert with_page("  " + PAGES + " \n")[0].page == PAGES
+CUSTOM = "https://unsubscribe.kelson.agency/"
+
+
+def test_an_address_on_your_own_domain_is_kept_exactly_and_without_a_warning():
+    config, note = with_page(CUSTOM)
+    assert config.page == CUSTOM and config.url == CANONICAL and note == ""
+    assert with_page("  " + CUSTOM + " \n")[0].page == CUSTOM and with_page("https://unsubscribe.kelson.agency/unsubscribe.html")[1] == ""
+
+
+def test_a_bare_domain_gets_its_slash_so_the_link_is_clean():
+    config, note = with_page("https://unsubscribe.kelson.agency")
+    assert config.page == CUSTOM and note == "" and ul.page_url(config.page, "abc.def") == "https://unsubscribe.kelson.agency/?t=abc.def"
+    assert with_page("https://unsubscribe.kelson.agency/x")[0].page == "https://unsubscribe.kelson.agency/x"
+
+
+@pytest.mark.parametrize("page", [PAGES, "https://someone.github.io/", "https://SOMEONE.GitHub.io/repo/unsubscribe.html"])
+def test_a_github_io_address_still_works_but_the_person_is_told_it_shows_their_github_name(page):
+    config, note = with_page(page)
+    assert config.page == page and "is a github.io address" in note and "read your GitHub name in the link" in note and "spam filters" in note
+    assert "CNAME record" in note and "Settings > Pages > Custom domain" in note and "Enforce HTTPS" in note and "https://unsubscribe.kelson.agency/" in note
+
+
+def test_a_github_io_lookalike_on_another_domain_is_not_warned_about():
+    assert with_page("https://github.io.kelson.agency/")[1] == "" and with_page("https://notgithub.io/")[1] == "" and with_page("https://xgithub.io/")[1] == ""
+
+
+def test_an_unusable_github_io_address_gets_the_reason_but_not_the_domain_warning():
+    config, note = with_page("http://someone.github.io/")
+    assert config.page == "" and "must start with https://" in note and "is a github.io address" not in note
 
 
 @pytest.mark.parametrize("page, words", [("https://script.google.com/macros/s/X/exec", "is a Google address"), ("http://harish.github.io/u.html", "must start with https://"), ("harish.github.io/u.html", "must start with https://"),
