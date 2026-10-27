@@ -133,6 +133,8 @@ def not_in_play_label(lead: Dict, stages: List[Dict]) -> Optional[str]:
     if not (lead.get("Email") or "").strip():
         return LABEL_NO_EMAIL
     status = lead.get("Status", "") or ""
+    if status == outreach.STATUS_COMPLETED and (lead.get("ReplyStatus", "") or "") == "Replied":
+        return LABEL_REPLIED                          # a reply always wins: a lead marked Completed that then answers is a Replied lead
     if status in _STATUS_LABELS:
         return _STATUS_LABELS[status]
     if (lead.get("ReplyStatus", "") or "") == "Replied":
