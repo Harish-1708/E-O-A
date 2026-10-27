@@ -22,6 +22,9 @@ from typing import Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 UNSUBSCRIBE_TAB = "Unsubscribes"
 UNSUBSCRIBE_COLUMNS = ["Timestamp", "Email", "Brand", "BrandKey", "Campaign", "LeadID", "Reason", "Details", "Source"]
 REASONS = ["Too many emails", "Not relevant to me", "I never signed up", "Other"]
+CODES_TAB = "Campaign codes"                            # written by the ENGINE, read by the Google page: turns a link's short campaign code back into the campaign's name
+CODES_COLUMNS = ["Code", "Campaign"]
+CAMPAIGN_CODE_PATTERN = r"^~[A-Za-z0-9_-]{10}$"          # a '~' can never start a real campaign name (letters, digits and underscores only), so a code is never mistaken for one
 DIAGNOSTICS_TAB = "Unsubscribe diagnostics"            # written by the Google page only while the DIAGNOSTICS script property is "on" (troubleshooting)
 DIAGNOSTICS_COLUMNS = ["Time", "Event", "State", "Brand", "Campaign", "QueryLength", "TokenLength", "ParamNames"]
 DIAGNOSTIC_EVENTS = ["opened", "rendered", "confirmed", "one-tap"]
@@ -165,6 +168,33 @@ def _unb64(text: str) -> bytes:
 
 def _sign(secret: str, body: str) -> str:
     return _b64(hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest())
+
+
+def campaign_code(secret: str, name: str) -> str:
+    """A short code that stands for a campaign's name inside a link: '~' and 10 URL-safe characters, derived from the name with the secret. Nobody holding only a link can get the
+    name back from it (or work out another campaign's code); the engine, which knows every campaign name, can recognise it and writes it to the 'Campaign codes' tab."""
+    digest = hmac.new(secret.encode("utf-8"), b"campaign\x00" + str(name).strip().encode("utf-8"), hashlib.sha256).digest()
+    return "~" + _b64(digest)[:10]
+
+
+def plan_code_rows(existing: Iterable[Dict], wanted: Dict[str, str]) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """(rows to add, codes in conflict). A code already listed against the same name needs nothing; one never listed (or listed with no name) is added; one listed against a DIFFERENT
+    name is a conflict, reported and never overwritten (two names sharing a code is not expected: it would take a collision in 60 bits)."""
+    known: Dict[str, str] = {}
+    for row in existing:
+        code, name = str(row.get("Code") or "").strip(), str(row.get("Campaign") or "").strip()
+        if code and (name or code not in known):
+            known.setdefault(code, name)
+            if name and not known[code]:
+                known[code] = name
+    to_add: List[Tuple[str, str]] = []
+    conflicts: List[str] = []
+    for code, name in sorted(wanted.items()):
+        if not known.get(code):
+            to_add.append((code, name))
+        elif known[code] != name:
+            conflicts.append(code)
+    return to_add, conflicts
 
 
 def make_token(secret: str, *, campaign: str, lead_id: str, email: str, brand: str, key: str, address: str = "", test: bool = False) -> str:
