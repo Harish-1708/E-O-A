@@ -5,3 +5,7 @@ footer:
 sending:
   delay_min_minutes: 1
   delay_max_minutes: 3
+  daily_limit: 100
+  sender_rotation: false
+  rotation_accounts:
+  - sales1
