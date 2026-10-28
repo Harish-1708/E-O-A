@@ -13,6 +13,7 @@ PAGE_SIZE = 25
 MAX_STAGES = 11                       # the Master Sheet has Intro plus FollowUp1 … FollowUp10
 
 STATUS_REMOVED, STATUS_REPLIED, STATUS_BOUNCED = "Removed", "Stopped - Replied", "Stopped - Bounced"
+STATUS_UNSUBSCRIBED = "Stopped - Unsubscribed"                              # the person used the unsubscribe link of an HTML campaign (see outreach.STATUS_STOPPED_UNSUBSCRIBED)
 STATUS_PAUSED, STATUS_COMPLETED = "Paused", "Completed"        # the other two the engine writes (see outreach.STATUS_*)
 
 # a status pill's colour family (see leads_html): green, blue, red, amber, grey
@@ -117,6 +118,8 @@ def status_summary(lead: Dict, count: Optional[int] = None) -> Tuple[str, str]:
         return "Paused", KIND_WAITING
     if status == STATUS_COMPLETED:
         return "Completed", KIND_NEUTRAL
+    if status == STATUS_UNSUBSCRIBED:
+        return "Unsubscribed", KIND_WAITING                                      # amber, the same colour as its bar in Performance
     if count is not None and sequence_completed(lead, count):
         return "Completed", KIND_NEUTRAL
     if status.startswith("Stopped"):
@@ -199,6 +202,8 @@ def timeline(lead: Dict, labels: List[str], today: Optional[date] = None) -> Lis
         events.append((_parse(stopped_raw), stopped_raw, "⚠️", "Bounced — sending stopped"))
     elif status == STATUS_REMOVED:
         events.append((_parse(stopped_raw), stopped_raw, "🗑️", "Removed from the campaign"))
+    elif status == STATUS_UNSUBSCRIBED:
+        events.append((_parse(stopped_raw), stopped_raw, "🚫", "Unsubscribed — sending stopped"))
     elif status.startswith("Stopped") and status != STATUS_REPLIED:
         events.append((_parse(stopped_raw), stopped_raw, "⏹️", f"{status} — sending stopped"))
     elif status == STATUS_REPLIED:
