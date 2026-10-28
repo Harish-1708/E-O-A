@@ -24,6 +24,10 @@
  *      "This link is not valid". If Google shows "unable to open the file" instead, the access setting or the address is wrong: go back to step 4.
  *   7. Send yourself a test email from the app. The run's summary also opens the page from GitHub and says OK or PROBLEM. Then click Unsubscribe in the email (a test link records nothing).
  *
+ * THE CAMPAIGN'S OWN SHEET: when someone unsubscribes, this script also marks their row in that campaign's tab ("<campaign> Master Sheet", in this same spreadsheet) as "Stopped - Unsubscribed" straight
+ *   away, so the app shows it at once. A lead who replied, bounced, was rejected, was stopped by hand or removed keeps that outcome. If the tab cannot be found or written, the opt-out is still
+ *   recorded, and the engine marks the row on its next run. Opening the link again after unsubscribing shows "You are already unsubscribed", not the questions.
+ *
  * CAMPAIGN CODES: the links carry a short code ('~' and 10 characters) instead of your campaign's name, so recipients cannot read your campaign names. The engine lists each code next to its name
  *   in a tab called "Campaign codes" (made for you the first time a campaign sends); this script only READS that tab, to write the name into the Campaign column. If a code is not listed
  *   there, the Campaign column shows the code: the "Campaign codes" tab always tells you which campaign it stands for.
@@ -48,6 +52,9 @@ var CAMPAIGN_CODE_PATTERN = /^~[A-Za-z0-9_-]{10}$/;
 var DIAG_TAB = 'Unsubscribe diagnostics';
 var DIAG_COLUMNS = ['Time', 'Event', 'State', 'Brand', 'Campaign', 'QueryLength', 'TokenLength', 'ParamNames'];
 var DIAG_STATES = ['valid', 'invalid', 'test', 'not set up'];
+var STATUS_UNSUBSCRIBED = 'Stopped - Unsubscribed';
+var UNSUBSCRIBE_KEEPS_STATUS = ['Stopped - Unsubscribed', 'Stopped - Replied', 'Stopped - Bounced', 'Stopped - Rejected', 'Stopped - Manual', 'Removed'];     // an outcome already decided is never overwritten
+var MASTER_TAB_SUFFIX = ' Master Sheet';
 var MAX_REASON = 60;
 var MAX_DETAILS = 500;
 var MIN_SECRET_LENGTH = 16;
@@ -154,6 +161,58 @@ function campaignLabel_(value, sheetId) {
 }
 
 
+/* ------------------------------------------------------------------ the campaign's own master sheet */
+
+/** Marks this person's row(s) in THE CAMPAIGN'S master tab ("<campaign> Master Sheet", in the same spreadsheet) as "Stopped - Unsubscribed", straight away, so the app shows it without waiting for
+ *  the next send. A lead whose outcome is already decided (replied, bounced, rejected, stopped by hand, removed, or already unsubscribed) is left exactly as it is. Best effort and it never throws:
+ *  whatever happens here, the opt-out itself has already been recorded. Returns what it did, in a word: updated, none, no code, no tab, no columns or error. */
+function updateMasterSheet_(payload, props) {
+  try {
+    var name = campaignLabel_(payload.c, props.sheetId);
+    if (!name || CAMPAIGN_CODE_PATTERN.test(name)) { return 'no code'; }
+    var sheet = SpreadsheetApp.openById(props.sheetId).getSheetByName(name + MASTER_TAB_SUFFIX);
+    if (!sheet) { return 'no tab'; }
+    var values = sheet.getDataRange().getValues();
+    var header = values[0] || [];
+    var emailColumn = header.indexOf('Email'), statusColumn = header.indexOf('Status'), actionColumn = header.indexOf('LastActionAt');
+    if (emailColumn < 0 || statusColumn < 0) { return 'no columns'; }
+    var wanted = String(payload.e).trim().toLowerCase();
+    var now = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd HH:mm:ss');
+    var changed = 0;
+    for (var row = 1; row < values.length; row++) {
+      if (String(values[row][emailColumn]).trim().toLowerCase() !== wanted) { continue; }
+      if (UNSUBSCRIBE_KEEPS_STATUS.indexOf(String(values[row][statusColumn]).trim()) >= 0) { continue; }
+      sheet.getRange(row + 1, statusColumn + 1).setValue(STATUS_UNSUBSCRIBED);
+      if (actionColumn >= 0) { sheet.getRange(row + 1, actionColumn + 1).setValue(now); }
+      changed++;
+    }
+    return changed ? 'updated' : 'none';
+  } catch (error) {
+    return 'error';
+  }
+}
+
+/** True when this address has already opted out of this brand (a hand-added row with no brand applies to every brand). Read-only; false when the tab is missing or cannot be read. */
+function alreadyOptedOut_(sheetId, email, key) {
+  try {
+    var sheet = SpreadsheetApp.openById(sheetId).getSheetByName(TAB_NAME);
+    if (!sheet) { return false; }
+    var values = sheet.getDataRange().getValues();
+    if (values.length < 2) { return false; }
+    var index = columnIndexes_(values[0]);
+    var wanted = String(email).trim().toLowerCase();
+    for (var row = 1; row < values.length; row++) {
+      if (String(values[row][index.Email]).trim().toLowerCase() !== wanted) { continue; }
+      var rowKey = String(values[row][index.BrandKey]).trim();
+      if (!rowKey || rowKey === String(key)) { return true; }
+    }
+    return false;
+  } catch (error) {
+    return false;
+  }
+}
+
+
 /* ------------------------------------------------------------------ troubleshooting log (off unless the DIAGNOSTICS property is "on") */
 
 function diagnosticsOn_() {
@@ -225,6 +284,7 @@ function columnIndexes_(headerRow) {
  */
 function record_(payload, source, reason, details, props) {
   var result = { ok: true, masked: maskEmail_(payload.e), brand: payload.b, address: payload.a, already: false, test: payload.t === 1 };
+  Object.defineProperty(result, 'master', { value: '', writable: true, enumerable: false });        // what was done in the master sheet: for the log only, never sent to the visitor
   if (result.test) { return result; }
   var cleanReason = REASONS.indexOf(String(reason || '')) >= 0 ? String(reason) : '';
   var cleanDetails = cleanText_(details, MAX_DETAILS);
@@ -242,6 +302,7 @@ function record_(payload, source, reason, details, props) {
           sheet.getRange(row + 1, index.Reason + 1).setValue(cleanReason);
           if (cleanDetails) { sheet.getRange(row + 1, index.Details + 1).setValue(safeCell_(cleanDetails)); }
         }
+        result.master = updateMasterSheet_(payload, props);            // again, so a master sheet that could not be updated the first time catches up
         return result;
       }
     }
@@ -257,6 +318,7 @@ function record_(payload, source, reason, details, props) {
     line[index.Details] = safeCell_(cleanDetails);
     line[index.Source] = source;
     sheet.appendRow(line);
+    result.master = updateMasterSheet_(payload, props);
     return result;
   } finally {
     lock.releaseLock();
@@ -274,7 +336,8 @@ function info_(e) {
   if (!payload) { logDiag_('opened', 'invalid', null, e); return { ok: false, state: 'invalid' }; }
   var state = payload.t === 1 ? 'test' : 'valid';
   logDiag_('opened', state, payload, e);
-  return { ok: true, state: state, brand: payload.b, masked: maskEmail_(payload.e), address: payload.a, reasons: REASONS.slice(), test: payload.t === 1 };
+  var already = payload.t !== 1 && alreadyOptedOut_(props.sheetId, payload.e, payload.k);
+  return { ok: true, state: state, brand: payload.b, masked: maskEmail_(payload.e), address: payload.a, reasons: REASONS.slice(), test: payload.t === 1, already: already };
 }
 
 /** Records an opt-out for the page on GitHub Pages. `body` is the request's JSON. Never throws; says what happened in plain fields. */
@@ -286,6 +349,7 @@ function confirmApi_(body) {
     if (!payload) { return { ok: false, error: 'invalid' }; }
     var result = record_(payload, 'page', body.reason, body.details, props);
     logDiag_('confirmed', result.test ? 'test' : 'valid', payload, null);
+    if (result.master) { logDiag_('master', result.master, payload, null); }
     return result;
   } catch (error) {
     return { ok: false, error: 'failed' };
@@ -315,7 +379,8 @@ function doGet(e) {
   if (!payload) { logDiag_('opened', 'invalid', null, e); return page_(shell_('UNSUBSCRIBE', invalidBody_(), 'No information was recorded.', 'invalid')); }
   var state = payload.t === 1 ? 'test' : 'valid';
   logDiag_('opened', state, payload, e);
-  return page_(shell_(payload.b ? payload.b.toUpperCase() : 'UNSUBSCRIBE', confirmBody_(payload, e.parameter.t), footerLine_(payload), state));
+  var already = payload.t !== 1 && alreadyOptedOut_(props.sheetId, payload.e, payload.k);
+  return page_(shell_(payload.b ? payload.b.toUpperCase() : 'UNSUBSCRIBE', already ? alreadyBody_(payload) : confirmBody_(payload, e.parameter.t), footerLine_(payload), state));
 }
 
 /** A mail app's one-tap Unsubscribe (RFC 8058): a POST with List-Unsubscribe=One-Click to the link's own address. */
@@ -329,8 +394,9 @@ function doPost(e) {
     var payload = verifyToken_(params.t, props.secret);
     if (!payload) { logDiag_('one-tap', 'invalid', null, e); return text_('Invalid link'); }
     if (String(params['List-Unsubscribe'] || '') !== 'One-Click') { return text_('Unsupported request'); }
-    record_(payload, 'one-click', '', '', props);
+    var oneTap = record_(payload, 'one-click', '', '', props);
     logDiag_('one-tap', payload.t === 1 ? 'test' : 'valid', payload, e);
+    if (oneTap.master) { logDiag_('master', oneTap.master, payload, null); }
     return text_('Unsubscribed');
   } catch (error) {
     return text_('Error');
@@ -345,6 +411,7 @@ function submitUnsubscribe(token, reason, details) {
   if (!payload) { throw new Error('This link is not valid.'); }
   var result = record_(payload, 'page', reason, details, props);
   logDiag_('confirmed', result.test ? 'test' : 'valid', payload, null);
+  if (result.master) { logDiag_('master', result.master, payload, null); }
   return result;
 }
 
@@ -396,6 +463,13 @@ function invalidBody_() {
 
 function unavailableBody_() {
   return '<div class="warn">!</div><h1>Unsubscribe is not available right now</h1><p>Please reply <b>unsubscribe</b> to the email you received and we will remove you.</p>';
+}
+
+/** What a person sees when they open the link again after unsubscribing: no questions, just the confirmation. */
+function alreadyBody_(payload) {
+  var who = payload.b ? 'emails like this one from ' + escapeHtml_(payload.b) : 'emails like this one';
+  return '<div class="tick">\u2713</div><h1>You are already unsubscribed</h1><p>' + escapeHtml_(maskEmail_(payload.e)) + ' has already been removed from this mailing list. You will not receive any more ' + who + '.</p>' +
+    '<p>Unsubscribed by mistake? Reply to any of our emails and we will add you back.</p>';
 }
 
 function confirmBody_(payload, token) {
