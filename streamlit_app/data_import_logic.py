@@ -207,9 +207,19 @@ FILTER_COMPLETED = "Completed"
 FILTER_REPLIED = "Replied"
 FILTER_BOUNCED = "Bounced"
 FILTER_REMOVED = "Removed"
+FILTER_UNSUBSCRIBED = "Unsubscribed"          # only offered for an HTML campaign (see filter_options): a plain-text campaign has no unsubscribe page
 
 # (There used to be a "Pending Approval" filter here. Approval no longer gates sending and is not used any more, so it was removed.)
 FILTER_OPTIONS = [FILTER_ALL, FILTER_IN_PROGRESS, FILTER_COMPLETED, FILTER_REPLIED, FILTER_BOUNCED, FILTER_REMOVED]
+
+
+def filter_options(campaign_cfg: Optional[Dict]) -> List[str]:
+    """The status chips for this campaign: FILTER_OPTIONS, plus 'Unsubscribed' (just before 'Removed') for an HTML campaign only."""
+    if (campaign_cfg or {}).get("format") != "html":
+        return list(FILTER_OPTIONS)
+    options = list(FILTER_OPTIONS)
+    options.insert(options.index(FILTER_REMOVED), FILTER_UNSUBSCRIBED)
+    return options
 
 
 def filter_leads(leads: List[Dict], status_filter: str, stage_count: Optional[int] = None) -> List[Dict]:
@@ -225,6 +235,8 @@ def filter_leads(leads: List[Dict], status_filter: str, stage_count: Optional[in
         return [l for l in leads if l.get("Status") == "Stopped - Replied"]
     if status_filter == FILTER_BOUNCED:
         return [l for l in leads if l.get("Status") == "Stopped - Bounced"]
+    if status_filter == FILTER_UNSUBSCRIBED:
+        return [l for l in leads if l.get("Status") == "Stopped - Unsubscribed"]
     if status_filter == FILTER_COMPLETED:
         return [l for l in leads if finished(l)]
     if status_filter == FILTER_IN_PROGRESS:
