@@ -15,7 +15,7 @@ import performance_html as H
 from leads_logic import humanize_stage
 from performance_figures import build_performance_csv, export_filename, headline_figures
 from performance_logic import (
-    daily_series, format_rate, INTENT_ORDER, INTENT_NOT_CLASSIFIED, OUTCOME_NAMES, OUTCOME_ORDER,
+    daily_series, format_rate, INTENT_ORDER, INTENT_NOT_CLASSIFIED, OUTCOME_NAMES, outcome_order,
 )
 
 RANGES = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90, "All time": None}
@@ -47,11 +47,11 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
     # ---- headline cards (the very same figures the Export file contains)
     cards = [H.kpi_html(f["label"], f["value"], f["caption"], f["help"], f["trend"]) for f in headline_figures(perf)]
     _show(H.grid_html("g6", cards[:6]))
-    _show(H.grid_html("g4", cards[6:]))
+    _show(H.grid_html("g5" if len(cards) > 10 else "g4", cards[6:]))                # five cards on the second row for an HTML campaign (the Unsubscribed card)
 
     # ---- where every lead is right now (each lead is in exactly one place, so these add up to the leads)
     outcomes = perf.get("outcomes") or {}
-    outcome_rows = [(OUTCOME_NAMES.get(label, label), int(outcomes.get(label, 0))) for label in OUTCOME_ORDER if int(outcomes.get(label, 0)) > 0]
+    outcome_rows = [(OUTCOME_NAMES.get(label, label), int(outcomes.get(label, 0))) for label in outcome_order(perf) if int(outcomes.get(label, 0)) > 0]
     if outcome_rows:
         _show(H.card_html("Where your leads are now", f"Every lead is in exactly one place, so these add up to your {perf['total_leads']} leads. "
                           "A lead that finished the sequence moves to Replied if it answers later.", H.bars_html(outcome_rows, H.OUTCOME_COLOURS)))
