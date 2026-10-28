@@ -188,7 +188,7 @@ test('confirming records one row with every column, creating the tab and its hea
   const w = makeWorld();
   const result = submit(w, PLAIN, 'Too many emails', 'Weekly is too much');
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), { ok: true, masked: 'a***@example.com', brand: 'Kelson Agency', address: '12 Example Street, New York, NY', already: false, test: false });
-  assert.deepStrictEqual(plain(w.sheets.Unsubscribes.rows[0]), HEADER); assert.strictEqual(w.sheets.Unsubscribes.frozen, 1); assert.deepStrictEqual(w.opened, ['SHEET123']);
+  assert.deepStrictEqual(plain(w.sheets.Unsubscribes.rows[0]), HEADER); assert.strictEqual(w.sheets.Unsubscribes.frozen, 1); assert.ok(w.opened.length > 0 && w.opened.every((id) => id === 'SHEET123'));
   const [row] = rowsOf(w);
   assert.ok(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(row[0]));
   assert.deepStrictEqual(plain(row.slice(1)), ['ann@example.com', 'Kelson Agency', 'kelsonagency', 'Spring_Launch', 'L-17', 'Too many emails', 'Weekly is too much', 'page']);
@@ -334,9 +334,9 @@ function diagRows(world) { return world.sheets['Unsubscribe diagnostics'] ? worl
 function diagWorld(extra) { return makeWorld({ props: Object.assign({ UNSUBSCRIBE_SECRET: SECRET, SHEET_ID: 'SHEET123', DIAGNOSTICS: 'on' }, extra || {}) }); }
 function open(world, token, queryString) { return world.call('doGet', { parameter: token === undefined ? {} : { t: token }, queryString: queryString === undefined ? (token === undefined ? '' : 't=' + token) : queryString }); }
 
-test('diagnostics are OFF by default: opening the page touches no sheet and no lock, and adds no beacon', () => {
+test('diagnostics are OFF by default: opening the page writes no sheet and takes no lock, and adds no beacon', () => {
   const w = makeWorld(); const html = open(w, PLAIN).getContent();
-  assert.deepStrictEqual(w.opened, []); assert.deepStrictEqual(plain(w.locks), { waited: 0, tried: 0, released: 0 }); assert.ok(!w.sheets['Unsubscribe diagnostics'] && !html.includes('recordRendered'));
+  assert.deepStrictEqual(Object.keys(w.sheets), []); assert.deepStrictEqual(plain(w.locks), { waited: 0, tried: 0, released: 0 }); assert.ok(!w.sheets['Unsubscribe diagnostics'] && !html.includes('recordRendered'));
 });
 test('any value but "on" keeps diagnostics off', () => {
   ['', 'off', 'ON?', 'yes', 'true', '0'].forEach((value) => { const w = diagWorld({ DIAGNOSTICS: value }); open(w, PLAIN); assert.strictEqual(diagRows(w).length, 0, value); });
@@ -382,7 +382,7 @@ test('the beacon cannot be used to write anything but the four known states', ()
 });
 test('confirming and the one-tap post are logged as events of their own', () => {
   const w = diagWorld(); withTab(w); submit(w, PLAIN, '', ''); post(w, makeToken(SECRET, { e: 'b@x.com' })); submit(w, UNICODE_TEST, '', ''); post(w, UNICODE_TEST); post(w, 'garbage');
-  assert.deepStrictEqual(diagRows(w).map((r) => [r[1], r[2]]), [['confirmed', 'valid'], ['one-tap', 'valid'], ['confirmed', 'test'], ['one-tap', 'test'], ['one-tap', 'invalid']]);
+  assert.deepStrictEqual(diagRows(w).map((r) => [r[1], r[2]]), [['confirmed', 'valid'], ['master', 'no tab'], ['one-tap', 'valid'], ['master', 'no tab'], ['confirmed', 'test'], ['one-tap', 'test'], ['one-tap', 'invalid']]);
 });
 test('a diagnostics failure never changes what the visitor gets or what is recorded', () => {
   const w = diagWorld(); withTab(w); w.failWrite = true;
@@ -416,7 +416,7 @@ function confirmJson(world, body) { return JSON.parse(confirmCall(world, body).g
 test('info answers with data, as JSON, never as a page', () => {
   const w = makeWorld(); withTab(w); const out = info(w, PLAIN);
   assert.strictEqual(out.mime, 'JSON'); assert.ok(!out.getContent().includes('<'));
-  assert.deepStrictEqual(JSON.parse(out.getContent()), { ok: true, state: 'valid', brand: 'Kelson Agency', masked: 'a***@example.com', address: '12 Example Street, New York, NY', reasons: ['Too many emails', 'Not relevant to me', 'I never signed up', 'Other'], test: false });
+  assert.deepStrictEqual(JSON.parse(out.getContent()), { ok: true, state: 'valid', brand: 'Kelson Agency', masked: 'a***@example.com', address: '12 Example Street, New York, NY', reasons: ['Too many emails', 'Not relevant to me', 'I never signed up', 'Other'], test: false, already: false });
 });
 test('info never reveals the full address, the lead or the link, and never changes anything', () => {
   const w = makeWorld(); withTab(w); const text = info(w, PLAIN).getContent();
@@ -491,7 +491,7 @@ test('opening the Google page without api=info still shows the page, exactly as 
 });
 test('with diagnostics on, the page interface is logged like any other visit and holds nothing personal', () => {
   const w = diagWorld(); withTab(w); info(w, PLAIN); info(w, 'garbage'); confirmJson(w, { api: 'confirm', t: PLAIN, reason: 'Other', details: 'private words' });
-  assert.deepStrictEqual(diagRows(w).map((r) => [r[1], r[2]]), [['opened', 'valid'], ['opened', 'invalid'], ['confirmed', 'valid']]);
+  assert.deepStrictEqual(diagRows(w).map((r) => [r[1], r[2]]), [['opened', 'valid'], ['opened', 'invalid'], ['confirmed', 'valid'], ['master', 'no tab']]);
   const everything = JSON.stringify(w.sheets['Unsubscribe diagnostics'].rows); ['ann@example.com', 'private words', 'L-17'].forEach((x) => assert.ok(!everything.includes(x)));
 });
 test('the page-interface calls are written into the script\'s own description', () => {
@@ -562,6 +562,144 @@ test('the diagnostics log shows the name when the code is listed and the code wh
 });
 test('the code list is described in the script\'s own steps', () => {
   assert.ok(CODE.includes('CAMPAIGN CODES:') && CODE.includes('"Campaign codes"') && CODE.includes('this script only READS that tab'));
+});
+
+// ================================================================ opening the link again after unsubscribing, and the campaign's own master sheet
+const MHEADER = ['LeadID', 'Email', 'FirstName', 'IntroSentAt', 'Status', 'LastActionAt', 'ReplyStatus'];
+const MASTER = 'Spring_Launch Master Sheet';
+function withMaster(world, rows, header, tab) { world.sheets[tab || MASTER] = world.makeSheet([(header || MHEADER).slice()].concat(rows)); return world.sheets[tab || MASTER]; }
+function masterOf(world, tab) { return world.sheets[tab || MASTER].rows.slice(1).map((r) => plain(r)); }
+const lead = (email, status, extra) => ['L-1', email, 'Ann', '2026-10-01 10:00:00', status || '', (extra && extra.at) || '', ''];
+const optedOutRow = (email, key) => ['2026-10-01 09:00:00', email, 'Kelson Agency', key, 'Spring_Launch', 'L-17', '', '', 'page'];
+
+test('info says already: false before an opt-out and already: true after it, for the same address and brand', () => {
+  const w = makeWorld(); withTab(w);
+  assert.strictEqual(infoJson(w, PLAIN).already, false); recordFrom(w, PLAIN); assert.strictEqual(infoJson(w, PLAIN).already, true);
+});
+test('already is per brand: the same address is not "already" for another brand', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('ann@example.com', 'kelsonagency')]);
+  assert.strictEqual(infoJson(w, PLAIN).already, true); assert.strictEqual(infoJson(w, makeToken(SECRET, { k: 'swoveralls', b: 'Swoveralls' })).already, false);
+});
+test('a hand-added row with no brand applies to every brand', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('ann@example.com', '')]);
+  assert.strictEqual(infoJson(w, PLAIN).already, true); assert.strictEqual(infoJson(w, makeToken(SECRET, { k: 'anything' })).already, true);
+});
+test('already is matched ignoring case and surrounding spaces, and never for another address', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('  ANN@Example.COM ', 'kelsonagency')]);
+  assert.strictEqual(infoJson(w, PLAIN).already, true); assert.strictEqual(infoJson(w, makeToken(SECRET, { e: 'bob@example.com' })).already, false);
+});
+test('a test link is never "already", even when the address has opted out', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('ann@example.com', 'kelsonagency')]);
+  assert.strictEqual(infoJson(w, makeToken(SECRET, { t: 1 })).already, false); assert.ok(get(w, makeToken(SECRET, { t: 1 })).includes('Unsubscribe me'));
+});
+test('a missing or unreadable Unsubscribes tab means "not already" and never an error', () => {
+  const none = makeWorld(); assert.strictEqual(infoJson(none, PLAIN).already, false);
+  const broken = makeWorld(); broken.sheets.Unsubscribes = { getDataRange() { throw new Error('boom'); } }; assert.strictEqual(infoJson(broken, PLAIN).already, false); assert.ok(get(broken, PLAIN).includes('Unsubscribe me'));
+});
+test('a tab with a missing column means "not already" and never an error', () => {
+  const w = makeWorld(); w.sheets.Unsubscribes = w.makeSheet([['Timestamp', 'Email'], ['x', 'ann@example.com']]); assert.strictEqual(infoJson(w, PLAIN).already, false);
+});
+test('the Google page shows "You are already unsubscribed" with no questions and no buttons', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('ann@example.com', 'kelsonagency')]); const html = get(w, PLAIN);
+  assert.ok(html.includes('You are already unsubscribed') && html.includes('a***@example.com has already been removed from this mailing list') && html.includes('emails like this one from Kelson Agency'));
+  assert.ok(html.includes('Unsubscribed by mistake? Reply to any of our emails and we will add you back.'));
+  ['Why are you leaving', 'Unsubscribe me', 'type="radio"', '<textarea', '<button', '<input', 'google.script.run', 'No, keep me subscribed'].forEach((x) => assert.ok(!html.includes(x), x));
+});
+test('the Google page still asks the questions for someone who has not unsubscribed', () => {
+  const html = get(makeWorld(), PLAIN); assert.ok(html.includes('Why are you leaving') && html.includes('Unsubscribe me') && !html.includes('already unsubscribed'));
+});
+test('the already page holds nothing but the masked address and the brand', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('ann@example.com', 'kelsonagency')]); const html = get(w, PLAIN);
+  ['ann@example.com', 'L-17', 'Spring_Launch', PLAIN.slice(0, 30)].forEach((x) => assert.ok(!html.includes(x), x));
+});
+test('opening the link reads the Unsubscribes tab but writes nothing and takes no lock', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('ann@example.com', 'kelsonagency')]); const before = JSON.stringify(w.sheets.Unsubscribes.rows);
+  info(w, PLAIN); get(w, PLAIN); assert.strictEqual(JSON.stringify(w.sheets.Unsubscribes.rows), before); assert.deepStrictEqual(plain(w.locks), { waited: 0, tried: 0, released: 0 });
+});
+
+test('an opt-out marks the person\'s row in THAT campaign\'s master tab as Stopped - Unsubscribed, with the time', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('bob@example.com'), lead('ann@example.com'), lead('cy@example.com')]); recordFrom(w, PLAIN);
+  const rows = masterOf(w); assert.deepStrictEqual([rows[0][4], rows[2][4]], ['', '']); assert.strictEqual(rows[1][4], 'Stopped - Unsubscribed'); assert.ok(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(rows[1][5]));
+  assert.deepStrictEqual([rows[0][5], rows[2][5]], ['', '']);
+});
+test('only the campaign the person unsubscribed from is touched', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]); withMaster(w, [lead('ann@example.com')], MHEADER, 'Autumn_Launch Master Sheet'); recordFrom(w, PLAIN);
+  assert.strictEqual(masterOf(w)[0][4], 'Stopped - Unsubscribed'); assert.strictEqual(masterOf(w, 'Autumn_Launch Master Sheet')[0][4], '');
+});
+test('the master sheet is updated whichever way the opt-out arrives: the page, the Google page or the one-tap post', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('a@x.com'), lead('b@x.com'), lead('c@x.com')]);
+  recordFrom(w, makeToken(SECRET, { e: 'a@x.com' })); submit(w, makeToken(SECRET, { e: 'b@x.com' }), '', ''); post(w, makeToken(SECRET, { e: 'c@x.com' }));
+  assert.deepStrictEqual(masterOf(w).map((r) => r[4]), ['Stopped - Unsubscribed', 'Stopped - Unsubscribed', 'Stopped - Unsubscribed']);
+});
+test('a code is turned into the campaign\'s name to find its master tab, and an unlisted code touches nothing', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]); withCodes(w, [[CCODE, 'Spring_Launch']]); recordFrom(w, coded());
+  assert.strictEqual(masterOf(w)[0][4], 'Stopped - Unsubscribed');
+  const unlisted = makeWorld(); withTab(unlisted); withMaster(unlisted, [lead('ann@example.com')]); const j = recordFrom(unlisted, coded());
+  assert.strictEqual(j.ok, true); assert.strictEqual(masterOf(unlisted)[0][4], ''); assert.strictEqual(rowsOf(unlisted).length, 1);
+});
+['Stopped - Replied', 'Stopped - Bounced', 'Stopped - Rejected', 'Stopped - Manual', 'Removed', 'Stopped - Unsubscribed'].forEach((status) => {
+  test(`a lead whose outcome is already decided (${status}) is left exactly as it is`, () => {
+    const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com', status, { at: '2026-09-01 08:00:00' })]); recordFrom(w, PLAIN);
+    assert.deepStrictEqual(masterOf(w)[0].slice(4, 6), [status, '2026-09-01 08:00:00']);
+  });
+});
+['', 'Paused', 'Completed', 'Active', 'In sequence', 'something else'].forEach((status) => {
+  test(`a lead that is ${JSON.stringify(status)} becomes Stopped - Unsubscribed`, () => {
+    const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com', status)]); recordFrom(w, PLAIN);
+    assert.strictEqual(masterOf(w)[0][4], 'Stopped - Unsubscribed');
+  });
+});
+test('the address is matched ignoring case and spaces, and every row for it is updated', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('  ANN@Example.com '), lead('bob@example.com'), lead('ann@example.com', 'Stopped - Replied'), lead('ann@example.com')]); recordFrom(w, PLAIN);
+  assert.deepStrictEqual(masterOf(w).map((r) => r[4]), ['Stopped - Unsubscribed', '', 'Stopped - Replied', 'Stopped - Unsubscribed']);
+});
+test('the time written is UTC in the format the engine writes', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]); recordFrom(w, PLAIN);
+  const stamp = masterOf(w)[0][5]; assert.ok(Math.abs(Date.parse(stamp.replace(' ', 'T') + 'Z') - Date.now()) < 60000, stamp);
+});
+test('a master tab with no LastActionAt column still gets its status', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [['L-1', 'ann@example.com', '']], ['LeadID', 'Email', 'Status']); recordFrom(w, PLAIN);
+  assert.deepStrictEqual(masterOf(w)[0], ['L-1', 'ann@example.com', 'Stopped - Unsubscribed']);
+});
+test('a master tab with no Email or no Status column is left alone and the opt-out is still recorded', () => {
+  ['Email', 'Status'].forEach((missing) => {
+    const header = MHEADER.filter((name) => name !== missing); const w = makeWorld(); withTab(w); withMaster(w, [header.map(() => 'ann@example.com')], header);
+    const before = JSON.stringify(masterOf(w)); assert.strictEqual(recordFrom(w, PLAIN).ok, true); assert.strictEqual(JSON.stringify(masterOf(w)), before); assert.strictEqual(rowsOf(w).length, 1);
+  });
+});
+test('a campaign with no master tab leaves the opt-out recorded and changes nothing else', () => {
+  const w = makeWorld(); withTab(w); const j = recordFrom(w, PLAIN); assert.strictEqual(j.ok, true); assert.strictEqual(rowsOf(w).length, 1); assert.ok(!w.sheets[MASTER]);
+});
+test('a master tab that cannot be written never breaks the opt-out, and the lock is released', () => {
+  const w = makeWorld(); withTab(w); w.sheets[MASTER] = { getDataRange: () => ({ getValues: () => [MHEADER.slice(), lead('ann@example.com')] }), getRange: () => ({ setValue() { throw new Error('boom'); } }) };
+  const j = recordFrom(w, PLAIN); assert.strictEqual(j.ok, true); assert.strictEqual(rowsOf(w).length, 1); assert.deepStrictEqual(plain(w.locks), { waited: 1, tried: 0, released: 1 });
+});
+test('a master tab that cannot be read never breaks the opt-out', () => {
+  const w = makeWorld(); withTab(w); w.sheets[MASTER] = { getDataRange() { throw new Error('boom'); } }; assert.strictEqual(recordFrom(w, PLAIN).ok, true); assert.strictEqual(rowsOf(w).length, 1);
+});
+test('repeating the opt-out catches up a master sheet that could not be updated the first time', () => {
+  const w = makeWorld(); withTab(w); recordFrom(w, PLAIN); withMaster(w, [lead('ann@example.com')]);
+  assert.strictEqual(masterOf(w)[0][4], ''); const again = recordFrom(w, PLAIN); assert.strictEqual(again.already, true); assert.strictEqual(masterOf(w)[0][4], 'Stopped - Unsubscribed'); assert.strictEqual(rowsOf(w).length, 1);
+});
+test('a test link never reads or writes the master sheet', () => {
+  const w = makeWorld(); let reads = 0; w.sheets[MASTER] = { getDataRange() { reads++; return { getValues: () => [MHEADER.slice()] }; }, getRange() { throw new Error('written'); } };
+  recordFrom(w, makeToken(SECRET, { t: 1 })); submit(w, makeToken(SECRET, { t: 1 }), '', ''); post(w, makeToken(SECRET, { t: 1 })); assert.strictEqual(reads, 0);
+});
+test('what the visitor is told is exactly what it was: nothing about the master sheet reaches them', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]); const j = recordFrom(w, PLAIN);
+  assert.deepStrictEqual(Object.keys(j).sort(), ['address', 'already', 'brand', 'masked', 'ok', 'test']); assert.ok(!JSON.stringify(j).includes('master'));
+});
+test('with diagnostics on, what happened in the master sheet is logged in a word, without anything personal', () => {
+  const states = [];
+  [['updated', (w) => withMaster(w, [lead('ann@example.com')])], ['none', (w) => withMaster(w, [lead('bob@example.com')])], ['no tab', () => {}],
+   ['no columns', (w) => withMaster(w, [['x']], ['Other'])], ['no code', (w) => { withMaster(w, [lead('ann@example.com')]); }]].forEach(([expected, setup], i) => {
+    const w = diagWorld(); withTab(w); setup(w); recordFrom(w, expected === 'no code' ? coded() : PLAIN); const row = diagRows(w).find((r) => r[1] === 'master'); states.push([expected, row && row[2]]);
+    assert.ok(!JSON.stringify(w.sheets['Unsubscribe diagnostics'].rows).includes('ann@example.com'), String(i));
+  });
+  assert.deepStrictEqual(states, [['updated', 'updated'], ['none', 'none'], ['no tab', 'no tab'], ['no columns', 'no columns'], ['no code', 'no code']]);
+});
+test('the master-sheet rule and the already-unsubscribed card are written into the script\'s own description', () => {
+  assert.ok(CODE.includes("THE CAMPAIGN'S OWN SHEET:") && CODE.includes('Stopped - Unsubscribed') && CODE.includes('You are already unsubscribed'));
 });
 
 let failed = 0;
