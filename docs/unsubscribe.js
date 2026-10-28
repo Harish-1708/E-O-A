@@ -43,6 +43,15 @@
     }, function (error) { if (timer) { clearTimeout(timer); } throw error; });
   }
 
+  function alreadyPage(data) {
+    var brand = typeof data.brand === 'string' ? data.brand : '';
+    topBar.textContent = brand ? brand.toUpperCase() : 'UNSUBSCRIBE';
+    var line = [brand, typeof data.address === 'string' ? data.address : ''].filter(Boolean).join(' \u00b7 ');
+    if (line) { foot.hidden = false; foot.textContent = line; }
+    say('tick', 'You are already unsubscribed', [(typeof data.masked === 'string' ? data.masked : 'This address') + ' has already been removed from this mailing list. You will not receive any more ' + words(brand) + '.',
+                                                 'Unsubscribed by mistake? Reply to any of our emails and we will add you back.']);
+  }
+
   function confirmPage(data) {
     var reasons = Array.isArray(data.reasons) && data.reasons.length && data.reasons.every(function (r) { return typeof r === 'string'; }) ? data.reasons : FALLBACK_REASONS;
     var brand = typeof data.brand === 'string' ? data.brand : '';
@@ -99,7 +108,7 @@
   if (!API_OK) { unavailable(); return; }
   if (!token || token.length > 2000) { invalid(); return; }
   request(API + '?api=info&t=' + encodeURIComponent(token)).then(function (data) {
-    if (data && data.ok === true && (data.state === 'valid' || data.state === 'test')) { confirmPage(data); }
+    if (data && data.ok === true && (data.state === 'valid' || data.state === 'test')) { if (data.already === true) { alreadyPage(data); } else { confirmPage(data); } }
     else if (data && data.state === 'not set up') { unavailable(); }
     else { invalid(); }
   }).catch(function () { say('warn', 'We could not open this page just now', ['Please try again in a moment. If it keeps happening, ' + reply().charAt(0).toLowerCase() + reply().slice(1)]); });
