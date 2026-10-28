@@ -132,6 +132,11 @@ OUTCOME_ORDER = [OUTCOME_NOT_CONTACTED, OUTCOME_IN_PROGRESS, OUTCOME_COMPLETED, 
 OUTCOME_NAMES = {OUTCOME_COMPLETED: "Completed", LABEL_STOPPED_MANUALLY: "Stopped by hand", LABEL_NO_EMAIL: "No email address"}
 
 
+def outcome_order(perf: Dict) -> List[str]:
+    """OUTCOME_ORDER for this report: 'Unsubscribed' is left out for a campaign with no unsubscribe page (plain text), so nothing about unsubscribing appears there."""
+    return [label for label in OUTCOME_ORDER if label != LABEL_UNSUBSCRIBED or perf.get("is_html")]
+
+
 def lead_outcomes(leads: List[Dict], stages: List[Dict]) -> Dict[str, int]:
     """{outcome: how many leads} for every outcome in OUTCOME_ORDER (zeros included, so the export has a stable shape). A lead that has been sent its last email is Completed
     unless it replied, bounced, unsubscribed or was stopped, paused or removed, which always win: a completed lead that later replies is counted under Replied from then on."""
@@ -300,6 +305,9 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
         "pending": max(totals["total_leads"] - totals["contacted"], 0),
         "completed": completed,
         "outcomes": outcomes,
+        "is_html": campaign_cfg.get("format") == outreach.FORMAT_HTML,                  # only an HTML campaign has an unsubscribe page
+        "unsubscribed": outcomes.get(LABEL_UNSUBSCRIBED, 0),
+        "unsubscribe_rate": rate(outcomes.get(LABEL_UNSUBSCRIBED, 0), totals["contacted"]),
         "sequence_completion": rate(completed, totals["contacted"]),
         "sender_rows": sender_rows,
         "error_rows": error_rows,
@@ -415,6 +423,9 @@ def combine_performance(perfs: List[Dict], name: str = "All campaigns") -> Dict:
         "campaign": name,
         "pending": total("pending"), "completed": total("completed"),
         "outcomes": {label: sum(int((p.get("outcomes") or {}).get(label, 0)) for p in perfs) for label in OUTCOME_ORDER},
+        "is_html": any(p.get("is_html") for p in perfs),
+        "unsubscribed": sum(int(p.get("unsubscribed") or 0) for p in perfs if p.get("is_html")),
+        "unsubscribe_rate": rate(sum(int(p.get("unsubscribed") or 0) for p in perfs if p.get("is_html")), sum(int(p.get("contacted") or 0) for p in perfs if p.get("is_html"))),
         "sequence_completion": rate(total("completed"), contacted),
         "sender_rows": sender_rows, "error_rows": error_rows,
         "error_log_read": all(p["error_log_read"] for p in perfs),
