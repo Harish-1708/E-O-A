@@ -36,7 +36,7 @@ from performance_view import render_performance  # noqa: E402
 from data_import_logic import (  # noqa: E402
     parse_csv_bytes, build_default_mapping, apply_mapping, validate_mapping, count_valid_rows,
     build_import_payload, import_payload_path, build_removal_payload, removal_payload_path,
-    payload_to_bytes, filter_leads, search_leads, KNOWN_FIELDS, FILTER_OPTIONS,
+    payload_to_bytes, filter_leads, filter_options, search_leads, KNOWN_FIELDS,
     NEW_CUSTOM_FIELD_OPTION, validate_custom_field_name, find_duplicate_columns, build_full_lead_table,
 )
 from campaign_builder import (  # noqa: E402
@@ -661,15 +661,18 @@ def _render_data_tab(campaign_cfg, leads):
         stage_names = [s.get("name") for s in (campaign_cfg.get("stages") or [])]
         shown_stage_count = stage_count(stage_names, leads)
         # the chips know how many stages the campaign has, so a lead sent its LAST email shows under Completed, not In Progress
-        option_counts = filter_counts(leads, FILTER_OPTIONS, lambda subset, option: filter_leads(subset, option, shown_stage_count))
-        status_filter = st.radio("Filter", FILTER_OPTIONS, key="data_filter", horizontal=True, label_visibility="collapsed",
+        shown_options = filter_options(campaign_cfg)                    # 'Unsubscribed' is a chip of an HTML campaign only
+        if st.session_state.get("data_filter") not in shown_options:
+            st.session_state["data_filter"] = shown_options[0]          # a chip chosen on another campaign that this one does not have
+        option_counts = filter_counts(leads, shown_options, lambda subset, option: filter_leads(subset, option, shown_stage_count))
+        status_filter = st.radio("Filter", shown_options, key="data_filter", horizontal=True, label_visibility="collapsed",
                                  format_func=lambda option: f"{option} · {option_counts[option]}")
 
         sender_filter, stage_filter, recency_filter = render_extra_filters(leads, stage_names)
 
         filtered = apply_extra_filters(search_leads(filter_leads(leads, status_filter, shown_stage_count), search_query), shown_stage_count,
                                        stage_labels(stage_names, shown_stage_count), sender_filter, stage_filter, recency_filter)
-        render_clear_filters(any_extra_filter(sender_filter, stage_filter, recency_filter) or bool(search_query.strip()) or status_filter != FILTER_OPTIONS[0])
+        render_clear_filters(any_extra_filter(sender_filter, stage_filter, recency_filter) or bool(search_query.strip()) or status_filter != shown_options[0])
     if st.session_state.get("ld_import_open"):
         # opened from the toolbar's "＋ Add leads": the same import panel, right under it (it is drawn only once: down at the foot when closed)
         st.button("✕ Close the import panel", key="ld_import_close", on_click=_close_import_panel)
