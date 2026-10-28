@@ -391,3 +391,35 @@ def test_build_full_lead_table_no_header_order_falls_back_to_alphabetical():
 
 def test_build_full_lead_table_empty_leads_returns_empty():
     assert build_full_lead_table([]) == {}
+
+
+# ================================================================ the Unsubscribed chip (HTML campaigns only)
+
+from data_import_logic import FILTER_UNSUBSCRIBED, filter_options  # noqa: E402
+
+
+def test_a_plain_text_campaign_has_exactly_the_chips_it_always_had():
+    assert filter_options({"format": "text"}) == filter_options({}) == filter_options(None) == filter_options({"format": "other"}) == FILTER_OPTIONS == ["All", "In Progress", "Completed", "Replied", "Bounced", "Removed"]
+
+
+def test_an_html_campaign_gets_an_unsubscribed_chip_just_before_removed():
+    assert filter_options({"format": "html"}) == ["All", "In Progress", "Completed", "Replied", "Bounced", "Unsubscribed", "Removed"]
+
+
+def test_asking_for_the_chips_never_changes_the_shared_list():
+    options = filter_options({"format": "html"})
+    options.append("junk")
+    assert FILTER_OPTIONS == ["All", "In Progress", "Completed", "Replied", "Bounced", "Removed"] and filter_options({"format": "text"}) is not FILTER_OPTIONS
+
+
+def test_the_unsubscribed_chip_shows_only_leads_who_unsubscribed():
+    leads = [{"Email": "a@x.com", "Status": "Stopped - Unsubscribed"}, {"Email": "b@x.com", "Status": "Stopped - Replied"}, {"Email": "c@x.com", "Status": "Stopped - Bounced"},
+             {"Email": "d@x.com", "Status": "Removed"}, {"Email": "e@x.com", "Status": "Stopped - Unsubscribed"}, {"Email": "f@x.com", "Status": ""}, {"Email": "g@x.com", "Status": "Stopped - Manual"}]
+    assert [lead["Email"] for lead in filter_leads(leads, FILTER_UNSUBSCRIBED)] == ["a@x.com", "e@x.com"] and FILTER_UNSUBSCRIBED == "Unsubscribed"
+
+
+def test_an_unsubscribed_lead_is_in_no_other_status_chip_except_all():
+    leads = [{"Email": "a@x.com", "IntroSentAt": "2026-10-01 10:00:00", "Status": "Stopped - Unsubscribed"}]
+    for option in ("In Progress", "Completed", "Replied", "Bounced", "Removed"):
+        assert filter_leads(leads, option, 2) == [] and filter_leads(leads, option) == [], option
+    assert filter_leads(leads, "All") == leads and filter_leads(leads, FILTER_UNSUBSCRIBED, 2) == leads
