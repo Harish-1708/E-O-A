@@ -374,7 +374,7 @@ def test_a_trace_is_laid_out_one_line_per_request_with_what_a_person_needs_to_se
 
 def test_the_diagnostics_log_names_are_what_the_google_script_writes():
     assert ul.DIAGNOSTICS_TAB == "Unsubscribe diagnostics" and ul.DIAGNOSTICS_COLUMNS == ["Time", "Event", "State", "Brand", "Campaign", "QueryLength", "TokenLength", "ParamNames"]
-    assert ul.DIAGNOSTIC_EVENTS == ["opened", "rendered", "confirmed", "one-tap"]
+    assert ul.DIAGNOSTIC_EVENTS == ["opened", "rendered", "confirmed", "one-tap", "master"]
 
 
 def test_an_address_written_entirely_in_unicode_escapes_is_read_whole():
