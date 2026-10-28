@@ -1,4 +1,4 @@
-Subject: HI Testing
+Subject: Special Gift to {{ FirstName }}
 
 Hi {{ FirstName }},
 
