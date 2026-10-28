@@ -1491,3 +1491,45 @@ def test_publishing_the_code_is_decided_by_the_function_itself_not_only_by_its_c
     monkeypatch.setenv("UNSUBSCRIBE_SECRET", SECRET)
     outreach.publish_campaign_code(html_cfg(tmp_path, name="Spring_Launch"), sheets)
     assert sheets.published == [{ul.campaign_code(SECRET, "Spring_Launch"): "Spring_Launch"}]
+
+
+# ================================================================ which leads an unsubscribe marks (the rule the Google page applies at once)
+
+def leads_with(*pairs):
+    leads = leads_of(*[email for email, _ in pairs])
+    for lead, (_, status) in zip(leads, pairs):
+        lead["Status"] = status
+    return leads
+
+
+def status_of(sheets, email):
+    return next(lead.get("Status") for lead in sheets._leads if lead["Email"] == email)
+
+
+def test_the_outcomes_an_unsubscribe_never_overwrites_are_the_decided_ones_only():
+    assert outreach.UNSUBSCRIBE_KEEPS_STATUS == {"Stopped - Unsubscribed", "Stopped - Replied", "Stopped - Bounced", "Stopped - Rejected", "Stopped - Manual", "Removed"}
+    assert "Completed" not in outreach.UNSUBSCRIBE_KEEPS_STATUS and "Paused" not in outreach.UNSUBSCRIBE_KEEPS_STATUS and outreach.UNSUBSCRIBE_KEEPS_STATUS < outreach.TERMINAL_STATUSES
+
+
+@pytest.mark.parametrize("status", ["Completed", "Paused", "", "Active", "In sequence"])
+def test_a_lead_that_is_only_completed_or_paused_or_in_play_is_marked_unsubscribed_with_the_time(tmp_path, monkeypatch, status):
+    sheets = ListSheets(leads_with(("a@x.com", status), ("b@x.com", "")), rows=[opted_out("a@x.com")])
+    send(html_cfg(tmp_path), sheets, monkeypatch)
+    lead = next(l for l in sheets._leads if l["Email"] == "a@x.com")
+    assert lead["Status"] == "Stopped - Unsubscribed" and re.match(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$", lead["LastActionAt"]) and "a@x.com" not in sent_to(_Sent.calls)
+
+
+@pytest.mark.parametrize("status", ["Stopped - Replied", "Stopped - Bounced", "Stopped - Rejected", "Stopped - Manual", "Removed", "Stopped - Unsubscribed"])
+def test_a_lead_whose_outcome_was_already_decided_is_left_exactly_as_it_is(tmp_path, monkeypatch, status):
+    leads = leads_with(("a@x.com", status))
+    leads[0]["LastActionAt"] = "2026-09-01 08:00:00"
+    sheets = ListSheets(leads, rows=[opted_out("a@x.com")])
+    send(html_cfg(tmp_path), sheets, monkeypatch)
+    lead = sheets._leads[0]
+    assert (lead["Status"], lead["LastActionAt"]) == (status, "2026-09-01 08:00:00") and "a@x.com" not in sent_to(_Sent.calls)
+
+
+def test_an_address_that_has_not_opted_out_is_never_marked_whatever_its_status(tmp_path, monkeypatch):
+    sheets = ListSheets(leads_with(("a@x.com", "Completed"), ("b@x.com", "Paused")), rows=[opted_out("someone@else.com")])
+    send(html_cfg(tmp_path), sheets, monkeypatch)
+    assert status_of(sheets, "a@x.com") == "Completed" and status_of(sheets, "b@x.com") == "Paused"
