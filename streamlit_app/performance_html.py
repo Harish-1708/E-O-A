@@ -38,11 +38,11 @@ def _one_line(markup: str) -> str:
 
 PERFORMANCE_CSS = """
 .pf-grid { display: grid; gap: 14px; margin: 0 0 14px; }
-.pf-g6 { grid-template-columns: repeat(6, minmax(0, 1fr)); } .pf-g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.pf-g6 { grid-template-columns: repeat(6, minmax(0, 1fr)); } .pf-g5 { grid-template-columns: repeat(5, minmax(0, 1fr)); } .pf-g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .pf-g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .pf-g2 { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
 .pf-g2e { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-@media (max-width: 1200px) { .pf-g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .pf-g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 900px) { .pf-g2, .pf-g2e { grid-template-columns: minmax(0, 1fr); } .pf-g6 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pf-g3 { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 1200px) { .pf-g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .pf-g5 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .pf-g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .pf-g2, .pf-g2e { grid-template-columns: minmax(0, 1fr); } .pf-g6 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pf-g5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pf-g3 { grid-template-columns: minmax(0, 1fr); } }
 .pf-kpi { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 15px 17px; }
 .pf-kpi-label { font-size: 12.5px; color: #6b7280; font-weight: 600; }
 .pf-kpi-value { font-size: 27px; font-weight: 700; margin: 5px 0 2px; letter-spacing: -.02em; color: #111827; line-height: 1.15; }
@@ -94,8 +94,8 @@ def kpi_html(label, value, caption="", help_text="", trend=None) -> str:
 
 
 def grid_html(columns: str, cells: Iterable[str]) -> str:
-    """Cells (already-built markup) laid out in a grid. `columns` is one of g6, g4, g3, g2, g2e."""
-    if columns not in ("g6", "g4", "g3", "g2", "g2e"):
+    """Cells (already-built markup) laid out in a grid. `columns` is one of g6, g5, g4, g3, g2, g2e."""
+    if columns not in ("g6", "g5", "g4", "g3", "g2", "g2e"):
         raise ValueError(f"unknown grid {columns!r}")
     return _one_line(f'<div class="pf-grid pf-{columns}">{"".join(cells)}</div>')
 
