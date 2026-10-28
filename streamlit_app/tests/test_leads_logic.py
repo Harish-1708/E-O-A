@@ -302,3 +302,32 @@ def test_today_means_today_and_not_yesterday():
     two = [lead(LeadID="a", IntroSentAt="2026-10-13 00:01:00"), lead(LeadID="b", IntroSentAt="2026-10-12 23:59:00")]
     assert _ids(L.apply_extra_filters(two, 3, LABELS, recency="Today", today=TODAY)) == ["a"]
     assert _ids(L.apply_extra_filters(two, 3, LABELS, recency="Last 7 days", today=TODAY)) == ["a", "b"]
+
+
+
+# ================================================================ an unsubscribed lead
+
+def test_an_unsubscribed_lead_shows_a_plain_unsubscribed_pill_in_amber():
+    assert L.status_summary(lead(Status="Stopped - Unsubscribed")) == ("Unsubscribed", L.KIND_WAITING) and L.STATUS_UNSUBSCRIBED == "Stopped - Unsubscribed" == outreach.STATUS_STOPPED_UNSUBSCRIBED
+
+
+def test_the_unsubscribed_pill_wins_over_completed_and_in_sequence_with_or_without_the_stage_count():
+    done = lead(Status="Stopped - Unsubscribed", IntroSentAt="2026-10-01 10:00:00", **{L.sent_column(1): "2026-10-04 10:00:00"})
+    assert L.status_summary(done, 2)[0] == "Unsubscribed" and L.status_summary(done)[0] == "Unsubscribed" and not L.sequence_completed(done, 2)
+
+
+def test_the_other_stopped_statuses_keep_their_pills():
+    assert L.status_summary(lead(Status="Stopped - Manual"))[0] == "Stopped · Manual" and L.status_summary(lead(Status="Stopped - Replied"))[0] == "Replied"
+    assert L.status_summary(lead(Status="Stopped - Bounced"))[0] == "Bounced" and L.status_summary(lead(Status="Removed"))[0] == "Removed"
+
+
+def test_the_timeline_says_unsubscribed_with_the_time_and_has_no_follow_up_due_and_no_completed_event():
+    events = L.timeline(lead(IntroSentAt="2026-10-01 10:00:00", Status="Stopped - Unsubscribed", LastActionAt="2026-10-05 09:30:00", NextEligibleAt="2026-10-09 10:00:00"), ["Intro", "Follow-up 1"], TODAY)
+    assert [e["text"] for e in events] == ["Intro sent", "Unsubscribed — sending stopped"] and events[1]["icon"] == "🚫" and events[1]["when"]
+    finished = L.timeline(lead(IntroSentAt="2026-10-01 10:00:00", Status="Stopped - Unsubscribed", LastActionAt="2026-10-05 09:30:00", **{L.sent_column(1): "2026-10-04 10:00:00"}), ["Intro", "Follow-up 1"], TODAY)
+    assert "Sequence completed" not in [e["text"] for e in finished] and finished[-1]["text"] == "Unsubscribed — sending stopped"
+
+
+def test_the_timeline_of_a_manual_stop_is_still_the_generic_one():
+    events = L.timeline(lead(IntroSentAt="2026-10-01 10:00:00", Status="Stopped - Manual", LastActionAt="2026-10-05 09:30:00"), ["Intro"], TODAY)
+    assert events[-1]["text"] == "Stopped - Manual — sending stopped" and events[-1]["icon"] == "⏹️"
