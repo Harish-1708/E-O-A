@@ -131,7 +131,7 @@ def test_the_pages_two_requests_are_the_two_the_script_answers():
                                    "Unsubscribe is not available right now", "You are unsubscribed", "Thank you for telling us why. It helps us send better email.",
                                    "Unsubscribed by mistake? Reply to any of our emails and we will add you back.", "Test only: nothing was recorded.", "This is a test link from your team. Nothing will be recorded.",
                                    "No, keep me subscribed", "You are still subscribed", "No problem. Nothing has changed.", "Unsubscribe me", "Tell us more (optional)", "No information was recorded.",
-                                   "Why are you leaving? ", "Something went wrong. "])
+                                   "Why are you leaving? ", "Something went wrong. ", "You are already unsubscribed", " has already been removed from this mailing list. You will not receive any more "])
 def test_what_the_page_says_is_what_the_google_page_says(words):
     stripped = words.replace("unsubscribe to the email", "<b>unsubscribe</b> to the email")
     assert words in SCRIPT and (words in CODE or stripped in CODE or words.strip() in CODE)
@@ -150,3 +150,23 @@ def test_the_root_page_is_exactly_the_unsubscribe_page_so_https_your_domain_slas
 
 def test_the_pages_files_name_no_github_address_anywhere():
     assert "github" not in (HTML + SCRIPT + CONFIG).lower()
+
+
+
+# ================================================================ opening the link again after unsubscribing
+
+def test_the_page_shows_the_already_unsubscribed_card_only_when_the_script_says_so_and_asks_nothing_then():
+    assert "if (data.already === true) { alreadyPage(data); } else { confirmPage(data); }" in SCRIPT
+    block = SCRIPT.split("function alreadyPage")[1].split("function confirmPage")[0]
+    for forbidden in ("radio", "textarea", "'button'", "reasons", "request(", "go.onclick", "details"):
+        assert forbidden not in block, forbidden
+    assert "say('tick', 'You are already unsubscribed'" in block and "words(brand)" in block and "data.masked" in block
+
+
+def test_the_already_card_uses_the_same_footer_and_heading_as_the_questions_card():
+    block = SCRIPT.split("function alreadyPage")[1].split("function confirmPage")[0]
+    assert "topBar.textContent = brand ? brand.toUpperCase() : 'UNSUBSCRIBE';" in block and "foot.textContent = line;" in block
+
+
+def test_the_script_sends_the_already_flag_in_the_data_the_page_reads():
+    assert "already: already" in CODE.split("function info_")[1].split("function confirmApi_")[0]
