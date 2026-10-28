@@ -733,3 +733,54 @@ def test_a_row_carries_the_positive_replies_and_the_reasons_a_campaign_needs_att
 def test_the_total_row_carries_the_positive_replies_too_and_has_no_problems_list():
     totals = pl.glance_totals({"positive": 5, "replies": 9}, 2)
     assert totals["positive"] == 5 and "problems" not in totals
+
+
+
+# ================================================================ unsubscribes (HTML campaigns only)
+
+SENT_AT = "2026-10-01 10:00:00"
+
+
+def html_perf(leads, stages=3):
+    return pl.build_campaign_performance({**cfg(stages), "format": "html"}, list(leads), [], [])
+
+
+def test_an_html_campaign_report_counts_who_unsubscribed_and_the_share_of_contacted():
+    p = html_perf([lead(1, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(2, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(3, IntroSentAt=SENT_AT), lead(4)])
+    assert p["is_html"] is True and p["unsubscribed"] == 2 and p["unsubscribe_rate"] == pytest.approx(2 / 3) and p["outcomes"]["Unsubscribed"] == 2 and p["contacted"] == 3
+
+
+def test_an_html_campaign_with_nobody_contacted_has_no_rate_not_a_zero():
+    p = html_perf([lead(1)])
+    assert p["is_html"] is True and p["unsubscribed"] == 0 and p["unsubscribe_rate"] is None
+
+
+def test_a_plain_text_campaign_report_is_not_html_and_its_order_leaves_unsubscribed_out():
+    p = perf([lead(1, IntroSentAt=SENT_AT), lead(2)])
+    assert p["is_html"] is False and pl.LABEL_UNSUBSCRIBED not in pl.outcome_order(p) and pl.LABEL_UNSUBSCRIBED in pl.outcome_order({"is_html": True})
+
+
+def test_the_outcome_order_for_a_text_campaign_is_the_shared_order_minus_only_unsubscribed():
+    assert pl.outcome_order({}) == [label for label in pl.OUTCOME_ORDER if label != pl.LABEL_UNSUBSCRIBED] and pl.outcome_order({"is_html": True}) == pl.OUTCOME_ORDER
+
+
+def test_every_lead_is_still_in_exactly_one_place_in_an_html_campaign():
+    leads = [lead(1, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(2, IntroSentAt=SENT_AT, Status="Stopped - Replied", ReplyStatus="Replied"), lead(3, IntroSentAt=SENT_AT), lead(4)]
+    p = html_perf(leads)
+    assert sum(p["outcomes"].values()) == len(leads) == p["total_leads"] and p["outcomes"]["Unsubscribed"] == 1 and p["outcomes"]["Replied"] == 1
+
+
+def test_all_campaigns_together_count_unsubscribes_of_html_campaigns_only():
+    html = html_perf([lead(1, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(2, IntroSentAt=SENT_AT), lead(3, IntroSentAt=SENT_AT), lead(4, IntroSentAt=SENT_AT)])
+    text = perf([lead(5, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(6, IntroSentAt=SENT_AT)])
+    both = pl.combine_performance([html, text])
+    assert both["is_html"] is True and both["unsubscribed"] == 1 and both["unsubscribe_rate"] == pytest.approx(1 / 4)       # 1 of the HTML campaign's 4 contacted, never of the text campaign's
+    only_text = pl.combine_performance([text])
+    assert only_text["is_html"] is False and only_text["unsubscribed"] == 0 and only_text["unsubscribe_rate"] is None
+
+
+def test_two_html_campaigns_add_up_their_unsubscribes_and_their_contacted():
+    a = html_perf([lead(1, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(2, IntroSentAt=SENT_AT)])
+    b = html_perf([lead(1, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(2, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(3, IntroSentAt=SENT_AT), lead(4, IntroSentAt=SENT_AT)])
+    both = pl.combine_performance([a, b])
+    assert both["unsubscribed"] == 3 and both["unsubscribe_rate"] == pytest.approx(3 / 6) and both["outcomes"]["Unsubscribed"] == 3
