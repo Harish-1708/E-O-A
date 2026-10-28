@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import outreach  # noqa: E402
 import unsubscribe_logic as ul  # noqa: E402
 from test_unsubscribe_logic import KNOWN_PLAIN, KNOWN_UNICODE_TEST, SECRET  # noqa: E402
 
@@ -113,7 +114,7 @@ def test_the_script_reads_the_two_columns_the_engine_writes_in_that_order(code):
 
 
 def test_the_script_never_lets_a_failed_code_lookup_stop_an_opt_out(code):
-    block = code.split("function campaignLabel_")[1].split("/* ------------------------------------------------------------------ troubleshooting log")[0]
+    block = code.split("function campaignLabel_")[1].split("/* ------------------------------------------------------------------")[0]
     assert "try {" in block and "} catch (error) {" in block and block.rstrip().endswith("}") and "throw" not in block
 
 
@@ -125,3 +126,60 @@ def test_the_steps_at_the_top_of_the_script_explain_the_code_list(code):
     head = code.split("var TAB_NAME")[0]
     for words in ("CAMPAIGN CODES:", "instead of your campaign's name", "Campaign codes", "this script only READS that tab", "the Campaign column shows the code"):
         assert words in head, words
+
+
+
+# ================================================================ the master sheet: the script and the engine follow one rule
+
+def js_array(code, name):
+    return re.findall(r"'([^']*)'", re.search(rf"var {name} = \[(.*?)\];", code, re.S).group(1))
+
+
+def test_the_status_the_script_writes_is_the_status_the_engine_and_the_app_read(code):
+    assert js_string(code, "STATUS_UNSUBSCRIBED") == outreach.STATUS_STOPPED_UNSUBSCRIBED == "Stopped - Unsubscribed"
+
+
+def test_the_outcomes_the_script_never_overwrites_are_exactly_the_ones_the_engine_never_overwrites(code):
+    assert sorted(js_array(code, "UNSUBSCRIBE_KEEPS_STATUS")) == sorted(outreach.UNSUBSCRIBE_KEEPS_STATUS)
+    assert outreach.STATUS_COMPLETED not in outreach.UNSUBSCRIBE_KEEPS_STATUS and outreach.STATUS_PAUSED not in outreach.UNSUBSCRIBE_KEEPS_STATUS
+    assert {outreach.STATUS_STOPPED_REPLIED, outreach.STATUS_STOPPED_BOUNCED, outreach.STATUS_STOPPED_REJECTED, outreach.STATUS_STOPPED_MANUAL, outreach.STATUS_REMOVED,
+            outreach.STATUS_STOPPED_UNSUBSCRIBED} == outreach.UNSUBSCRIBE_KEEPS_STATUS
+
+
+def test_the_script_finds_a_campaigns_master_tab_by_the_name_the_engine_gives_it(code):
+    suffix = js_string(code, "MASTER_TAB_SUFFIX")
+    with open(os.path.join(os.path.dirname(__file__), "..", "outreach.py"), encoding="utf-8") as handle:
+        engine = handle.read()
+    assert suffix == " Master Sheet" and 'cfg["master_tab"] = cfg.get("master_tab") or f"{campaign_name}' + suffix + '"' in engine
+
+
+def test_the_script_reads_and_writes_the_master_columns_by_the_names_the_engine_uses(code):
+    block = code.split("function updateMasterSheet_")[1].split("function alreadyOptedOut_")[0]
+    for column in ("Email", "Status", "LastActionAt"):
+        assert f"indexOf('{column}')" in block and column in outreach.MASTER_COLUMNS, column
+
+
+def test_the_time_the_script_writes_is_in_the_format_and_the_clock_the_engine_writes():
+    block = open(os.path.join(os.path.dirname(__file__), "..", "apps_script", "Code.gs"), encoding="utf-8").read().split("function updateMasterSheet_")[1].split("function alreadyOptedOut_")[0]
+    assert "Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd HH:mm:ss')" in block and outreach.DATETIME_FMT == "%Y-%m-%d %H:%M:%S"
+
+
+def test_the_master_update_is_best_effort_and_its_result_never_reaches_the_visitor(code):
+    block = code.split("function updateMasterSheet_")[1].split("function alreadyOptedOut_")[0]
+    assert "try {" in block and "} catch (error) {" in block and "return 'error';" in block and "throw" not in block
+    assert "Object.defineProperty(result, 'master', { value: '', writable: true, enumerable: false })" in code and code.count("result.master = updateMasterSheet_(payload, props);") == 2
+
+
+def test_a_test_link_returns_before_the_master_sheet_is_touched(code):
+    block = code.split("function record_")[1].split("function info_")[0]
+    assert block.index("if (result.test) { return result; }") < block.index("updateMasterSheet_(payload, props)")
+
+
+def test_the_already_unsubscribed_wording_is_the_same_in_the_script_and_the_engines_other_pages(code):
+    for words in ("You are already unsubscribed", " has already been removed from this mailing list. You will not receive any more ", "Unsubscribed by mistake? Reply to any of our emails and we will add you back."):
+        assert words in code, words
+
+
+def test_the_check_for_an_address_that_has_already_left_is_read_only_and_never_throws(code):
+    block = code.split("function alreadyOptedOut_")[1].split("/* ------------------------------------------------------------------")[0]
+    assert "setValue" not in block and "appendRow" not in block and "getScriptLock" not in block and "} catch (error) {\n    return false;" in block and "!rowKey || rowKey ===" in block
