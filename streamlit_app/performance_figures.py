@@ -9,7 +9,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from leads_logic import humanize_stage
-from performance_logic import INTENT_ORDER, INTENT_NOT_CLASSIFIED, OUTCOME_NAMES, OUTCOME_ORDER, format_duration_hours, format_rate
+from performance_logic import INTENT_ORDER, INTENT_NOT_CLASSIFIED, OUTCOME_NAMES, format_duration_hours, format_rate, outcome_order
 
 _DASH = "—"
 
@@ -37,8 +37,8 @@ def trend_help(trend: Optional[Dict]) -> str:
 
 
 def headline_figures(perf: Dict) -> List[Dict]:
-    """The ten headline figures in the order the page shows them (six on the first row, four on the second), each as
-    {label, value, caption, help}."""
+    """The ten headline figures in the order the page shows them (six on the first row, four on the second), each as {label, value, caption, help}. A report of an HTML campaign
+    (`is_html`) has an eleventh, 'Unsubscribed', after the bounce rate (five on the second row); a plain-text campaign never shows it."""
     n_replies = len(perf["reply_hours"])
     trend = perf.get("reply_trend")
     figures = [
@@ -57,6 +57,11 @@ def headline_figures(perf: Dict) -> List[Dict]:
         {"label": "Hard bounce rate", "value": format_rate(perf["bounce_rate_hard"]), "caption": f"{perf['bounced_hard']} bounced", "help": ""},
         {"label": "Sequence completion", "value": format_rate(perf["sequence_completion"]), "caption": f"{perf['completed']} reached the final stage", "help": ""},
     ]
+    if perf.get("is_html"):
+        unsubscribed = int(perf.get("unsubscribed") or 0)
+        figures.insert(figures.index(next(f for f in figures if f["label"] == "Hard bounce rate")) + 1,
+                       {"label": "Unsubscribed", "value": unsubscribed, "caption": f"{format_rate(perf.get('unsubscribe_rate'))} of contacted",
+                        "help": "People who used the Unsubscribe link in an email. Each is marked Stopped - Unsubscribed in the campaign's sheet and is not emailed again by any campaign of the same brand."})
     for figure in figures:
         figure["trend"] = format_trend(trend) if figure["label"] == "Reply rate" else None
     return figures
@@ -93,7 +98,7 @@ def build_performance_csv(perf: Dict, title: str = "Performance") -> str:
     outcomes = perf.get("outcomes") or {}
     total_leads = max(int(perf.get("total_leads") or 0), 0)
     section("Where the leads are now", ["Where", "Leads", "Share of leads"],
-            [[OUTCOME_NAMES.get(label, label), outcomes.get(label, 0), format_rate(outcomes.get(label, 0) / total_leads) if total_leads else _DASH] for label in OUTCOME_ORDER])
+            [[OUTCOME_NAMES.get(label, label), outcomes.get(label, 0), format_rate(outcomes.get(label, 0) / total_leads) if total_leads else _DASH] for label in outcome_order(perf)])
     section("What the replies say", ["Reading", "Creators"], [[label, perf["intents"][label]] for label in INTENT_ORDER] + [[INTENT_NOT_CLASSIFIED, perf["intents"][INTENT_NOT_CLASSIFIED]]])
     rate_header = ["Emails sent", "Replies", "Reply rate", "Positive", "Positive rate"]
     rate = lambda r: [r["sent"], r["replies"], format_rate(r["reply_rate"]), r["positive"], format_rate(r["positive_rate"])]      # noqa: E731
@@ -101,6 +106,7 @@ def build_performance_csv(perf: Dict, title: str = "Performance") -> str:
     section("Template variants", ["Variant"] + rate_header, [[r["variant"]] + rate(r) for r in perf["variants"]])
     section("By sender account", ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"],
             [[r["account"], r["sent"], r["leads"], r["replies"], format_rate(r["reply_rate"])] for r in perf["sender_rows"]])
-    section("Deliverability", ["Figure", "Value"], [["Hard bounces", perf["bounced_hard"]], ["Soft bounces", perf["bounced_soft"]], ["Failed sends", perf["send_failures"]]])
+    section("Deliverability", ["Figure", "Value"], [["Hard bounces", perf["bounced_hard"]], ["Soft bounces", perf["bounced_soft"]], ["Failed sends", perf["send_failures"]]]
+            + ([["Unsubscribed", int(perf.get("unsubscribed") or 0)]] if perf.get("is_html") else []))
     section("Errors (all time)", ["Error type", "Count"], [[r["error_type"], r["count"]] for r in perf["error_rows"]])
     return out.getvalue()
