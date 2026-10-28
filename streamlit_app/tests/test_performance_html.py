@@ -457,3 +457,18 @@ def test_the_reasons_a_campaign_needs_attention_are_amber_chips_under_its_status
 def test_hostile_text_in_an_attention_reason_can_never_become_markup(hostile):
     markup = P.glance_table_html([_grow(problems=[hostile])], _GTOTAL)
     assert "<script" not in markup and "<img" not in markup and "\u202e" not in markup and markup.count("<td") == markup.count("</td>")
+
+
+
+def test_a_five_card_row_is_a_known_grid_and_unknown_grids_are_still_refused():
+    assert 'class="pf-grid pf-g5"' in P.grid_html("g5", ["<i></i>"] * 5)
+    with pytest.raises(ValueError):
+        P.grid_html("g7", [])
+
+
+def test_the_stylesheet_lays_five_cards_out_five_three_and_two_across():
+    css = P.PERFORMANCE_CSS
+    wide = next(line for line in css.splitlines() if line.startswith("@media (max-width: 1200px)"))
+    narrow = next(line for line in css.splitlines() if line.startswith("@media (max-width: 900px)"))
+    assert ".pf-g5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }" in css
+    assert ".pf-g5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }" in wide and ".pf-g5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }" in narrow
