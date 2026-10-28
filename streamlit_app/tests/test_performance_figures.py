@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import performance_figures as F  # noqa: E402
 import performance_view  # noqa: E402
-from performance_logic import INTENT_ORDER, INTENT_NOT_CLASSIFIED  # noqa: E402
+from performance_logic import INTENT_ORDER, INTENT_NOT_CLASSIFIED, OUTCOME_ORDER  # noqa: E402
 
 
 def perf(**kw):
@@ -158,22 +158,67 @@ def test_the_export_notes_the_change_beside_the_reply_rate_and_says_nothing_extr
 
 
 def test_the_where_section_lists_every_place_by_its_plain_name_with_its_count_and_its_share_of_all_the_leads():
-    outcomes = {label: 0 for label in F.OUTCOME_ORDER}
+    outcomes = {label: 0 for label in OUTCOME_ORDER}
     outcomes.update({"Not contacted yet": 2, "In progress": 3, "Completed the sequence": 1, "Replied": 2})
-    rows = rows_of(F.build_performance_csv({**perf(), "outcomes": outcomes, "total_leads": 8, "contacted": 6}, "Camp"))
+    rows = rows_of(F.build_performance_csv({**perf(), "is_html": True, "outcomes": outcomes, "total_leads": 8, "contacted": 6}, "Camp"))
     start = rows.index(["Where the leads are now"])
     assert rows[start + 1] == ["Where", "Leads", "Share of leads"]
-    table = rows[start + 2: start + 2 + len(F.OUTCOME_ORDER)]
+    table = rows[start + 2: start + 2 + len(OUTCOME_ORDER)]
     assert [r[0] for r in table] == ["Not contacted yet", "In progress", "Completed", "Replied", "Bounced", "Unsubscribed", "Declined", "Stopped by hand", "Paused", "Removed", "No email address"]
     assert table[:4] == [["Not contacted yet", "2", "25.0%"], ["In progress", "3", "37.5%"], ["Completed", "1", "12.5%"], ["Replied", "2", "25.0%"]] and table[4] == ["Bounced", "0", "0.0%"]
 
 
 def test_the_where_section_shows_dashes_not_a_division_error_for_a_campaign_with_no_leads():
-    rows = rows_of(F.build_performance_csv({**perf(), "outcomes": {label: 0 for label in F.OUTCOME_ORDER}, "total_leads": 0}, "Camp"))
+    rows = rows_of(F.build_performance_csv({**perf(), "is_html": True, "outcomes": {label: 0 for label in OUTCOME_ORDER}, "total_leads": 0}, "Camp"))
     start = rows.index(["Where the leads are now"])
-    assert all(r[2] == "—" for r in rows[start + 2: start + 2 + len(F.OUTCOME_ORDER)])
+    assert all(r[2] == "—" for r in rows[start + 2: start + 2 + len(OUTCOME_ORDER)])
 
 
 def test_an_older_figures_dict_with_no_outcomes_still_exports_without_failing():
     rows = rows_of(F.build_performance_csv({**{k: v for k, v in perf().items() if k != "outcomes"}, "total_leads": 3}, "Camp"))
     assert ["Where the leads are now"] in rows
+
+
+
+# ================================================================ the Unsubscribed figure (HTML campaigns only)
+
+def html(**kw):
+    return perf(is_html=True, unsubscribed=1, unsubscribe_rate=1 / 3, **kw)
+
+
+def test_a_plain_text_campaign_still_has_exactly_ten_figures_and_none_is_about_unsubscribing():
+    labels = [f["label"] for f in F.headline_figures(perf())]
+    assert len(labels) == 10 and "Unsubscribed" not in labels and len(F.headline_figures(perf(unsubscribed=5, unsubscribe_rate=1.0))) == 10
+
+
+def test_an_html_campaign_has_an_eleventh_figure_right_after_the_hard_bounce_rate():
+    labels = [f["label"] for f in F.headline_figures(html())]
+    assert len(labels) == 11 and labels[8:] == ["Hard bounce rate", "Unsubscribed", "Sequence completion"] and labels[:8] == [f["label"] for f in F.headline_figures(perf())][:8]
+
+
+def test_the_unsubscribed_figure_is_the_count_with_its_share_of_contacted_and_says_what_it_means():
+    figure = next(f for f in F.headline_figures(html()) if f["label"] == "Unsubscribed")
+    assert figure["value"] == 1 and figure["caption"] == "33.3% of contacted" and "Unsubscribe link" in figure["help"] and "same brand" in figure["help"] and figure["trend"] is None
+
+
+def test_a_missing_share_is_a_dash_and_a_missing_count_is_zero():
+    figure = next(f for f in F.headline_figures(perf(is_html=True)) if f["label"] == "Unsubscribed")
+    assert figure["value"] == 0 and figure["caption"] == "— of contacted"
+    assert next(f for f in F.headline_figures(perf(is_html=True, unsubscribed=2, unsubscribe_rate=None)) if f["label"] == "Unsubscribed")["caption"] == "— of contacted"
+
+
+def test_the_export_of_an_html_campaign_has_the_unsubscribed_figure_row_and_place():
+    outcomes = {label: 0 for label in OUTCOME_ORDER}
+    outcomes.update({"Unsubscribed": 2, "Replied": 1})
+    rows = rows_of(F.build_performance_csv({**html(), "outcomes": outcomes, "total_leads": 4}, "Camp"))
+    by_name = {r[0]: r for r in rows if r}
+    assert by_name["Unsubscribed"] in (["Unsubscribed", "1", "33.3% of contacted"], ["Unsubscribed", "2", "50.0%"], ["Unsubscribed", "1"]) and sum(1 for r in rows if r and r[0] == "Unsubscribed") == 3
+    assert ["Unsubscribed", "1", "33.3% of contacted"] in rows and ["Unsubscribed", "2", "50.0%"] in rows and ["Unsubscribed", "1"] in rows
+
+
+def test_the_export_of_a_plain_text_campaign_has_no_unsubscribed_row_anywhere():
+    outcomes = {label: 0 for label in OUTCOME_ORDER}
+    rows = rows_of(F.build_performance_csv({**perf(), "outcomes": outcomes, "total_leads": 4}, "Camp"))
+    assert not any("Unsubscribed" in cell for row in rows for cell in row)
+    start = rows.index(["Where the leads are now"])
+    assert len([r for r in rows[start + 2:] if r and r[0] in [*[name for name in ("Not contacted yet", "In progress", "Completed", "Replied", "Bounced", "Declined", "Stopped by hand", "Paused", "Removed", "No email address")]]]) == 10
