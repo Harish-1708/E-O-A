@@ -1,0 +1,11 @@
+{
+  "leads": [
+    {
+      "FirstName": "Rithik",
+      "LastName": "",
+      "Name": "Rithik",
+      "Email": "harishdh16@gmail.com"
+    }
+  ],
+  "allow_duplicate_emails": true
+}
