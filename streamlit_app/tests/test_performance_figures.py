@@ -222,3 +222,39 @@ def test_the_export_of_a_plain_text_campaign_has_no_unsubscribed_row_anywhere():
     assert not any("Unsubscribed" in cell for row in rows for cell in row)
     start = rows.index(["Where the leads are now"])
     assert len([r for r in rows[start + 2:] if r and r[0] in [*[name for name in ("Not contacted yet", "In progress", "Completed", "Replied", "Bounced", "Declined", "Stopped by hand", "Paused", "Removed", "No email address")]]]) == 10
+
+
+
+# ================================================================ the Unsubscribed columns in the export (HTML campaigns only)
+
+def breakdown(**kw):
+    stage = [{"stage": "intro", "sent": 5, "replies": 1, "reply_rate": 0.2, "positive": 1, "positive_rate": 0.2, "unsubscribed": 2, "unsubscribe_rate": 0.4}]
+    variant = [{"variant": "A", "sent": 4, "replies": 0, "reply_rate": 0.0, "positive": 0, "positive_rate": 0.0, "unsubscribed": 1, "unsubscribe_rate": 0.25}]
+    sender = [{"account": "sales1@x.com", "sent": 4, "leads": 3, "replies": 0, "reply_rate": 0.0, "unsubscribed": 2, "unsubscribe_rate": 2 / 3}]
+    return perf(stages=stage, variants=variant, sender_rows=sender, **kw)
+
+
+def section(rows, name):
+    start = rows.index([name])
+    end = next((i for i in range(start + 1, len(rows)) if rows[i] == [] and i > start + 2), len(rows))
+    return rows[start + 1: end]
+
+
+def test_the_export_of_an_html_campaign_adds_the_unsubscribed_columns_to_stages_variants_and_senders():
+    rows = rows_of(F.build_performance_csv(breakdown(is_html=True, unsubscribed=2, unsubscribe_rate=0.4), "Camp"))
+    stages, variants, senders = section(rows, "Follow-up stage effectiveness"), section(rows, "Template variants"), section(rows, "By sender account")
+    assert stages[0] == ["Stage", "Emails sent", "Replies", "Reply rate", "Positive", "Positive rate", "Unsubscribed", "Unsubscribe rate"] and stages[1][-2:] == ["2", "40.0%"]
+    assert variants[0][-2:] == ["Unsubscribed", "Unsubscribe rate"] and variants[1][-2:] == ["1", "25.0%"]
+    assert senders[0] == ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate", "Unsubscribed", "Unsubscribe rate"] and senders[1][-2:] == ["2", "66.7%"]
+
+
+def test_the_export_of_a_plain_text_campaign_has_exactly_the_columns_it_always_had():
+    rows = rows_of(F.build_performance_csv(breakdown(), "Camp"))
+    assert section(rows, "Follow-up stage effectiveness")[0] == ["Stage", "Emails sent", "Replies", "Reply rate", "Positive", "Positive rate"]
+    assert section(rows, "Template variants")[0] == ["Variant", "Emails sent", "Replies", "Reply rate", "Positive", "Positive rate"]
+    assert section(rows, "By sender account")[0] == ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"]
+
+
+def test_a_report_made_before_unsubscribes_were_counted_exports_zeros_and_dashes_not_an_error():
+    rows = rows_of(F.build_performance_csv(perf(is_html=True), "Camp"))
+    assert section(rows, "Follow-up stage effectiveness")[1][-2:] == ["0", "—"] and section(rows, "By sender account")[1][-2:] == ["0", "—"]
