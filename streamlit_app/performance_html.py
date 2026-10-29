@@ -15,7 +15,7 @@ from datetime import date
 from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 CHART_WIDTH, CHART_HEIGHT, CHART_PAD_X, CHART_PAD_TOP, CHART_PAD_BOTTOM = 760, 240, 38, 14, 30
-SENT_COLOUR, REPLIES_COLOUR = "#2563eb", "#16a34a"
+SENT_COLOUR, REPLIES_COLOUR, UNSUBS_COLOUR = "#2563eb", "#16a34a", "#d97706"
 INTENT_COLOURS = {"Interested": "#16a34a", "Lead / Needs Follow-up": "#2563eb", "Not Interested": "#dc2626",
                   "Unclear": "#9ca3af", "Not classified": "#d1d5db"}
 DEFAULT_COLOUR = "#9ca3af"
@@ -38,6 +38,7 @@ def _one_line(markup: str) -> str:
 
 PERFORMANCE_CSS = """
 .pf-grid { display: grid; gap: 14px; margin: 0 0 14px; }
+.pf-spaced { margin: 0 0 14px; }
 .pf-g6 { grid-template-columns: repeat(6, minmax(0, 1fr)); } .pf-g5 { grid-template-columns: repeat(5, minmax(0, 1fr)); } .pf-g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .pf-g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .pf-g2 { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
 .pf-g2e { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
@@ -57,7 +58,7 @@ PERFORMANCE_CSS = """
 .pf-card-hint { color: #6b7280; font-size: 13px; margin: 3px 0 12px; }
 .pf-spacer { flex: 1; }
 .pf-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 3px 10px; border: 1px solid #d1d5db; background: #fff; color: #374151; white-space: nowrap; }
-.pf-chip-sent { color: #1d4ed8; border-color: #c7d7fb; background: #f3f7ff; } .pf-chip-replies { color: #15803d; border-color: #bbe3c9; background: #f0fbf4; }
+.pf-chip-sent { color: #1d4ed8; border-color: #c7d7fb; background: #f3f7ff; } .pf-chip-replies { color: #15803d; border-color: #bbe3c9; background: #f0fbf4; } .pf-chip-unsubs { color: #b45309; border-color: #f3d3a8; background: #fff8ec; }
 /* Streamlit draws a grid border around every table cell by default; these keep only the thin horizontal lines */
 .pf-table { width: 100%; border-collapse: collapse; border: 0 !important; margin: 0 !important; font-size: 13.5px; }
 .pf-table th, .pf-table td { border-left: 0 !important; border-right: 0 !important; border-top: 0 !important; background: transparent !important; }
@@ -100,10 +101,16 @@ def grid_html(columns: str, cells: Iterable[str]) -> str:
     return _one_line(f'<div class="pf-grid pf-{columns}">{"".join(cells)}</div>')
 
 
+def spaced_html(inner: str) -> str:
+    """`inner` (already-built markup) followed by the same 14px of space the card rows have. A card drawn on its own gets no space from Streamlit (it pulls the next thing up against it), so the
+    range tabs under 'Where your leads are now' touched its border."""
+    return _one_line(f'<div class="pf-spaced">{inner}</div>')
+
+
 def card_html(title: str, hint: str = "", inner: str = "", chips: Sequence[Tuple[str, str]] = ()) -> str:
-    """A white card with a title, an optional hint line, optional chips (text, 'sent' | 'replies' | '') at the right,
+    """A white card with a title, an optional hint line, optional chips (text, 'sent' | 'replies' | 'unsubs' | '') at the right,
     and `inner` (already-built markup)."""
-    chip_html = "".join(f'<span class="pf-chip{" pf-chip-" + kind if kind in ("sent", "replies") else ""}">{esc(text)}</span>'
+    chip_html = "".join(f'<span class="pf-chip{" pf-chip-" + kind if kind in ("sent", "replies", "unsubs") else ""}">{esc(text)}</span>'
                         for text, kind in chips)
     head = f'<div class="pf-card-head"><h3 class="pf-card-title">{esc(title)}</h3><span class="pf-spacer"></span>{chip_html}</div>'
     hint_html = f'<div class="pf-card-hint">{esc(hint)}</div>' if hint else ""
@@ -184,13 +191,15 @@ def _label_for(day) -> str:
 
 
 def area_chart_svg(series: Sequence[Dict]) -> str:
-    """Emails sent (blue, filled) and replies (green) per day, from performance_logic.daily_series' rows
-    ({date, Sent, Replies}). An empty series gives an empty string; a single day draws two dots."""
+    """Emails sent (blue, filled), replies (green) and, for an HTML campaign, unsubscribes (amber) per day, from performance_logic.daily_series' rows
+    ({date, Sent, Replies} and, for HTML, Unsubscribes). An empty series gives an empty string; a single day draws a dot per line."""
     if not series:
         return ""
     sent = [max(0, int(row.get("Sent") or 0)) for row in series]
     replies = [max(0, int(row.get("Replies") or 0)) for row in series]
-    step, top = nice_ceiling(max(sent + replies + [0]))
+    has_unsubs = any("Unsubscribes" in row for row in series)
+    unsubs = [max(0, int(row.get("Unsubscribes") or 0)) for row in series] if has_unsubs else []
+    step, top = nice_ceiling(max(sent + replies + unsubs + [0]))
     inner_w, inner_h = CHART_WIDTH - 2 * CHART_PAD_X, CHART_HEIGHT - CHART_PAD_TOP - CHART_PAD_BOTTOM
     base = CHART_HEIGHT - CHART_PAD_BOTTOM
     count = len(series)
@@ -215,12 +224,14 @@ def area_chart_svg(series: Sequence[Dict]) -> str:
 
     if count == 1:
         shapes = (f'<circle cx="{x_at(0):.1f}" cy="{y_at(sent[0]):.1f}" r="4" fill="{SENT_COLOUR}"/>'
-                  f'<circle cx="{x_at(0):.1f}" cy="{y_at(replies[0]):.1f}" r="4" fill="{REPLIES_COLOUR}"/>')
+                  f'<circle cx="{x_at(0):.1f}" cy="{y_at(replies[0]):.1f}" r="4" fill="{REPLIES_COLOUR}"/>'
+                  + (f'<circle cx="{x_at(0):.1f}" cy="{y_at(unsubs[0]):.1f}" r="4" fill="{UNSUBS_COLOUR}"/>' if has_unsubs else ""))
     else:
         area = f'{line(sent)} L{x_at(count - 1):.1f},{base} L{x_at(0):.1f},{base} Z'
         shapes = (f'<path d="{area}" fill="url(#pf-sent-fill)"/><path d="{line(sent)}" fill="none" stroke="{SENT_COLOUR}" stroke-width="2.4" stroke-linejoin="round"/>'
-                  f'<path d="{line(replies)}" fill="none" stroke="{REPLIES_COLOUR}" stroke-width="2.4" stroke-linejoin="round"/>')
-    summary = f"Emails sent and replies per day over {count} day{'s' if count != 1 else ''}; most in one day: {max(sent + replies)}."
+                  f'<path d="{line(replies)}" fill="none" stroke="{REPLIES_COLOUR}" stroke-width="2.4" stroke-linejoin="round"/>'
+                  + (f'<path d="{line(unsubs)}" fill="none" stroke="{UNSUBS_COLOUR}" stroke-width="2.4" stroke-linejoin="round"/>' if has_unsubs else ""))
+    summary = (f"Emails sent, replies{' and unsubscribes' if has_unsubs else ''} per day over {count} day{'s' if count != 1 else ''}; most in one day: {max(sent + replies + unsubs)}.")
     return _one_line(
         f'<svg class="pf-chart" viewBox="0 0 {CHART_WIDTH} {CHART_HEIGHT}" role="img" aria-label="{esc(summary)}">'
         f'<defs><linearGradient id="pf-sent-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{SENT_COLOUR}" stop-opacity=".22"/>'
