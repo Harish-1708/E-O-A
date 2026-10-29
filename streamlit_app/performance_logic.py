@@ -231,28 +231,59 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
                 stage_variant_replies[(stage, variant)] += 1
                 stage_variant_positive[(stage, variant)] += positive
 
-    def _group_rows(labels: List[str], sent: Counter, replies: Counter, positive: Counter, key: str) -> List[Dict]:
+    # ---- who unsubscribed (an HTML campaign only): each is credited to the latest email sent to them BEFORE they unsubscribed (the time the Sheet recorded, LastActionAt), or, with no usable time,
+    # to the last email they were sent. Nobody who was never emailed is credited to a stage, variant or sender, but they are still counted in the totals.
+    is_html_campaign = campaign_cfg.get("format") == outreach.FORMAT_HTML
+    stage_unsub: Counter = Counter()
+    variant_unsub: Counter = Counter()
+    stage_variant_unsub: Counter = Counter()
+    sender_unsub: Counter = Counter()
+    unsubscribes_by_day: Counter = Counter()
+    if is_html_campaign:
+        for lead in leads:
+            if str(lead.get("Status") or "").strip() != outreach.STATUS_STOPPED_UNSUBSCRIBED:
+                continue
+            when = _dt(lead.get("LastActionAt"))
+            if when:
+                unsubscribes_by_day[when.date().isoformat()] += 1
+            credited = (_answered_by_timing(lead, stage_names, when) if when else None) or _latest_email(lead, stage_names)
+            if credited:
+                credited_stage, credited_variant = credited
+                if credited_stage:
+                    stage_unsub[credited_stage] += 1
+                if credited_variant:
+                    variant_unsub[credited_variant] += 1
+                if credited_stage and credited_variant:
+                    stage_variant_unsub[(credited_stage, credited_variant)] += 1
+                account = str(lead.get("SenderAccount") or "").strip()
+                if account:
+                    sender_unsub[account] += 1                          # only for someone this account actually emailed
+
+    def _group_rows(labels: List[str], sent: Counter, replies: Counter, positive: Counter, key: str, unsub: Optional[Counter] = None) -> List[Dict]:
+        unsub = unsub if unsub is not None else Counter()
         rows = []
         for label in labels:
-            if not sent[label] and not replies[label]:
+            if not sent[label] and not replies[label] and not unsub[label]:
                 continue
-            rows.append({key: label, "sent": sent[label], "replies": replies[label], "positive": positive[label],
+            rows.append({key: label, "sent": sent[label], "replies": replies[label], "positive": positive[label], "unsubscribed": unsub[label],
                          "reply_rate": rate(replies[label], sent[label]),
-                         "positive_rate": rate(positive[label], sent[label])})
+                         "positive_rate": rate(positive[label], sent[label]),
+                         "unsubscribe_rate": rate(unsub[label], sent[label])})
         return rows
 
-    known_stage_labels = stage_names + sorted((set(stage_sent) | set(stage_replies)) - set(stage_names) - {""})
-    stage_rows = _group_rows(known_stage_labels, stage_sent, stage_replies, stage_positive, "stage")
-    variant_rows = _group_rows(sorted(set(variant_sent) | set(variant_replies)), variant_sent, variant_replies,
-                               variant_positive, "variant")
+    known_stage_labels = stage_names + sorted((set(stage_sent) | set(stage_replies) | set(stage_unsub)) - set(stage_names) - {""})
+    stage_rows = _group_rows(known_stage_labels, stage_sent, stage_replies, stage_positive, "stage", stage_unsub)
+    variant_rows = _group_rows(sorted(set(variant_sent) | set(variant_replies) | set(variant_unsub)), variant_sent, variant_replies,
+                               variant_positive, "variant", variant_unsub)
 
     stage_order = known_stage_labels
-    variant_stage_keys = sorted(set(stage_variant_sent) | set(stage_variant_replies),
+    variant_stage_keys = sorted(set(stage_variant_sent) | set(stage_variant_replies) | set(stage_variant_unsub),
                                 key=lambda k: (stage_order.index(k[0]) if k[0] in stage_order else len(stage_order), k[1]))
     variant_stage_rows = [{"stage": st_, "variant": v_, "sent": stage_variant_sent[(st_, v_)],
-                           "replies": stage_variant_replies[(st_, v_)], "positive": stage_variant_positive[(st_, v_)],
+                           "replies": stage_variant_replies[(st_, v_)], "positive": stage_variant_positive[(st_, v_)], "unsubscribed": stage_variant_unsub[(st_, v_)],
                            "reply_rate": rate(stage_variant_replies[(st_, v_)], stage_variant_sent[(st_, v_)]),
-                           "positive_rate": rate(stage_variant_positive[(st_, v_)], stage_variant_sent[(st_, v_)])}
+                           "positive_rate": rate(stage_variant_positive[(st_, v_)], stage_variant_sent[(st_, v_)]),
+                           "unsubscribe_rate": rate(stage_variant_unsub[(st_, v_)], stage_variant_sent[(st_, v_)])}
                           for st_, v_ in variant_stage_keys]
 
     # ---- by sender account: the engine's own definition, kept exactly (replies
@@ -264,9 +295,10 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
     for account in sorted({(l.get("SenderAccount") or "").strip() for l in contacted_leads if (l.get("SenderAccount") or "").strip()}):
         account_leads = [l for l in contacted_leads if (l.get("SenderAccount") or "").strip() == account]
         replies_n = sum(1 for l in account_leads if l.get("Status") == outreach.STATUS_STOPPED_REPLIED)
-        sender_rows.append({"account": account, "leads": len(account_leads), "replies": replies_n,
+        sender_rows.append({"account": account, "leads": len(account_leads), "replies": replies_n, "unsubscribed": sender_unsub[account],
                             "sent": sum(1 for r in sent_rows if r.get("SenderAccount") == account),
-                            "reply_rate": rate(replies_n, len(account_leads))})
+                            "reply_rate": rate(replies_n, len(account_leads)),
+                            "unsubscribe_rate": rate(sender_unsub[account], len(account_leads))})
 
     # ---- sending problems
     failures = [r for r in send_log if (r.get("Status") or "").strip() not in ("", "sent")]
@@ -333,7 +365,20 @@ def build_campaign_performance(campaign_cfg: Dict, leads: List[Dict], responses:
         "variants": variant_rows,
         "sent_by_day": dict(sent_by_day),
         "replies_by_day": dict(replies_by_day),
+        "unsubscribes_by_day": dict(unsubscribes_by_day),
     }
+
+
+def _latest_email(lead: Dict, stage_names: List[str]) -> Optional[Tuple[str, str]]:
+    """(stage, variant) of the LAST email sent to this lead, or None when nothing was sent to them."""
+    best: Optional[Tuple[datetime, int]] = None
+    for index in range(len(stage_names)):
+        sent_at = _dt(lead.get(outreach.stage_field_names(index)["sent_at"]))
+        if sent_at and (best is None or sent_at >= best[0]):
+            best = (sent_at, index)
+    if best is None:
+        return None
+    return stage_names[best[1]], (lead.get(outreach.stage_field_names(best[1])["variant"]) or "")
 
 
 def _answered_by_timing(lead: Dict, stage_names: List[str], reply_at: datetime) -> Optional[Tuple[str, str]]:
@@ -376,28 +421,38 @@ def combine_performance(perfs: List[Dict], name: str = "All campaigns") -> Dict:
         merged: Dict[str, Dict] = {}
         for p in perfs:
             for row in p[rows_key]:
-                acc = merged.setdefault(row[key], {key: row[key], "sent": 0, "replies": 0, "positive": 0})
+                acc = merged.setdefault(row[key], {key: row[key], "sent": 0, "replies": 0, "positive": 0, "unsubscribed": 0, "_html_sent": 0})
                 acc["sent"] += row["sent"]
                 acc["replies"] += row["replies"]
                 acc["positive"] += row["positive"]
+                acc["unsubscribed"] += int(row.get("unsubscribed") or 0)
+                if p.get("is_html"):
+                    acc["_html_sent"] += row["sent"]                    # the unsubscribe rate is over the emails of campaigns that HAVE an unsubscribe page
         ordered = [k for k in order if k in merged] + sorted(k for k in merged if k not in order)
-        return [{**merged[k], "reply_rate": rate(merged[k]["replies"], merged[k]["sent"]),
-                 "positive_rate": rate(merged[k]["positive"], merged[k]["sent"])} for k in ordered]
+        return [{**{name: value for name, value in merged[k].items() if name != "_html_sent"}, "reply_rate": rate(merged[k]["replies"], merged[k]["sent"]),
+                 "positive_rate": rate(merged[k]["positive"], merged[k]["sent"]),
+                 "unsubscribe_rate": rate(merged[k]["unsubscribed"], merged[k]["_html_sent"])} for k in ordered]
 
     sent_by_day: Counter = Counter()
     replies_by_day: Counter = Counter()
+    unsubscribes_by_day: Counter = Counter()
     for p in perfs:
         sent_by_day.update(p["sent_by_day"])
         replies_by_day.update(p["replies_by_day"])
+        unsubscribes_by_day.update(p.get("unsubscribes_by_day") or {})
 
     senders: Dict[str, Dict] = {}
     for p in perfs:
         for row in p["sender_rows"]:
-            acc = senders.setdefault(row["account"], {"account": row["account"], "leads": 0, "replies": 0, "sent": 0})
+            acc = senders.setdefault(row["account"], {"account": row["account"], "leads": 0, "replies": 0, "sent": 0, "unsubscribed": 0, "_html_leads": 0})
             acc["leads"] += row["leads"]
             acc["replies"] += row["replies"]
             acc["sent"] += row["sent"]
-    sender_rows = [{**senders[a], "reply_rate": rate(senders[a]["replies"], senders[a]["leads"])} for a in sorted(senders)]
+            acc["unsubscribed"] += int(row.get("unsubscribed") or 0)
+            if p.get("is_html"):
+                acc["_html_leads"] += row["leads"]
+    sender_rows = [{**{name: value for name, value in senders[a].items() if name != "_html_leads"}, "reply_rate": rate(senders[a]["replies"], senders[a]["leads"]),
+                    "unsubscribe_rate": rate(senders[a]["unsubscribed"], senders[a]["_html_leads"])} for a in sorted(senders)]
 
     error_totals: Counter = Counter()
     for p in perfs:
@@ -409,13 +464,17 @@ def combine_performance(perfs: List[Dict], name: str = "All campaigns") -> Dict:
     for p in perfs:
         for row in p["variant_stage_rows"]:
             acc = variant_stage.setdefault((row["stage"], row["variant"]),
-                                           {"stage": row["stage"], "variant": row["variant"], "sent": 0, "replies": 0, "positive": 0})
+                                           {"stage": row["stage"], "variant": row["variant"], "sent": 0, "replies": 0, "positive": 0, "unsubscribed": 0, "_html_sent": 0})
             acc["sent"] += row["sent"]
             acc["replies"] += row["replies"]
             acc["positive"] += row["positive"]
+            acc["unsubscribed"] += int(row.get("unsubscribed") or 0)
+            if p.get("is_html"):
+                acc["_html_sent"] += row["sent"]
     stage_rank = {n: i for i, n in enumerate(outreach.CANONICAL_STAGE_ORDER)}
-    variant_stage_rows = [{**variant_stage[k], "reply_rate": rate(variant_stage[k]["replies"], variant_stage[k]["sent"]),
-                           "positive_rate": rate(variant_stage[k]["positive"], variant_stage[k]["sent"])}
+    variant_stage_rows = [{**{name: value for name, value in variant_stage[k].items() if name != "_html_sent"}, "reply_rate": rate(variant_stage[k]["replies"], variant_stage[k]["sent"]),
+                           "positive_rate": rate(variant_stage[k]["positive"], variant_stage[k]["sent"]),
+                           "unsubscribe_rate": rate(variant_stage[k]["unsubscribed"], variant_stage[k]["_html_sent"])}
                           for k in sorted(variant_stage, key=lambda k: (stage_rank.get(k[0], len(stage_rank)), k[0], k[1]))]
 
     contacted, sent = total("contacted"), total("sent")
@@ -445,16 +504,19 @@ def combine_performance(perfs: List[Dict], name: str = "All campaigns") -> Dict:
         "exact_matches": total("exact_matches"),
         "stages": merge("stages", "stage", outreach.CANONICAL_STAGE_ORDER),
         "variants": merge("variants", "variant", []),
-        "sent_by_day": dict(sent_by_day), "replies_by_day": dict(replies_by_day),
+        "sent_by_day": dict(sent_by_day), "replies_by_day": dict(replies_by_day), "unsubscribes_by_day": dict(unsubscribes_by_day),
     }
 
 
 def daily_series(perf: Dict, days: Optional[int], today: Optional[date] = None) -> List[Dict]:
     """[{date, Sent, Replies}] one entry per day, zeros included so a quiet
     day shows as a dip, not a gap. `days` = the last N days up to `today`
-    (UTC — the Sheet's own clock); None = from the first recorded day."""
+    (UTC — the Sheet's own clock); None = from the first recorded day. A report of an HTML campaign (`is_html`) has a third value,
+    `Unsubscribes`, in every entry; a plain-text campaign's entries have only the two."""
     today = today or datetime.now(timezone.utc).date()
-    recorded = sorted({date.fromisoformat(d) for d in list(perf["sent_by_day"]) + list(perf["replies_by_day"])})
+    html = bool(perf.get("is_html"))
+    unsub_days = (perf.get("unsubscribes_by_day") or {}) if html else {}
+    recorded = sorted({date.fromisoformat(d) for d in list(perf["sent_by_day"]) + list(perf["replies_by_day"]) + list(unsub_days)})
     if not recorded:
         return []
     start = recorded[0] if days is None else today - timedelta(days=days - 1)
@@ -462,7 +524,10 @@ def daily_series(perf: Dict, days: Optional[int], today: Optional[date] = None) 
     series, day = [], start
     while day <= end:
         key = day.isoformat()
-        series.append({"date": key, "Sent": perf["sent_by_day"].get(key, 0), "Replies": perf["replies_by_day"].get(key, 0)})
+        entry = {"date": key, "Sent": perf["sent_by_day"].get(key, 0), "Replies": perf["replies_by_day"].get(key, 0)}
+        if html:
+            entry["Unsubscribes"] = unsub_days.get(key, 0)
+        series.append(entry)
         day += timedelta(days=1)
     return series
 
