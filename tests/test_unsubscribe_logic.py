@@ -647,3 +647,66 @@ def test_what_to_add_to_the_code_list_and_what_is_in_conflict(existing, wanted, 
 
 def test_the_code_list_tab_is_named_and_laid_out_as_the_google_page_expects():
     assert ul.CODES_TAB == "Campaign codes" and ul.CODES_COLUMNS == ["Code", "Campaign"] and ul.CAMPAIGN_CODE_PATTERN == r"^~[A-Za-z0-9_-]{10}$"
+
+
+
+# ================================================================ the speed check: what each line says and what it means
+
+def runs(*pairs):
+    return [{"wall": wall, "took": took} for wall, took in pairs]
+
+
+def timings(ping, opened, confirmed):
+    return [{"label": "ping (a request that does nothing at all)", "runs": ping}, {"label": "open the link (the page's data request)", "runs": opened}, {"label": "confirm with a TEST link (records nothing)", "runs": confirmed}]
+
+
+FINE = timings(runs((0.5, 2), (0.3, 1)), runs((0.8, 40), (0.6, 35)), runs((1.4, 300), (1.1, 250)))
+
+
+def test_each_timed_request_is_one_line_with_the_seconds_of_each_run_and_the_scripts_own_time():
+    assert ul.format_timings(FINE) == ["  ping (a request that does nothing at all): 0.5 s then 0.3 s  (the script itself: 2 ms then 1 ms)",
+                                       "  open the link (the page's data request): 0.8 s then 0.6 s  (the script itself: 40 ms then 35 ms)",
+                                       "  confirm with a TEST link (records nothing): 1.4 s then 1.1 s  (the script itself: 300 ms then 250 ms)"]
+
+
+def test_the_scripts_own_time_is_left_out_when_any_run_did_not_report_it():
+    assert ul.format_timings(timings(runs((0.5, None), (0.3, 1)), runs((0.8, 40), (0.6, 35)), runs((1.4, 300), (1.1, 250))))[0] == "  ping (a request that does nothing at all): 0.5 s then 0.3 s"
+
+
+def test_a_request_that_failed_is_said_to_have_failed_and_why():
+    rows = timings([{"error": "timed out"}, {"wall": 0.3, "took": 1}], runs((0.8, 40), (0.6, 35)), runs((1.4, 300), (1.1, 250)))
+    assert ul.format_timings(rows)[0] == "  ping (a request that does nothing at all): could not be timed (timed out)." and ul.format_timings([{"label": "x", "runs": []}]) == ["  x: could not be timed (no answer)."]
+
+
+def test_a_fast_script_is_read_as_the_rest_being_google_and_the_network():
+    reading = ul.speed_reading(FINE)
+    assert reading == ["SPEED READING: opening the link spends only 35 ms inside the script, so the rest of the wait is Google and the network."]
+
+
+def test_a_first_request_much_slower_than_the_next_is_read_as_google_starting_the_script_up():
+    reading = ul.speed_reading(timings(runs((4.6, 2), (0.4, 1)), runs((0.8, 40), (0.6, 35)), runs((1.4, 300), (1.1, 250))))
+    assert reading[0] == "SPEED READING: the first request after a quiet spell took 4.2 s longer than the next: that is Google starting the script up, and nothing inside the script can remove it."
+
+
+def test_a_small_difference_between_the_first_and_second_request_is_not_called_a_cold_start():
+    assert not any("starting the script up" in line for line in ul.speed_reading(timings(runs((1.2, 2), (0.4, 1)), runs((0.8, 40), (0.6, 35)), runs((1.4, 300), (1.1, 250)))))
+
+
+def test_a_do_nothing_request_that_is_slow_is_read_as_google_and_the_network_not_the_script():
+    reading = ul.speed_reading(timings(runs((2.5, 2), (2.2, 1)), runs((2.8, 40), (2.6, 35)), runs((3.4, 300), (3.1, 250))))
+    assert "SPEED READING: even a request that does nothing at all takes 2.2 s to come back from here: that part is Google and the network, not the script." in reading
+
+
+def test_an_opening_that_is_slow_inside_the_script_is_pointed_at_and_so_is_a_slow_confirmation():
+    reading = ul.speed_reading(timings(runs((0.5, 2), (0.3, 1)), runs((4.0, 3500), (3.8, 3300)), runs((5.0, 4200), (4.9, 4000))))
+    assert "SPEED READING: opening the link spends 3300 ms inside the script: something it does is slow (send me these lines)." in reading and "SPEED READING: confirming spends 4000 ms inside the script: slower than expected (send me these lines)." in reading
+
+
+def test_the_reading_uses_the_warm_run_not_the_cold_one_for_the_scripts_own_time():
+    assert "spends only 35 ms" in ul.speed_reading(timings(runs((0.5, 2), (0.3, 1)), runs((4.0, 3500), (0.6, 35)), runs((1.4, 300), (1.1, 250))))[-1]
+
+
+@pytest.mark.parametrize("rows", [[], timings([{"error": "x"}, {"error": "x"}], runs((0.8, 40), (0.6, 35)), runs((1.4, 300), (1.1, 250))), timings(runs((0.5, 2)), runs((0.8, 40), (0.6, 35)), runs((1.4, 300), (1.1, 250))),
+                                  [{"label": "ping (x)", "runs": runs((0.5, 2), (0.3, 1))}]])
+def test_a_reading_that_cannot_be_made_says_so_and_nothing_more(rows):
+    assert ul.speed_reading(rows) == ["SPEED READING: not conclusive: some requests could not be timed from here."]
