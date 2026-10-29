@@ -445,3 +445,44 @@ def classify_page(status: Optional[int], body: str, error: str = "") -> Tuple[st
             return "ok", "GitHub Pages served the unsubscribe page (HTTP 200)."
         return "blocked", "the address answered HTTP 200 but it is not the unsubscribe page (the wrong address or folder?). " + PAGES_FIX
     return "unknown", f"the page address answered with an unexpected status ({status})."
+
+
+# ---------------------------------------------------------------- how long each step takes, told apart from how long Google itself takes
+
+def format_timings(rows: List[Dict]) -> List[str]:
+    """One line per timed request: the wall-clock seconds of each run, and what the script itself reported (milliseconds inside it) when it did."""
+    lines = []
+    for row in rows:
+        runs = row.get("runs") or []
+        failed = next((run for run in runs if run.get("error")), None)
+        if failed or not runs:
+            lines.append(f"  {row.get('label', '?')}: could not be timed ({(failed or {}).get('error', 'no answer')}).")
+            continue
+        text = f"  {row['label']}: " + " then ".join(f"{run['wall']:.1f} s" for run in runs)
+        if all(run.get("took") is not None for run in runs):
+            text += "  (the script itself: " + " then ".join(f"{run['took']} ms" for run in runs) + ")"
+        lines.append(text)
+    return lines
+
+
+def speed_reading(rows: List[Dict]) -> List[str]:
+    """What the timings mean, in plain words. Never a failure: only a reading."""
+    by_start = {str(row.get("label", "")).split(" ")[0]: row for row in rows}
+    ping, open_link, confirm = by_start.get("ping"), by_start.get("open"), by_start.get("confirm")
+    if not (ping and open_link and confirm) or any(run.get("error") for row in (ping, open_link, confirm) for run in row.get("runs", [])) or any(len(row.get("runs", [])) < 2 for row in (ping, open_link, confirm)):
+        return ["SPEED READING: not conclusive: some requests could not be timed from here."]
+    lines = []
+    cold, warm = ping["runs"][0]["wall"], ping["runs"][-1]["wall"]
+    if cold - warm > 1.5:
+        lines.append(f"SPEED READING: the first request after a quiet spell took {cold - warm:.1f} s longer than the next: that is Google starting the script up, and nothing inside the script can remove it.")
+    if warm > 1.5:
+        lines.append(f"SPEED READING: even a request that does nothing at all takes {warm:.1f} s to come back from here: that part is Google and the network, not the script.")
+    opened = max((run.get("took") or 0) for run in open_link["runs"][-1:])
+    confirmed = max((run.get("took") or 0) for run in confirm["runs"][-1:])
+    if opened > 1000:
+        lines.append(f"SPEED READING: opening the link spends {opened} ms inside the script: something it does is slow (send me these lines).")
+    else:
+        lines.append(f"SPEED READING: opening the link spends only {opened} ms inside the script, so the rest of the wait is Google and the network.")
+    if confirmed > 3000:
+        lines.append(f"SPEED READING: confirming spends {confirmed} ms inside the script: slower than expected (send me these lines).")
+    return lines
