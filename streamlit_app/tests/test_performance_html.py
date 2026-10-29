@@ -472,3 +472,48 @@ def test_the_stylesheet_lays_five_cards_out_five_three_and_two_across():
     narrow = next(line for line in css.splitlines() if line.startswith("@media (max-width: 900px)"))
     assert ".pf-g5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }" in css
     assert ".pf-g5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }" in wide and ".pf-g5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }" in narrow
+
+
+
+# ================================================================ unsubscribes on the Activity chart, the legend chip and the spacing wrapper
+
+DAYS = [{"date": "2026-10-26", "Sent": 3, "Replies": 1, "Unsubscribes": 0}, {"date": "2026-10-27", "Sent": 2, "Replies": 0, "Unsubscribes": 7}, {"date": "2026-10-28", "Sent": 1, "Replies": 0, "Unsubscribes": 1}]
+
+
+def test_an_html_campaigns_chart_draws_a_third_amber_line_for_unsubscribes():
+    svg = P.area_chart_svg(DAYS)
+    assert P.UNSUBS_COLOUR == "#d97706" and svg.count('stroke="#d97706"') == 1 and svg.count('stroke="#2563eb"') == 1 and svg.count('stroke="#16a34a"') == 1
+    assert "Emails sent, replies and unsubscribes per day over 3 days; most in one day: 7." in svg
+
+
+def test_a_plain_text_campaigns_chart_has_no_amber_line_and_says_so():
+    svg = P.area_chart_svg([{k: v for k, v in day.items() if k != "Unsubscribes"} for day in DAYS])
+    assert "#d97706" not in svg and "Emails sent, replies per day over 3 days; most in one day: 3." in svg and "unsubscribes" not in svg
+
+
+def test_the_chart_scale_leaves_room_for_the_biggest_unsubscribe_day():
+    top = P.nice_ceiling(7)[1]
+    assert f">{top:g}<" in P.area_chart_svg(DAYS) and P.nice_ceiling(3)[1] < top
+
+
+def test_a_single_day_draws_a_dot_for_each_line_including_the_amber_one():
+    one = P.area_chart_svg([DAYS[1]])
+    assert one.count("<circle") == 3 and 'fill="#d97706"' in one and P.area_chart_svg([{k: v for k, v in DAYS[1].items() if k != "Unsubscribes"}]).count("<circle") == 2
+
+
+def test_the_amber_line_follows_the_unsubscribe_numbers():
+    svg = P.area_chart_svg(DAYS)
+    amber = re.search(r'<path d="(M[^"]+)" fill="none" stroke="#d97706"', svg).group(1)
+    ys = [float(point.split(",")[1]) for point in amber.replace("M", "").split(" L")]
+    assert len(ys) == 3 and ys[1] < ys[0] and ys[1] < ys[2]                              # the 7 is the highest point (smallest y)
+
+
+def test_a_legend_chip_for_unsubscribes_is_amber_and_an_unknown_kind_gets_no_colour():
+    chips = P.card_html("Activity", "", "", [("Unsubscribes", "unsubs"), ("Other", "weird")])
+    assert 'class="pf-chip pf-chip-unsubs">Unsubscribes<' in chips and 'class="pf-chip">Other<' in chips
+    assert ".pf-chip-unsubs { color: #b45309; border-color: #f3d3a8; background: #fff8ec; }" in P.PERFORMANCE_CSS
+
+
+def test_a_card_drawn_on_its_own_can_be_given_the_same_space_the_card_rows_have():
+    assert P.spaced_html('<div class="pf-card">x</div>') == '<div class="pf-spaced"><div class="pf-card">x</div></div>' and ".pf-spaced { margin: 0 0 14px; }" in P.PERFORMANCE_CSS
+    assert ".pf-grid { display: grid; gap: 14px; margin: 0 0 14px; }" in P.PERFORMANCE_CSS
