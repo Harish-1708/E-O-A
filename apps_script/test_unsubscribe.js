@@ -25,7 +25,7 @@ function makeToken(secret, fields) {
 // ---- simulated Google services
 function makeWorld(options) {
   options = options || {};
-  const world = { sheets: {}, opened: [], locks: { waited: 0, tried: 0, released: 0 }, logs: [], failWrite: false, lockBusy: false, stats: { tabReads: 0, cellsRead: 0 } };
+  const world = { sheets: {}, opened: [], locks: { waited: 0, tried: 0, released: 0 }, logs: [], failWrite: false, failProps: false, lockBusy: false, stats: { tabReads: 0, cellsRead: 0 } };
   const signed = (buffer) => Array.from(buffer, (b) => (b > 127 ? b - 256 : b));
   const unsigned = (bytes) => Buffer.from(bytes.map((b) => b & 255));
   function makeSheet(rows) {
@@ -47,6 +47,7 @@ function makeWorld(options) {
   }
   world.makeSheet = makeSheet;
   const properties = options.props === undefined ? { UNSUBSCRIBE_SECRET: SECRET, SHEET_ID: 'SHEET123' } : options.props;
+  world.props = properties;
   const context = {
     Utilities: {
       computeHmacSha256Signature: (value, key) => signed(crypto.createHmac('sha256', key).update(value, 'utf8').digest()),
@@ -58,7 +59,16 @@ function makeWorld(options) {
       newBlob: (bytes) => ({ getDataAsString: () => unsigned(bytes).toString('utf8') }),
       formatDate: (date) => date.toISOString().slice(0, 19).replace('T', ' '),
     },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => (key in properties ? properties[key] : null) }) },
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (key) => { if (world.failReadProps && String(key).startsWith('oo')) { throw new Error('the store is unreadable'); } if (world.failSecretRead && key === 'UNSUBSCRIBE_SECRET') { throw new Error('settings unreadable'); } return key in properties ? properties[key] : null; },
+        // a FULL store refuses growth (a new entry, a longer value) but still lets an existing entry be overwritten with something no longer
+        setProperty: (key, value) => { if (world.failProps && !(key in properties && String(value).length <= String(properties[key]).length)) { throw new Error('properties full'); } properties[key] = String(value); },
+        setProperties: (batch) => { if (world.failProps) { throw new Error('properties full'); } Object.assign(properties, batch); },
+        deleteProperty: (key) => { delete properties[key]; },
+        getKeys: () => Object.keys(properties),
+      }),
+    },
     SpreadsheetApp: {
       openById: (id) => {
         world.opened.push(id);
@@ -754,7 +764,7 @@ test('nothing is remembered from one request to the next: a code listed after a 
   withCodes(w, [[CCODE, 'Spring_Launch']]); recordFrom(w, coded({ e: 'b@x.com' })); assert.strictEqual(rowsOf(w)[1][4], 'Spring_Launch');
 });
 test('a spreadsheet opened for one request is not reused by the next', () => {
-  const w = makeWorld(); withTab(w); info(w, PLAIN); info(w, PLAIN); assert.strictEqual(w.opened.length, 2);
+  const w = makeWorld(); withTab(w); recordFrom(w, coded({ e: 'a@x.com' })); recordFrom(w, coded({ e: 'b@x.com' })); assert.strictEqual(w.opened.length, 2);
 });
 test('a master tab that is only a header, or empty, is handled', () => {
   const w = makeWorld(); withTab(w); withMaster(w, []); assert.strictEqual(recordFrom(w, PLAIN).ok, true);
@@ -762,6 +772,175 @@ test('a master tab that is only a header, or empty, is handled', () => {
 });
 test('the speed advice is written into the script\'s own description', () => {
   assert.ok(CODE.includes('SPEED: opening a spreadsheet is the slowest thing this script does') && CODE.includes('Turn the DIAGNOSTICS property off'));
+});
+
+// ================================================================ the quick lookup, ping and timing, and the master update as a second request
+const readyWorld = (rows, extra) => { const w = (extra && extra.diag) ? diagWorld() : makeWorld(); withTab(w, rows || []); infoJson(w, makeToken(SECRET, { e: 'warmup@x.com', k: 'other' })); return w; };
+const hintKeys = (w) => Object.keys(w.props).filter((k) => k.startsWith('oo:'));
+const opsSince = (w, fn) => { const before = { opened: w.opened.length, reads: w.stats.tabReads }; const out = fn(); return { out, opened: w.opened.length - before.opened, reads: w.stats.tabReads - before.reads }; };
+
+test('the very first request fills the store from the Sheet and later visits are answered without opening the spreadsheet', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('someone@else.com', 'kelsonagency')]);
+  assert.strictEqual(w.props.oo_ready, undefined); infoJson(w, PLAIN); assert.strictEqual(w.props.oo_ready, '1'); assert.strictEqual(hintKeys(w).length, 1);
+  const { out, opened, reads } = opsSince(w, () => infoJson(w, PLAIN));
+  assert.strictEqual(out.already, false); assert.strictEqual(opened, 0); assert.strictEqual(reads, 0);
+});
+test('a first-time visitor costs no spreadsheet work and no lock, with or without the log', () => {
+  const w = readyWorld(); const a = opsSince(w, () => info(w, PLAIN)); assert.deepStrictEqual([a.opened, a.reads], [0, 0]); assert.deepStrictEqual(plain(w.locks), { waited: 0, tried: 0, released: 0 });
+  const g = opsSince(w, () => get(w, PLAIN)); assert.deepStrictEqual([g.opened, g.reads], [0, 0]);
+});
+test('a person who unsubscribed through the page is answered from the store, checked against the Sheet', () => {
+  const w = readyWorld(); recordFrom(w, PLAIN); assert.ok(hintKeys(w).length >= 1);
+  const { out, opened } = opsSince(w, () => infoJson(w, PLAIN)); assert.strictEqual(out.already, true); assert.strictEqual(opened, 1);                // the yes is verified in the Sheet
+});
+test('a yes is never trusted: a row deleted by hand makes the page ask the questions again, and the stale entry is cleaned', () => {
+  const w = readyWorld(); recordFrom(w, PLAIN); w.sheets.Unsubscribes.rows.splice(1);                                                           // the row is deleted by hand
+  assert.strictEqual(infoJson(w, PLAIN).already, false); const again = opsSince(w, () => infoJson(w, PLAIN)); assert.strictEqual(again.out.already, false); assert.strictEqual(again.opened, 0);
+});
+test('a person re-subscribed by hand can unsubscribe again and is recorded', () => {
+  const w = readyWorld(); recordFrom(w, PLAIN); w.sheets.Unsubscribes.rows.splice(1); const j = recordFrom(w, PLAIN);
+  assert.strictEqual(j.already, false); assert.strictEqual(rowsOf(w).length, 1); assert.strictEqual(infoJson(w, PLAIN).already, true);
+});
+test('a miss is trusted (a row added by hand shows the questions once) and confirming records nothing twice and fixes the store', () => {
+  const w = readyWorld(); w.sheets.Unsubscribes.rows.push(optedOutRow('ann@example.com', 'kelsonagency'));
+  assert.strictEqual(infoJson(w, PLAIN).already, false); const j = recordFrom(w, PLAIN); assert.strictEqual(j.already, true); assert.strictEqual(rowsOf(w).length, 1); assert.strictEqual(infoJson(w, PLAIN).already, true);
+});
+test('a hand-added row for every brand is answered yes for any brand (checked in the Sheet)', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('ann@example.com', '')]); infoJson(w, makeToken(SECRET, { e: 'warmup@x.com', k: 'other' }));
+  assert.strictEqual(infoJson(w, PLAIN).already, true); assert.strictEqual(infoJson(w, makeToken(SECRET, { k: 'anything' })).already, true); assert.strictEqual(infoJson(w, makeToken(SECRET, { e: 'bob@example.com' })).already, false);
+});
+test('the one-tap post and the Google page also record the person in the store', () => {
+  const w = readyWorld(); post(w, makeToken(SECRET, { e: 'a@x.com' })); submit(w, makeToken(SECRET, { e: 'b@x.com' }), '', '');
+  assert.strictEqual(infoJson(w, makeToken(SECRET, { e: 'a@x.com' })).already, true); assert.strictEqual(infoJson(w, makeToken(SECRET, { e: 'b@x.com' })).already, true); assert.strictEqual(hintKeys(w).length, 2);
+});
+test('the store holds only hashes: no address, brand, campaign or lead appears in a name or a value', () => {
+  const w = readyWorld(); recordFrom(w, PLAIN); const all = JSON.stringify(w.props);
+  ['ann@example.com', 'Kelson', 'kelsonagency', 'Spring_Launch', 'L-17'].forEach((x) => assert.ok(!all.includes(x), x));
+  hintKeys(w).forEach((k) => assert.ok(/^oo:[A-Za-z0-9_-]{16}$/.test(k) && w.props[k] === '1', k));
+});
+test('the same address and brand always map to the same entry, whatever the case or spaces, and a different brand to a different one', () => {
+  const w = readyWorld(); recordFrom(w, makeToken(SECRET, { e: '  ANN@Example.com ' })); const before = hintKeys(w).length;
+  recordFrom(w, makeToken(SECRET, { e: 'ann@example.com' })); assert.strictEqual(hintKeys(w).length, before);
+  recordFrom(w, makeToken(SECRET, { e: 'ann@example.com', k: 'swoveralls' })); assert.strictEqual(hintKeys(w).length, before + 1);
+});
+test('a test link never touches the store or the Sheet', () => {
+  const w = readyWorld(); const keys = hintKeys(w).length; const r = opsSince(w, () => { info(w, makeToken(SECRET, { t: 1 })); recordFrom(w, makeToken(SECRET, { t: 1 })); post(w, makeToken(SECRET, { t: 1 })); });
+  assert.strictEqual(hintKeys(w).length, keys); assert.strictEqual(r.reads, 0);
+});
+test('when the store runs out of room it is switched off with no new space, and from then on the Sheet is asked every time, correctly', () => {
+  const w = readyWorld(); w.failProps = true; recordFrom(w, PLAIN);
+  assert.strictEqual(w.props.oo_ready, '0'); assert.strictEqual(hintKeys(w).length, 0);                                                          // the hint could not be added, so the store stopped being trusted
+  w.failProps = false; const before = hintKeys(w).length;
+  assert.strictEqual(infoJson(w, PLAIN).already, true); assert.strictEqual(infoJson(w, makeToken(SECRET, { e: 'new@x.com' })).already, false);   // the person who could not be added is still found, through the Sheet
+  assert.strictEqual(hintKeys(w).length, before); assert.strictEqual(w.props.oo_ready, '0');                                                     // and the store is never refilled once it is off
+});
+test('a store that is off is never used even if it holds entries, and a person added by hand is found', () => {
+  const w = readyWorld(); w.props.oo_ready = '0'; w.sheets.Unsubscribes.rows.push(optedOutRow('ann@example.com', 'kelsonagency'));
+  const r = opsSince(w, () => infoJson(w, PLAIN)); assert.strictEqual(r.out.already, true); assert.strictEqual(r.opened, 1);
+});
+test('a store that cannot be written while it is first being built is not marked ready, the answer is still right, and a later request builds it', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('ann@example.com', 'kelsonagency')]); w.failProps = true;
+  assert.strictEqual(infoJson(w, PLAIN).already, true); assert.notStrictEqual(w.props.oo_ready, '1');
+  w.failProps = false; assert.strictEqual(infoJson(w, PLAIN).already, true); assert.strictEqual(w.props.oo_ready, '1'); assert.strictEqual(hintKeys(w).length, 1);
+});
+test('a store that was never filled is filled, and one that is off is never refilled by a visit', () => {
+  const w = makeWorld(); withTab(w); assert.strictEqual(w.props.oo_ready, undefined); infoJson(w, PLAIN); assert.strictEqual(w.props.oo_ready, '1');
+  const off = makeWorld(); withTab(off); off.props.oo_ready = '0'; infoJson(off, PLAIN); assert.strictEqual(off.props.oo_ready, '0');
+});
+test('a store that cannot be read means the Sheet is asked, never an error', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('ann@example.com', 'kelsonagency')]); w.failReadProps = true;
+  assert.strictEqual(infoJson(w, PLAIN).already, true); assert.ok(get(w, PLAIN).includes('You are already unsubscribed'));
+});
+test('an unreadable Unsubscribes tab leaves the store not ready, so a later request tries again', () => {
+  const w = makeWorld(); w.sheets.Unsubscribes = { getDataRange() { throw new Error('boom'); } }; assert.strictEqual(infoJson(w, PLAIN).already, false); assert.strictEqual(w.props.oo_ready, undefined);
+  withTab(w, [optedOutRow('ann@example.com', 'kelsonagency')]); assert.strictEqual(infoJson(w, PLAIN).already, true); assert.strictEqual(w.props.oo_ready, '1');
+});
+test('with no Unsubscribes tab at all the store still becomes ready, and the first opt-out creates both', () => {
+  const w = makeWorld(); assert.strictEqual(infoJson(w, PLAIN).already, false); assert.strictEqual(w.props.oo_ready, '1'); recordFrom(w, PLAIN); assert.strictEqual(infoJson(w, PLAIN).already, true);
+});
+test('rebuildUnsubscribeHints forgets what the store holds and fills it again from the Sheet', () => {
+  const w = readyWorld(); recordFrom(w, PLAIN); const gone = hintKeys(w)[0];
+  w.sheets.Unsubscribes.rows.splice(1);                                              // that person is removed by hand
+  w.sheets.Unsubscribes.rows.push(optedOutRow('hand@x.com', 'kelsonagency'));        // and another is added by hand
+  w.call('rebuildUnsubscribeHints');
+  assert.strictEqual(w.props.oo_ready, '1'); assert.strictEqual(hintKeys(w).length, 1); assert.ok(!(gone in w.props));
+  assert.strictEqual(infoJson(w, makeToken(SECRET, { e: 'hand@x.com' })).already, true); assert.strictEqual(infoJson(w, PLAIN).already, false);
+});
+test('rebuildUnsubscribeHints also switches a store that was off back on', () => {
+  const w = readyWorld(); w.props.oo_ready = '0'; w.call('rebuildUnsubscribeHints'); assert.strictEqual(w.props.oo_ready, '1');
+});
+test('rebuilding with the script not set up does nothing and never throws', () => {
+  assert.doesNotThrow(() => makeWorld({ props: {} }).call('rebuildUnsubscribeHints'));
+});
+
+test('ping answers at once, touches no spreadsheet, no store and no lock, even with the log on', () => {
+  [makeWorld(), diagWorld()].forEach((w) => { const r = opsSince(w, () => JSON.parse(w.call('doGet', { parameter: { api: 'ping' } }).getContent())); assert.deepStrictEqual(r.out, { ok: true }); assert.deepStrictEqual([r.opened, r.reads], [0, 0]); assert.deepStrictEqual(plain(w.locks), { waited: 0, tried: Object.keys(w.sheets).length ? 0 : 0, released: 0 }); assert.strictEqual(Object.keys(w.sheets).length, 0); });
+});
+test('how long a request took inside the script is added only when asked for', () => {
+  const w = makeWorld(); withTab(w);
+  const plainInfo = JSON.parse(w.call('doGet', { parameter: { api: 'info', t: PLAIN }, queryString: '' }).getContent()); assert.ok(!('took' in plainInfo));
+  const timedInfo = JSON.parse(w.call('doGet', { parameter: { api: 'info', t: PLAIN, timing: '1' }, queryString: '' }).getContent()); assert.ok(Number.isInteger(timedInfo.took) && timedInfo.took >= 0 && timedInfo.took < 1000);
+  assert.ok(Number.isInteger(JSON.parse(w.call('doGet', { parameter: { api: 'ping', timing: '1' } }).getContent()).took));
+  assert.ok(!('took' in confirmJson(w, { api: 'confirm', t: PLAIN }))); assert.ok(Number.isInteger(confirmJson(w, { api: 'confirm', t: PLAIN, timing: true }).took));
+  assert.ok(!('took' in confirmJson(w, { api: 'confirm', t: PLAIN, timing: 'yes' })));
+});
+
+test('a confirmation that defers records the opt-out and the store entry but leaves the master tab to the second request', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]);
+  const j = confirmJson(w, { api: 'confirm', t: PLAIN, reason: 'Other', defer: true });
+  assert.strictEqual(j.ok, true); assert.strictEqual(rowsOf(w).length, 1); assert.strictEqual(masterOf(w)[0][4], ''); assert.ok(hintKeys(w).length >= 1); assert.ok(!('master' in j));
+});
+test('only a real true defers: anything else updates the master tab straight away as before', () => {
+  ['yes', 1, 'true', null, undefined, {}].forEach((defer, i) => { const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]); confirmJson(w, { api: 'confirm', t: makeToken(SECRET, {}), defer }); assert.strictEqual(masterOf(w)[0][4], 'Stopped - Unsubscribed', String(i)); });
+});
+test('a deferred confirmation touches no master column at all', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [[CCODE, 'Spring_Launch']]); const master = bigMaster(w, MASTER, 300); w.stats.cellsRead = 0;
+  confirmJson(w, { api: 'confirm', t: coded(), reason: 'Other', defer: true }); assert.ok(w.stats.cellsRead < 100, 'cells read: ' + w.stats.cellsRead); assert.strictEqual(master.rows[150][20], '');
+});
+test('sync marks the master tab for someone the Sheet shows as unsubscribed, and says what it did', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]); confirmJson(w, { api: 'confirm', t: PLAIN, defer: true });
+  assert.deepStrictEqual(confirmJson(w, { api: 'sync', t: PLAIN }), { ok: true, master: 'updated' }); assert.strictEqual(masterOf(w)[0][4], 'Stopped - Unsubscribed'); assert.ok(/^\d{4}-/.test(masterOf(w)[0][5]));
+});
+test('sync does nothing for a link whose owner has not unsubscribed, so a link alone can never mark a lead', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]);
+  assert.deepStrictEqual(confirmJson(w, { api: 'sync', t: PLAIN }), { ok: false, error: 'not unsubscribed' }); assert.strictEqual(masterOf(w)[0][4], ''); assert.strictEqual(rowsOf(w).length, 0);
+});
+test('sync refuses a wrong or missing link, does nothing for a test link and never records an opt-out itself', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]);
+  [PLAIN.slice(0, -1), '', undefined, 5, null].forEach((t) => assert.deepStrictEqual(confirmJson(w, { api: 'sync', t }), { ok: false, error: 'invalid' }));
+  assert.deepStrictEqual(confirmJson(w, { api: 'sync', t: makeToken(SECRET, { t: 1 }) }), { ok: true, master: 'test' }); assert.strictEqual(masterOf(w)[0][4], ''); assert.strictEqual(rowsOf(w).length, 0);
+});
+test('sync is repeatable and leaves a decided outcome alone', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com', 'Stopped - Replied', { at: '2026-09-01 08:00:00' })]); confirmJson(w, { api: 'confirm', t: PLAIN, defer: true });
+  assert.strictEqual(confirmJson(w, { api: 'sync', t: PLAIN }).master, 'none'); assert.strictEqual(confirmJson(w, { api: 'sync', t: PLAIN }).master, 'none'); assert.deepStrictEqual(masterOf(w)[0].slice(4, 6), ['Stopped - Replied', '2026-09-01 08:00:00']);
+});
+test('sync reports when there is no master tab or the script is not set up, and never throws', () => {
+  const w = makeWorld(); withTab(w); confirmJson(w, { api: 'confirm', t: PLAIN, defer: true }); assert.strictEqual(confirmJson(w, { api: 'sync', t: PLAIN }).master, 'no tab');
+  assert.deepStrictEqual(confirmJson(makeWorld({ props: {} }), { api: 'sync', t: PLAIN }), { ok: false, error: 'not set up' });
+  const broken = makeWorld(); withTab(broken); confirmJson(broken, { api: 'confirm', t: PLAIN, defer: true }); broken.sheets.Unsubscribes = { getDataRange() { throw new Error('boom'); } };
+  assert.doesNotThrow(() => confirmJson(broken, { api: 'sync', t: PLAIN }));
+});
+test('sync never throws even when something outside the Sheet fails', () => {
+  const w = makeWorld(); withTab(w); confirmJson(w, { api: 'confirm', t: PLAIN, defer: true }); w.failSecretRead = true;
+  assert.deepStrictEqual(confirmJson(w, { api: 'sync', t: PLAIN }), { ok: false, error: 'failed' });
+});
+test('confirming never throws even when the settings cannot be read, and records nothing', () => {
+  const w = makeWorld(); withTab(w); w.failSecretRead = true; assert.deepStrictEqual(confirmJson(w, { api: 'confirm', t: PLAIN }), { ok: false, error: 'failed' }); assert.strictEqual(rowsOf(w).length, 0);
+});
+test('sync with diagnostics on is logged as a master event and holds nothing personal', () => {
+  const w = diagWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]); confirmJson(w, { api: 'confirm', t: PLAIN, defer: true }); confirmJson(w, { api: 'sync', t: PLAIN });
+  assert.deepStrictEqual(diagRows(w).filter((r) => r[1] === 'master').map((r) => r[2]), ['deferred', 'updated']); assert.ok(!JSON.stringify(w.sheets['Unsubscribe diagnostics'].rows).includes('ann@example.com'));
+});
+test('a sync request costs one spreadsheet opening and reads only the columns it needs', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [[CCODE, 'Spring_Launch']]); bigMaster(w, MASTER, 300); confirmJson(w, { api: 'confirm', t: coded(), defer: true }); w.opened.length = 0; w.stats.cellsRead = 0;
+  confirmJson(w, { api: 'sync', t: coded() }); assert.strictEqual(w.opened.length, 1); assert.ok(w.stats.cellsRead < 1000, 'cells read: ' + w.stats.cellsRead);
+});
+test('the confirmation the visitor waits for opens the spreadsheet once and reads no master column', () => {
+  const w = makeWorld(); withTab(w, [optedOutRow('x@y.com', 'k')]); withCodes(w, [[CCODE, 'Spring_Launch']]); bigMaster(w, MASTER, 300); infoJson(w, makeToken(SECRET, { e: 'warmup@x.com', k: 'other' })); w.opened.length = 0; w.stats.cellsRead = 0;
+  confirmJson(w, { api: 'confirm', t: coded(), reason: 'Other', defer: true }); assert.strictEqual(w.opened.length, 1); assert.ok(w.stats.cellsRead < 100, 'cells read: ' + w.stats.cellsRead);
+});
+test('the quick lookup and the second request are written into the script\'s own description', () => {
+  assert.ok(CODE.includes('QUICK LOOKUP:') && CODE.includes('rebuildUnsubscribeHints') && CODE.includes('SECOND request (api sync)') && CODE.includes('a "yes" is always checked against the Sheet'));
 });
 
 let failed = 0;
