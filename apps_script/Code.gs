@@ -28,6 +28,9 @@
  *   away, so the app shows it at once. A lead who replied, bounced, was rejected, was stopped by hand or removed keeps that outcome. If the tab cannot be found or written, the opt-out is still
  *   recorded, and the engine marks the row on its next run. Opening the link again after unsubscribing shows "You are already unsubscribed", not the questions.
  *
+ * SPEED: opening a spreadsheet is the slowest thing this script does, so each request opens it once and the master-sheet update reads only the three columns it needs, never the whole tab.
+ *   Turn the DIAGNOSTICS property off when you are not troubleshooting: while it is on, every visit also writes a log row.
+ *
  * CAMPAIGN CODES: the links carry a short code ('~' and 10 characters) instead of your campaign's name, so recipients cannot read your campaign names. The engine lists each code next to its name
  *   in a tab called "Campaign codes" (made for you the first time a campaign sends); this script only READS that tab, to write the name into the Campaign column. If a code is not listed
  *   there, the Campaign column shows the code: the "Campaign codes" tab always tells you which campaign it stands for.
@@ -129,6 +132,16 @@ function verifyToken_(token, secret) {
   }
 }
 
+/* One request = one run of this script. Opening the spreadsheet is the slowest thing it does (a spreadsheet with many tabs takes seconds), so it is opened ONCE per request and the campaign-name
+ * lookup is remembered; both are forgotten at the start of every request, so a change in the Sheet is always seen by the next one. */
+var BOOKS_ = {};
+var LABELS_ = {};
+function resetCaches_() { BOOKS_ = {}; LABELS_ = {}; }
+function book_(sheetId) {
+  if (!BOOKS_[sheetId]) { BOOKS_[sheetId] = SpreadsheetApp.openById(sheetId); }
+  return BOOKS_[sheetId];
+}
+
 function readProps_() {
   var props = PropertiesService.getScriptProperties();
   var secret = String(props.getProperty('UNSUBSCRIBE_SECRET') || '').trim();
@@ -146,12 +159,14 @@ function readProps_() {
 function campaignLabel_(value, sheetId) {
   var text = String(value || '');
   if (!CAMPAIGN_CODE_PATTERN.test(text)) { return text; }
+  if (LABELS_.hasOwnProperty(text)) { return LABELS_[text]; }
+  LABELS_[text] = text;                                            // until it is found: a failed or empty lookup is not repeated within the request
   try {
-    var sheet = SpreadsheetApp.openById(sheetId).getSheetByName(CODES_TAB);
+    var sheet = book_(sheetId).getSheetByName(CODES_TAB);
     if (sheet) {
       var values = sheet.getDataRange().getValues();
       for (var row = 1; row < values.length; row++) {
-        if (String(values[row][0]).trim() === text && String(values[row][1] || '').trim()) { return String(values[row][1]).trim(); }
+        if (String(values[row][0]).trim() === text && String(values[row][1] || '').trim()) { LABELS_[text] = String(values[row][1]).trim(); return LABELS_[text]; }
       }
     }
   } catch (error) {
@@ -170,20 +185,29 @@ function updateMasterSheet_(payload, props) {
   try {
     var name = campaignLabel_(payload.c, props.sheetId);
     if (!name || CAMPAIGN_CODE_PATTERN.test(name)) { return 'no code'; }
-    var sheet = SpreadsheetApp.openById(props.sheetId).getSheetByName(name + MASTER_TAB_SUFFIX);
+    var sheet = book_(props.sheetId).getSheetByName(name + MASTER_TAB_SUFFIX);
     if (!sheet) { return 'no tab'; }
-    var values = sheet.getDataRange().getValues();
-    var header = values[0] || [];
+    var lastColumn = sheet.getLastColumn(), lastRow = sheet.getLastRow();
+    if (lastColumn < 1 || lastRow < 1) { return 'no columns'; }
+    var header = sheet.getRange(1, 1, 1, lastColumn).getValues()[0];                       // the header row, then only the columns needed: never the whole tab
     var emailColumn = header.indexOf('Email'), statusColumn = header.indexOf('Status'), actionColumn = header.indexOf('LastActionAt');
     if (emailColumn < 0 || statusColumn < 0) { return 'no columns'; }
+    if (lastRow < 2) { return 'none'; }
+    var emails = sheet.getRange(2, emailColumn + 1, lastRow - 1, 1).getValues();
     var wanted = String(payload.e).trim().toLowerCase();
+    var matches = [];
+    for (var i = 0; i < emails.length; i++) {
+      if (String(emails[i][0]).trim().toLowerCase() === wanted) { matches.push(i); }
+    }
+    if (!matches.length) { return 'none'; }
+    var statuses = sheet.getRange(2, statusColumn + 1, lastRow - 1, 1).getValues();
     var now = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd HH:mm:ss');
     var changed = 0;
-    for (var row = 1; row < values.length; row++) {
-      if (String(values[row][emailColumn]).trim().toLowerCase() !== wanted) { continue; }
-      if (UNSUBSCRIBE_KEEPS_STATUS.indexOf(String(values[row][statusColumn]).trim()) >= 0) { continue; }
-      sheet.getRange(row + 1, statusColumn + 1).setValue(STATUS_UNSUBSCRIBED);
-      if (actionColumn >= 0) { sheet.getRange(row + 1, actionColumn + 1).setValue(now); }
+    for (var m = 0; m < matches.length; m++) {
+      var at = matches[m];
+      if (UNSUBSCRIBE_KEEPS_STATUS.indexOf(String(statuses[at][0]).trim()) >= 0) { continue; }
+      sheet.getRange(at + 2, statusColumn + 1).setValue(STATUS_UNSUBSCRIBED);
+      if (actionColumn >= 0) { sheet.getRange(at + 2, actionColumn + 1).setValue(now); }
       changed++;
     }
     return changed ? 'updated' : 'none';
@@ -195,7 +219,7 @@ function updateMasterSheet_(payload, props) {
 /** True when this address has already opted out of this brand (a hand-added row with no brand applies to every brand). Read-only; false when the tab is missing or cannot be read. */
 function alreadyOptedOut_(sheetId, email, key) {
   try {
-    var sheet = SpreadsheetApp.openById(sheetId).getSheetByName(TAB_NAME);
+    var sheet = book_(sheetId).getSheetByName(TAB_NAME);
     if (!sheet) { return false; }
     var values = sheet.getDataRange().getValues();
     if (values.length < 2) { return false; }
@@ -230,7 +254,7 @@ function logDiag_(eventName, state, payload, e) {
     var lock = LockService.getScriptLock();
     if (!lock.tryLock(5000)) { return; }
     try {
-      var spreadsheet = SpreadsheetApp.openById(sheetId);
+      var spreadsheet = book_(sheetId);
       var sheet = spreadsheet.getSheetByName(DIAG_TAB);
       if (!sheet) {
         sheet = spreadsheet.insertSheet(DIAG_TAB);
@@ -249,6 +273,7 @@ function logDiag_(eventName, state, payload, e) {
 
 /** Called by the page itself, only while diagnostics are on, once its content has actually run in the visitor's browser. */
 function recordRendered(state) {
+  resetCaches_();
   if (DIAG_STATES.indexOf(String(state)) < 0) { return false; }
   logDiag_('rendered', String(state), null, null);
   return true;
@@ -258,7 +283,7 @@ function recordRendered(state) {
 /* ------------------------------------------------------------------ the Sheet */
 
 function getTab_(sheetId) {
-  var spreadsheet = SpreadsheetApp.openById(sheetId);
+  var spreadsheet = book_(sheetId);
   var sheet = spreadsheet.getSheetByName(TAB_NAME);
   if (!sheet) {
     sheet = spreadsheet.insertSheet(TAB_NAME);
@@ -286,6 +311,13 @@ function record_(payload, source, reason, details, props) {
   var result = { ok: true, masked: maskEmail_(payload.e), brand: payload.b, address: payload.a, already: false, test: payload.t === 1 };
   Object.defineProperty(result, 'master', { value: '', writable: true, enumerable: false });        // what was done in the master sheet: for the log only, never sent to the visitor
   if (result.test) { return result; }
+  writeOptOut_(result, payload, source, reason, details, props);
+  result.master = updateMasterSheet_(payload, props);        // AFTER the lock is released (so a slow master sheet never holds up another opt-out), and again on a repeat so one that failed catches up
+  return result;
+}
+
+/** The part that needs the lock: one row per address per brand in the Unsubscribes tab. Sets result.already. */
+function writeOptOut_(result, payload, source, reason, details, props) {
   var cleanReason = REASONS.indexOf(String(reason || '')) >= 0 ? String(reason) : '';
   var cleanDetails = cleanText_(details, MAX_DETAILS);
   var lock = LockService.getScriptLock();
@@ -302,8 +334,7 @@ function record_(payload, source, reason, details, props) {
           sheet.getRange(row + 1, index.Reason + 1).setValue(cleanReason);
           if (cleanDetails) { sheet.getRange(row + 1, index.Details + 1).setValue(safeCell_(cleanDetails)); }
         }
-        result.master = updateMasterSheet_(payload, props);            // again, so a master sheet that could not be updated the first time catches up
-        return result;
+        return;
       }
     }
     var line = [];
@@ -318,8 +349,6 @@ function record_(payload, source, reason, details, props) {
     line[index.Details] = safeCell_(cleanDetails);
     line[index.Source] = source;
     sheet.appendRow(line);
-    result.master = updateMasterSheet_(payload, props);
-    return result;
   } finally {
     lock.releaseLock();
   }
@@ -372,6 +401,7 @@ function json_(object) {
 
 /** Opening the link: shows the page. Changes nothing. (With api=info it answers with data instead of a page: see info_.) */
 function doGet(e) {
+  resetCaches_();
   if (e && e.parameter && e.parameter.api === 'info') { return json_(info_(e)); }
   var props = readProps_();
   if (!props.ok) { logDiag_('opened', 'not set up', null, e); return page_(shell_('UNSUBSCRIBE', unavailableBody_(), '', 'not set up')); }
@@ -385,6 +415,7 @@ function doGet(e) {
 
 /** A mail app's one-tap Unsubscribe (RFC 8058): a POST with List-Unsubscribe=One-Click to the link's own address. */
 function doPost(e) {
+  resetCaches_();
   try {
     var body = parseBody_(e);
     if (body && body.api === 'confirm') { return json_(confirmApi_(body)); }
@@ -405,6 +436,7 @@ function doPost(e) {
 
 /** Called by the page's confirm button (google.script.run). Checks the signature again, then records. */
 function submitUnsubscribe(token, reason, details) {
+  resetCaches_();
   var props = readProps_();
   if (!props.ok) { throw new Error('The unsubscribe page is not set up.'); }
   var payload = verifyToken_(token, props.secret);
