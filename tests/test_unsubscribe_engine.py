@@ -20,6 +20,10 @@ from test_outreach import ACCOUNTS, FakeSheets, make_lead  # noqa: E402
 SECRET = "test-secret-1234567890"
 PAGE = "https://script.google.com/macros/s/ID/exec"
 REAL_TRACE = outreach.trace_unsubscribe_link
+REAL_TIMINGS = outreach.probe_unsubscribe_timings
+GOOD_TIMINGS = [{"label": "ping (a request that does nothing at all)", "runs": [{"wall": 0.4, "took": 2}, {"wall": 0.3, "took": 1}]},
+                {"label": "open the link (the page's data request)", "runs": [{"wall": 0.9, "took": 40}, {"wall": 0.6, "took": 35}]},
+                {"label": "confirm with a TEST link (records nothing)", "runs": [{"wall": 1.4, "took": 300}, {"wall": 1.1, "took": 250}]}]
 REAL_STATIC, REAL_CONFIG, REAL_API = outreach.probe_static_page, outreach.probe_page_config, outreach.probe_unsubscribe_api
 REAL_PROBE = outreach.probe_unsubscribe_page                                 # the real function, kept before every test stubs it: no test may reach the internet
 
@@ -38,6 +42,7 @@ def no_network(monkeypatch):
     monkeypatch.setattr(outreach, "probe_static_page", lambda url, timeout=20: ("ok", "GitHub Pages served the unsubscribe page (HTTP 200)."))
     monkeypatch.setattr(outreach, "probe_page_config", lambda page_url, expected_api, timeout=20: ("ok", "the page's config.js names the same Google script as UNSUBSCRIBE_URL."))
     monkeypatch.setattr(outreach, "probe_unsubscribe_api", lambda api_url, token, origin, post=False, timeout=20, max_hops=6: ("ok", "every answer (2 steps) allows a page on " + origin + ", and the last one is the script's data."))
+    monkeypatch.setattr(outreach, "probe_unsubscribe_timings", lambda api_url, token, origin, timeout=30, repeats=2: [dict(row, runs=[dict(run) for run in row["runs"]]) for row in GOOD_TIMINGS])
     monkeypatch.setattr(outreach, "trace_unsubscribe_link", lambda url, timeout=20, expect=(), frame_hosts=ul.FRAME_HOSTS, max_hops=6: [
         {"kind": "hop", "where": "script.google.com/macros/s/ID/exec", "status": 200, "state": "ok", "size": 100, "content_type": "text/html", "location": "", "cookies": [], "frame_options": ""}])
     return calls
@@ -579,6 +584,11 @@ class Google(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.request_body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode("utf-8")
         star = [("Access-Control-Allow-Origin", "*")]
+        if self.path.split("?")[0] == "/spd":
+            time.sleep(0.02)
+            return self.reply(200, '{"ok": true, "masked": "h***@gmail.com", "test": true, "took": 30}')
+        if self.path.split("?")[0] == "/spd-bad":
+            return self.reply(200, "<html>not data</html>")
         if self.path.startswith("/api/post-good"):
             return self.reply(302, location="/api/echo-post", headers=star)
         if self.path.startswith("/api/post-no-acao"):
@@ -588,6 +598,11 @@ class Google(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         star = [("Access-Control-Allow-Origin", "*")]
         route = self.path.split("?")[0]
+        if route == "/spd":
+            time.sleep(0.02)
+            return self.reply(200, '{"ok": true, "took": 2}' if "api=ping" in self.path else '{"ok": true, "state": "test", "took": 9}')
+        if route == "/spd-bad":
+            return self.reply(200, "<html>not data</html>")
         if route == "/api/good":
             return self.reply(302, location="/api/echo-good", headers=star)
         if route == "/api/echo-good":
@@ -1603,3 +1618,73 @@ def test_the_list_is_read_once_for_the_whole_follow_up_run(tmp_path, monkeypatch
     _capture_smtp(monkeypatch)
     outreach.send_batch(followup_cfg(tmp_path), sheets, ACCOUNTS, "followup1", 10, forced_variant="A", ignore_wait_days=True)
     assert sheets.read_count == 1                      # so someone who unsubscribes DURING a run can still receive an email already planned in that run
+
+
+
+# ================================================================ the speed check printed by the test run
+
+def test_the_real_timing_probe_times_ping_opening_and_confirming_twice_each_as_the_page_makes_them(google):
+    rows = REAL_TIMINGS(google + "/spd", TOKEN, "https://harish.github.io")
+    assert [row["label"].split(" ")[0] for row in rows] == ["ping", "open", "confirm"] and all(len(row["runs"]) == 2 for row in rows)
+    assert [[run["took"] for run in row["runs"]] for row in rows] == [[2, 2], [9, 9], [30, 30]] and all(run["wall"] >= 0.02 for row in rows for run in row["runs"])
+    sent = [(hit["method"], hit["path"]) for hit in SEEN]
+    assert sent.count(("GET", "/spd?api=ping&timing=1")) == 2 and sent.count(("GET", f"/spd?api=info&t={TOKEN}&timing=1")) == 2 and sent.count(("POST", "/spd")) == 2
+
+
+def test_the_timing_probe_confirms_with_the_link_a_test_link_defers_and_asks_for_timing_without_cookies(google):
+    REAL_TIMINGS(google + "/spd", TOKEN, "https://harish.github.io")
+    post = next(hit for hit in SEEN if hit["method"] == "POST")
+    assert json.loads(post["body"]) == {"api": "confirm", "t": TOKEN, "reason": "", "details": "", "defer": True, "timing": True}
+    assert post["headers"]["Content-Type"].startswith("text/plain") and all(hit["headers"]["Origin"] == "https://harish.github.io" and "Cookie" not in hit["headers"] for hit in SEEN)
+
+
+def test_a_timing_probe_can_be_asked_for_a_different_number_of_runs(google):
+    assert [len(row["runs"]) for row in REAL_TIMINGS(google + "/spd", TOKEN, "https://x", repeats=3)] == [3, 3, 3] and [len(row["runs"]) for row in REAL_TIMINGS(google + "/spd", TOKEN, "https://x", repeats=0)] == [1, 1, 1]
+
+
+def test_an_answer_that_is_not_data_is_still_timed_but_has_no_script_time(google):
+    rows = REAL_TIMINGS(google + "/spd-bad", TOKEN, "https://x")
+    assert all(run["took"] is None and run["wall"] > 0 and "error" not in run for row in rows for run in row["runs"])
+
+
+def test_an_unreachable_script_gives_an_error_in_every_run_never_an_exception():
+    rows = REAL_TIMINGS("http://127.0.0.1:1/spd", TOKEN, "https://x")
+    assert all(run.get("error") for row in rows for run in row["runs"]) and "could not be timed" in ul.format_timings(rows)[0]
+
+
+def test_the_run_prints_the_speed_check_with_the_timings_and_what_they_mean(tmp_path, monkeypatch, capsys, pages_on):
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "Speed check, from GitHub's network (a recipient's browser will differ). Each request is made twice: the first shows a cold start, the second a warm one:" in out
+    assert "  ping (a request that does nothing at all): 0.4 s then 0.3 s  (the script itself: 2 ms then 1 ms)" in out and "  open the link (the page's data request): 0.9 s then 0.6 s  (the script itself: 40 ms then 35 ms)" in out
+    assert "  confirm with a TEST link (records nothing): 1.4 s then 1.1 s  (the script itself: 300 ms then 250 ms)" in out and "SPEED READING: opening the link spends only 35 ms inside the script" in out
+
+
+def test_the_speed_check_is_made_on_the_google_address_with_the_pages_link_and_origin(tmp_path, monkeypatch, capsys, pages_on):
+    calls = []
+    monkeypatch.setattr(outreach, "probe_unsubscribe_timings", lambda api_url, token, origin, timeout=30, repeats=2: calls.append((api_url, token, origin)) or [dict(r) for r in GOOD_TIMINGS])
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    footer = _Sent.calls[0]["html_body"].split('href="')[1].split('"')[0]
+    assert calls == [(GOOGLE, ul.token_from_url(footer), "https://unsubscribe.kelson.agency")] and ul.verify_token(SECRET, calls[0][1])["t"] == 1
+
+
+def test_a_slow_reading_never_fails_the_run(tmp_path, monkeypatch, capsys, pages_on):
+    slow = [{"label": "ping (a request that does nothing at all)", "runs": [{"wall": 9.0, "took": 4000}, {"wall": 8.0, "took": 4000}]}, {"label": "open the link (the page's data request)", "runs": [{"wall": 9.0, "took": 5000}, {"wall": 8.0, "took": 5000}]},
+            {"label": "confirm with a TEST link (records nothing)", "runs": [{"wall": 12.0, "took": 9000}, {"wall": 11.0, "took": 9000}]}]
+    monkeypatch.setattr(outreach, "probe_unsubscribe_timings", lambda api_url, token, origin, timeout=30, repeats=2: slow)
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "PROBLEM" not in out and "SPEED READING: even a request that does nothing at all takes 8.0 s" in out and "opening the link spends 5000 ms inside the script" in out
+
+
+def test_a_timing_that_could_not_be_made_is_reported_and_does_not_fail_the_run(tmp_path, monkeypatch, capsys, pages_on):
+    monkeypatch.setattr(outreach, "probe_unsubscribe_timings", lambda api_url, token, origin, timeout=30, repeats=2: [{"label": "ping (a request that does nothing at all)", "runs": [{"error": "timed out"}, {"error": "timed out"}]}])
+    out, code = run_command(tmp_path, monkeypatch, capsys)
+    assert code == 0 and "could not be timed (timed out)" in out and "SPEED READING: not conclusive" in out
+
+
+def test_no_speed_check_is_made_without_a_page_address_or_for_a_plain_text_campaign(tmp_path, monkeypatch, capsys, page_on):
+    calls = []
+    monkeypatch.setattr(outreach, "probe_unsubscribe_timings", lambda *a, **k: calls.append(a) or [])
+    run_command(tmp_path, monkeypatch, capsys)
+    monkeypatch.setenv("UNSUBSCRIBE_PAGE_URL", STATIC_PAGE)
+    run_command(tmp_path, monkeypatch, capsys, fmt="text")
+    assert calls == []
