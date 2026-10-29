@@ -167,7 +167,7 @@ def test_the_time_the_script_writes_is_in_the_format_and_the_clock_the_engine_wr
 def test_the_master_update_is_best_effort_and_its_result_never_reaches_the_visitor(code):
     block = code.split("function updateMasterSheet_")[1].split("function alreadyOptedOut_")[0]
     assert "try {" in block and "} catch (error) {" in block and "return 'error';" in block and "throw" not in block
-    assert "Object.defineProperty(result, 'master', { value: '', writable: true, enumerable: false })" in code and code.count("result.master = updateMasterSheet_(payload, props);") == 1
+    assert "Object.defineProperty(result, 'master', { value: '', writable: true, enumerable: false })" in code and code.count("result.master = deferMaster === true ? 'deferred' : updateMasterSheet_(payload, props);") == 1
 
 
 def test_a_test_link_returns_before_the_master_sheet_is_touched(code):
@@ -205,7 +205,7 @@ def test_every_request_starts_by_forgetting_what_the_last_one_remembered(code):
 
 def test_the_master_sheet_is_updated_after_the_lock_is_released_and_reads_only_the_columns_it_needs(code):
     record = code.split("function record_")[1].split("function writeOptOut_")[0]
-    assert record.index("writeOptOut_(result, payload, source, reason, details, props);") < record.index("result.master = updateMasterSheet_(payload, props);")
+    assert record.index("writeOptOut_(result, payload, source, reason, details, props);") < record.index("result.master = deferMaster === true ? 'deferred' : updateMasterSheet_(payload, props);")
     assert "getScriptLock" not in record and "getScriptLock" in code.split("function writeOptOut_")[1].split("function info_")[0]
     master = code.split("function updateMasterSheet_")[1].split("function alreadyOptedOut_")[0]
     assert "getDataRange" not in master and master.count("getRange(") >= 4 and "getLastColumn()" in master and "getLastRow()" in master
@@ -214,3 +214,74 @@ def test_the_master_sheet_is_updated_after_the_lock_is_released_and_reads_only_t
 def test_the_campaign_name_lookup_is_remembered_within_a_request_and_never_repeated_after_a_failure(code):
     block = code.split("function campaignLabel_")[1].split("/* ------------------------------------------------------------------")[0]
     assert "if (LABELS_.hasOwnProperty(text)) { return LABELS_[text]; }" in block and block.index("LABELS_[text] = text;") < block.index("try {")
+
+
+
+# ================================================================ the quick lookup, ping and timing, and the master update as a second request
+
+def test_the_quick_lookup_stores_only_a_keyed_hash_of_the_address_and_brand(code):
+    block = code.split("function hintKey_")[1].split("function hintsUsable_")[0]
+    assert "var HINT_PREFIX = 'oo:';" in code and "Utilities.computeHmacSha256Signature('optout|' + String(email).trim().toLowerCase() + '|' + String(key), props.secret)" in block and ".slice(0, 16)" in block
+
+
+def test_a_test_link_never_uses_the_lookup_and_a_miss_is_answered_without_asking_the_sheet(code):
+    block = code.split("function alreadyUnsubscribed_")[1].split("/** Run by hand")[0]
+    assert block.index("if (payload.t === 1) { return false; }") < block.index("hintsUsable_()")
+    assert block.index("if (!hasHint_(props, payload.e, payload.k)) { return false; }") < block.index("alreadyOptedOut_(props.sheetId, payload.e, payload.k);")
+
+
+def test_a_yes_from_the_lookup_is_always_checked_against_the_sheet_and_a_stale_one_is_cleared(code):
+    block = code.split("function alreadyUnsubscribed_")[1].split("/** Run by hand")[0]
+    assert "var confirmed = alreadyOptedOut_(props.sheetId, payload.e, payload.k);" in block and "if (!confirmed) { clearHint_(props, payload.e, payload.k); }" in block and "return confirmed;" in block
+
+
+def test_when_the_lookup_is_not_ready_the_sheet_is_asked_and_the_lookup_is_filled_for_next_time(code):
+    block = code.split("function alreadyUnsubscribed_")[1].split("/** Run by hand")[0]
+    after = block.split("if (hintsUsable_()) {")[1]
+    assert after.index("var answer = alreadyOptedOut_(props.sheetId, payload.e, payload.k);") < after.index("buildHints_(props)") < after.index("return answer;") and "getProperty(HINT_READY) === null" in block
+
+
+def test_an_unreadable_sheet_never_marks_the_lookup_ready_but_a_full_store_is_marked_full(code):
+    block = code.split("function buildHints_")[1].split("/** Has this person already unsubscribed")[0]
+    read, write = block.split("} catch (error) {\n    return;\n  }")[0], block.split("} catch (error) {\n    return;\n  }")[1]
+    assert "HINT_READY" not in read and "batch[HINT_READY] = '1';" in write and "markHintsFull_();" in write
+
+
+def test_every_way_an_opt_out_is_recorded_also_records_it_in_the_lookup(code):
+    block = code.split("function writeOptOut_")[1].split("function info_")[0]
+    assert block.count("setHint_(props, payload.e, payload.k);") == 2 and block.index("sheet.appendRow(line);") < block.rindex("setHint_(props, payload.e, payload.k);")
+
+
+def test_ping_answers_before_the_script_reads_anything_and_timing_is_only_added_when_asked(code):
+    get = code.split("function doGet(e) {")[1].split("\n}\n")[0]
+    assert get.index("api === 'ping'") < get.index("readProps_()") and "e.parameter.timing === '1'" in get
+    assert "function timed_(object, started, wanted) {\n  if (wanted) { object.took = new Date().getTime() - started; }" in code
+    post = code.split("function doPost(e) {")[1].split("\n}\n")[0]
+    assert post.count("body.timing === true") == 2 and "json_(timed_(confirmApi_(body), started, body.timing === true))" in post and "json_(timed_(syncApi_(body), started, body.timing === true))" in post
+
+
+def test_a_deferred_confirmation_is_only_deferred_for_a_real_true(code):
+    assert "body.defer === true" in code and "record_(payload, 'page', body.reason, body.details, props, body.defer === true)" in code
+    assert "result.master = deferMaster === true ? 'deferred' : updateMasterSheet_(payload, props);" in code
+
+
+def test_the_second_request_checks_the_sheet_before_it_touches_the_master_tab_and_a_test_link_does_nothing(code):
+    block = code.split("function syncApi_")[1].split("function parseBody_")[0]
+    assert block.index("if (payload.t === 1) { return { ok: true, master: 'test' }; }") < block.index("alreadyOptedOut_(props.sheetId, payload.e, payload.k)") < block.index("updateMasterSheet_(payload, props)")
+    assert "return { ok: false, error: 'not unsubscribed' };" in block and "try {" in block and "return { ok: false, error: 'failed' };" in block
+
+
+def test_the_one_tap_post_and_the_google_page_still_update_the_master_tab_before_they_answer(code):
+    assert "var oneTap = record_(payload, 'one-click', '', '', props);" in code and "var result = record_(payload, 'page', reason, details, props);" in code
+
+
+def test_the_hand_run_rebuild_exists_and_is_described_at_the_top_of_the_script(code):
+    head = code.split("var TAB_NAME")[0]
+    assert "function rebuildUnsubscribeHints()" in code and "QUICK LOOKUP:" in head and "rebuildUnsubscribeHints" in head and "SECOND request (api sync)" in head
+
+
+
+def test_the_lookup_has_one_marker_and_switching_it_off_needs_no_new_space(code):
+    assert "var HINT_READY = 'oo_ready';" in code and "HINT_FULL" not in code
+    full = code.split("function markHintsFull_")[1].split("function setHint_")[0]
+    assert "setProperty(HINT_READY, '0')" in full and "no new space" in code and "return store.getProperty(HINT_READY) === '1';" in code
