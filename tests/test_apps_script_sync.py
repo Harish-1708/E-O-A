@@ -167,7 +167,7 @@ def test_the_time_the_script_writes_is_in_the_format_and_the_clock_the_engine_wr
 def test_the_master_update_is_best_effort_and_its_result_never_reaches_the_visitor(code):
     block = code.split("function updateMasterSheet_")[1].split("function alreadyOptedOut_")[0]
     assert "try {" in block and "} catch (error) {" in block and "return 'error';" in block and "throw" not in block
-    assert "Object.defineProperty(result, 'master', { value: '', writable: true, enumerable: false })" in code and code.count("result.master = updateMasterSheet_(payload, props);") == 2
+    assert "Object.defineProperty(result, 'master', { value: '', writable: true, enumerable: false })" in code and code.count("result.master = updateMasterSheet_(payload, props);") == 1
 
 
 def test_a_test_link_returns_before_the_master_sheet_is_touched(code):
@@ -183,3 +183,34 @@ def test_the_already_unsubscribed_wording_is_the_same_in_the_script_and_the_engi
 def test_the_check_for_an_address_that_has_already_left_is_read_only_and_never_throws(code):
     block = code.split("function alreadyOptedOut_")[1].split("/* ------------------------------------------------------------------")[0]
     assert "setValue" not in block and "appendRow" not in block and "getScriptLock" not in block and "} catch (error) {\n    return false;" in block and "!rowKey || rowKey ===" in block
+
+
+
+# ================================================================ speed: what a request costs
+
+def test_the_spreadsheet_is_opened_in_one_place_only_and_everything_else_asks_for_it_through_that_place(code):
+    outside = code.split("function selfTest")[0].split("function setupCheck")[0]
+    assert outside.count("SpreadsheetApp.openById(") == 1 and "BOOKS_[sheetId] = SpreadsheetApp.openById(sheetId);" in outside
+    for function in ("campaignLabel_", "updateMasterSheet_", "alreadyOptedOut_", "logDiag_", "getTab_"):
+        block = code.split(f"function {function}")[1].split("\nfunction ")[0]
+        assert "book_(" in block and "SpreadsheetApp.openById" not in block, function
+
+
+def test_every_request_starts_by_forgetting_what_the_last_one_remembered(code):
+    for function in ("doGet", "doPost", "submitUnsubscribe", "recordRendered"):
+        block = code.split(f"function {function}(")[1]
+        assert block.split("\n", 2)[1].strip() == "resetCaches_();", function
+    assert "function resetCaches_() { BOOKS_ = {}; LABELS_ = {}; }" in code
+
+
+def test_the_master_sheet_is_updated_after_the_lock_is_released_and_reads_only_the_columns_it_needs(code):
+    record = code.split("function record_")[1].split("function writeOptOut_")[0]
+    assert record.index("writeOptOut_(result, payload, source, reason, details, props);") < record.index("result.master = updateMasterSheet_(payload, props);")
+    assert "getScriptLock" not in record and "getScriptLock" in code.split("function writeOptOut_")[1].split("function info_")[0]
+    master = code.split("function updateMasterSheet_")[1].split("function alreadyOptedOut_")[0]
+    assert "getDataRange" not in master and master.count("getRange(") >= 4 and "getLastColumn()" in master and "getLastRow()" in master
+
+
+def test_the_campaign_name_lookup_is_remembered_within_a_request_and_never_repeated_after_a_failure(code):
+    block = code.split("function campaignLabel_")[1].split("/* ------------------------------------------------------------------")[0]
+    assert "if (LABELS_.hasOwnProperty(text)) { return LABELS_[text]; }" in block and block.index("LABELS_[text] = text;") < block.index("try {")
