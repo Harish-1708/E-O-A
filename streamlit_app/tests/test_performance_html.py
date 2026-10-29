@@ -276,7 +276,7 @@ def test_the_stylesheet_collapses_the_grids_in_the_right_places_on_small_screens
     css = P.PERFORMANCE_CSS
     block = lambda query: css[css.index(query):css.index("\n", css.index(query))]                  # noqa: E731
     narrow, medium = block("@media (max-width: 900px)"), block("@media (max-width: 1200px)")
-    assert ".pf-g2, .pf-g2e { grid-template-columns: minmax(0, 1fr); }" in narrow and ".pf-g3 { grid-template-columns: minmax(0, 1fr); }" in narrow
+    assert ".pf-g2, .pf-g2e, .pf-g2w { grid-template-columns: minmax(0, 1fr); }" in narrow and ".pf-g3 { grid-template-columns: minmax(0, 1fr); }" in narrow
     assert ".pf-g6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }" in narrow
     assert ".pf-g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }" in medium and ".pf-g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }" in medium
 
@@ -517,3 +517,35 @@ def test_a_legend_chip_for_unsubscribes_is_amber_and_an_unknown_kind_gets_no_col
 def test_a_card_drawn_on_its_own_can_be_given_the_same_space_the_card_rows_have():
     assert P.spaced_html('<div class="pf-card">x</div>') == '<div class="pf-spaced"><div class="pf-card">x</div></div>' and ".pf-spaced { margin: 0 0 14px; }" in P.PERFORMANCE_CSS
     assert ".pf-grid { display: grid; gap: 14px; margin: 0 0 14px; }" in P.PERFORMANCE_CSS
+
+
+
+# ================================================================ table cells never break, headers wrap, and the HTML campaign's paired cards stack sooner
+
+def _rule(selector):
+    return next(line for line in P.PERFORMANCE_CSS.splitlines() if line.startswith(selector))
+
+
+def test_numbers_and_bars_in_a_table_never_break_across_lines_but_a_name_may():
+    td, first = _rule(".pf-table td {"), _rule(".pf-table tr:last-child td")
+    assert "white-space: nowrap" in td and "overflow-wrap" not in td
+    assert ".pf-table td:first-child { font-weight: 600; white-space: normal; overflow-wrap: anywhere; }" in first
+
+
+def test_a_table_header_may_wrap_onto_two_lines_so_extra_columns_fit():
+    th = _rule(".pf-table th {")
+    assert "white-space: normal" in th and "white-space: nowrap" not in th and "vertical-align: bottom" in th
+
+
+def test_a_bar_cell_is_a_little_narrower_and_its_text_cannot_break():
+    assert ".pf-minibar { display: inline-block; width: 72px;" in P.PERFORMANCE_CSS
+    assert "white-space: nowrap" in _rule(".pf-table td {")                     # the text beside the bar is in a td: it inherits it
+
+
+def test_a_pair_of_cards_for_wider_tables_is_a_known_grid_that_stacks_at_1700_and_900_pixels():
+    assert 'class="pf-grid pf-g2w"' in P.grid_html("g2w", ["<i></i>", "<i></i>"])
+    css = P.PERFORMANCE_CSS
+    assert ".pf-g2w { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }" in css and "@media (max-width: 1700px) { .pf-g2w { grid-template-columns: minmax(0, 1fr); } }" in css
+    assert ".pf-g2, .pf-g2e, .pf-g2w { grid-template-columns: minmax(0, 1fr); }" in css.split("@media (max-width: 900px)")[1]
+    with pytest.raises(ValueError):
+        P.grid_html("g2x", [])
