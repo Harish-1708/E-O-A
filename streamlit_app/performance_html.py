@@ -42,8 +42,10 @@ PERFORMANCE_CSS = """
 .pf-g6 { grid-template-columns: repeat(6, minmax(0, 1fr)); } .pf-g5 { grid-template-columns: repeat(5, minmax(0, 1fr)); } .pf-g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .pf-g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .pf-g2 { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
 .pf-g2e { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.pf-g2w { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }       /* a pair of cards holding the wider (HTML campaign) tables: stacks sooner, so a table is never squeezed */
+@media (max-width: 1700px) { .pf-g2w { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 1200px) { .pf-g6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .pf-g5 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .pf-g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 900px) { .pf-g2, .pf-g2e { grid-template-columns: minmax(0, 1fr); } .pf-g6 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pf-g5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pf-g3 { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 900px) { .pf-g2, .pf-g2e, .pf-g2w { grid-template-columns: minmax(0, 1fr); } .pf-g6 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pf-g5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .pf-g3 { grid-template-columns: minmax(0, 1fr); } }
 .pf-kpi { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 15px 17px; }
 .pf-kpi-label { font-size: 12.5px; color: #6b7280; font-weight: 600; }
 .pf-kpi-value { font-size: 27px; font-weight: 700; margin: 5px 0 2px; letter-spacing: -.02em; color: #111827; line-height: 1.15; }
@@ -62,12 +64,12 @@ PERFORMANCE_CSS = """
 /* Streamlit draws a grid border around every table cell by default; these keep only the thin horizontal lines */
 .pf-table { width: 100%; border-collapse: collapse; border: 0 !important; margin: 0 !important; font-size: 13.5px; }
 .pf-table th, .pf-table td { border-left: 0 !important; border-right: 0 !important; border-top: 0 !important; background: transparent !important; }
-.pf-table th { text-align: left; color: #6b7280; font-weight: 600; font-size: 12.5px; text-transform: none; letter-spacing: 0; padding: 8px 10px; border-bottom: 1px solid #e5e7eb !important; white-space: nowrap; }
-.pf-table td { padding: 11px 10px; border-bottom: 1px solid #f0f2f5 !important; color: #111827 !important; overflow-wrap: anywhere; }       /* (the theme colour otherwise leaks into some cells) */
-.pf-table tr:last-child td { border-bottom: 0 !important; } .pf-table td:first-child { font-weight: 600; }
+.pf-table th { text-align: left; color: #6b7280; font-weight: 600; font-size: 12.5px; text-transform: none; letter-spacing: 0; padding: 8px 8px; border-bottom: 1px solid #e5e7eb !important; white-space: normal; vertical-align: bottom; line-height: 1.25; }
+.pf-table td { padding: 11px 8px; border-bottom: 1px solid #f0f2f5 !important; color: #111827 !important; white-space: nowrap; }       /* (the theme colour otherwise leaks into some cells) */
+.pf-table tr:last-child td { border-bottom: 0 !important; } .pf-table td:first-child { font-weight: 600; white-space: normal; overflow-wrap: anywhere; }       /* numbers and bars never break; only a name may */
 .pf-scroll { overflow-x: auto; }
 .pf-cellbar { display: flex; align-items: center; gap: 10px; }
-.pf-minibar { display: inline-block; width: 90px; height: 8px; border-radius: 99px; background: #eef0f4; overflow: hidden; flex: none; }
+.pf-minibar { display: inline-block; width: 72px; height: 8px; border-radius: 99px; background: #eef0f4; overflow: hidden; flex: none; }
 .pf-minibar i { display: block; height: 100%; border-radius: 99px; background: #2563eb; }
 .pf-bar-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; font-size: 13px; }
 .pf-bar-label { width: 150px; flex: none; color: #111827; } .pf-bar-track { flex: 1; height: 8px; border-radius: 99px; background: #eef0f4; overflow: hidden; }
@@ -95,8 +97,8 @@ def kpi_html(label, value, caption="", help_text="", trend=None) -> str:
 
 
 def grid_html(columns: str, cells: Iterable[str]) -> str:
-    """Cells (already-built markup) laid out in a grid. `columns` is one of g6, g5, g4, g3, g2, g2e."""
-    if columns not in ("g6", "g5", "g4", "g3", "g2", "g2e"):
+    """Cells (already-built markup) laid out in a grid. `columns` is one of g6, g5, g4, g3, g2, g2e, g2w."""
+    if columns not in ("g6", "g5", "g4", "g3", "g2", "g2e", "g2w"):
         raise ValueError(f"unknown grid {columns!r}")
     return _one_line(f'<div class="pf-grid pf-{columns}">{"".join(cells)}</div>')
 
