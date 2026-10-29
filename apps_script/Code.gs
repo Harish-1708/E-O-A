@@ -31,6 +31,11 @@
  * SPEED: opening a spreadsheet is the slowest thing this script does, so each request opens it once and the master-sheet update reads only the three columns it needs, never the whole tab.
  *   Turn the DIAGNOSTICS property off when you are not troubleshooting: while it is on, every visit also writes a log row.
  *
+ * QUICK LOOKUP: to answer "has this person already unsubscribed?" without opening the spreadsheet, the script keeps its own small store of who has unsubscribed (hashes, no addresses). A "not in the
+ *   store" answer is trusted; a "yes" is always checked against the Sheet. The store fills itself the first time it is needed. If you edit the Unsubscribes tab by hand, run rebuildUnsubscribeHints once
+ *   (Run in the editor) so the store matches. When someone confirms on the GitHub Pages page, the script writes the opt-out first and updates the campaign's master tab in a SECOND request (api sync),
+ *   so the person does not wait for it.
+ *
  * CAMPAIGN CODES: the links carry a short code ('~' and 10 characters) instead of your campaign's name, so recipients cannot read your campaign names. The engine lists each code next to its name
  *   in a tab called "Campaign codes" (made for you the first time a campaign sends); this script only READS that tab, to write the name into the Campaign column. If a code is not listed
  *   there, the Campaign column shows the code: the "Campaign codes" tab always tells you which campaign it stands for.
@@ -58,6 +63,8 @@ var DIAG_STATES = ['valid', 'invalid', 'test', 'not set up'];
 var STATUS_UNSUBSCRIBED = 'Stopped - Unsubscribed';
 var UNSUBSCRIBE_KEEPS_STATUS = ['Stopped - Unsubscribed', 'Stopped - Replied', 'Stopped - Bounced', 'Stopped - Rejected', 'Stopped - Manual', 'Removed'];     // an outcome already decided is never overwritten
 var MASTER_TAB_SUFFIX = ' Master Sheet';
+var HINT_PREFIX = 'oo:';             // names in the script's own small store: oo:<16 characters of a keyed hash of address + brand>
+var HINT_READY = 'oo_ready';        // missing = never filled; '1' = every row already in the Unsubscribes tab is in the store and it is trusted; '0' = the store ran out of room, so the Sheet is always asked
 var MAX_REASON = 60;
 var MAX_DETAILS = 500;
 var MIN_SECRET_LENGTH = 16;
@@ -173,6 +180,102 @@ function campaignLabel_(value, sheetId) {
     // fall back to the code
   }
   return text;
+}
+
+
+/* ------------------------------------------------------------------ the quick "has this person already unsubscribed?" lookup */
+
+/* Asking the Sheet is slow (opening a spreadsheet with many tabs takes seconds). The script keeps its own tiny store of who has unsubscribed from which brand, as hashes (no address is stored).
+ * A "NOT in the store" answer is trusted: the worst a wrong one can do is show the questions once more, and confirming always checks the real Sheet and never records anyone twice.
+ * A "yes" is ALWAYS checked against the Sheet, which is the truth: so a row deleted by hand (to re-subscribe someone) can never make the page claim they are unsubscribed. */
+
+function hintKey_(props, email, key) {
+  var digest = Utilities.computeHmacSha256Signature('optout|' + String(email).trim().toLowerCase() + '|' + String(key), props.secret);
+  return HINT_PREFIX + Utilities.base64EncodeWebSafe(digest).replace(/=+$/, '').slice(0, 16);
+}
+
+function hintsUsable_() {
+  try {
+    var store = PropertiesService.getScriptProperties();
+    return store.getProperty(HINT_READY) === '1';
+  } catch (error) {
+    return false;
+  }
+}
+
+/** The store ran out of room: stop trusting it. This overwrites the marker that already exists with a value no longer than before, so it needs no new space and works even when the store is full. */
+function markHintsFull_() {
+  try { PropertiesService.getScriptProperties().setProperty(HINT_READY, '0'); } catch (ignored) { /* nothing more can be done */ }
+}
+
+function setHint_(props, email, key) {
+  try { PropertiesService.getScriptProperties().setProperty(hintKey_(props, email, key), '1'); } catch (error) { markHintsFull_(); }
+}
+
+function hasHint_(props, email, key) {
+  var store = PropertiesService.getScriptProperties();
+  return store.getProperty(hintKey_(props, email, key)) === '1' || store.getProperty(hintKey_(props, email, '*')) === '1';
+}
+
+function clearHint_(props, email, key) {
+  try {
+    var store = PropertiesService.getScriptProperties();
+    store.deleteProperty(hintKey_(props, email, key));
+    store.deleteProperty(hintKey_(props, email, '*'));
+  } catch (ignored) { /* a stale hint is checked against the Sheet anyway */ }
+}
+
+/** Puts every row already in the Unsubscribes tab into the store, once, and marks the store ready. If the tab cannot be read it does nothing (it will try again on a later request). */
+function buildHints_(props) {
+  var batch = {};
+  try {
+    var sheet = book_(props.sheetId).getSheetByName(TAB_NAME);
+    if (sheet) {
+      var values = sheet.getDataRange().getValues();
+      if (values.length > 1) {
+        var index = columnIndexes_(values[0]);
+        for (var row = 1; row < values.length; row++) {
+          var email = String(values[row][index.Email]).trim();
+          if (email) { batch[hintKey_(props, email, String(values[row][index.BrandKey]).trim() || '*')] = '1'; }
+        }
+      }
+    }
+  } catch (error) {
+    return;
+  }
+  try {
+    batch[HINT_READY] = '1';
+    PropertiesService.getScriptProperties().setProperties(batch);
+  } catch (error) {
+    markHintsFull_();
+  }
+}
+
+/** Has this person already unsubscribed from this brand? A test link never has. */
+function alreadyUnsubscribed_(props, payload) {
+  if (payload.t === 1) { return false; }
+  if (hintsUsable_()) {
+    if (!hasHint_(props, payload.e, payload.k)) { return false; }                      // trusted: no spreadsheet work at all
+    var confirmed = alreadyOptedOut_(props.sheetId, payload.e, payload.k);              // a "yes" is checked against the Sheet
+    if (!confirmed) { clearHint_(props, payload.e, payload.k); }
+    return confirmed;
+  }
+  var answer = alreadyOptedOut_(props.sheetId, payload.e, payload.k);
+  try {
+    if (PropertiesService.getScriptProperties().getProperty(HINT_READY) === null) { buildHints_(props); }     // first time (or after a reset): fill the store so later visits are quick; never when it is marked full
+  } catch (ignored) { /* the answer above is already right */ }
+  return answer;
+}
+
+/** Run by hand (from the editor) after editing the Unsubscribes tab yourself: forgets the store and fills it again from the Sheet. */
+function rebuildUnsubscribeHints() {
+  var store = PropertiesService.getScriptProperties();
+  var keys = store.getKeys ? store.getKeys() : [];
+  for (var i = 0; i < keys.length; i++) {
+    if (keys[i].indexOf(HINT_PREFIX) === 0) { store.deleteProperty(keys[i]); }
+  }
+  var props = readProps_();
+  if (props.ok) { buildHints_(props); }
 }
 
 
@@ -307,12 +410,12 @@ function columnIndexes_(headerRow) {
  * Writes one opt-out. One row per address per brand: a repeat adds nothing (it may fill in a reason that was left empty). A test link records nothing.
  * Returns {ok, masked, brand, address, already, test}.
  */
-function record_(payload, source, reason, details, props) {
+function record_(payload, source, reason, details, props, deferMaster) {
   var result = { ok: true, masked: maskEmail_(payload.e), brand: payload.b, address: payload.a, already: false, test: payload.t === 1 };
   Object.defineProperty(result, 'master', { value: '', writable: true, enumerable: false });        // what was done in the master sheet: for the log only, never sent to the visitor
   if (result.test) { return result; }
   writeOptOut_(result, payload, source, reason, details, props);
-  result.master = updateMasterSheet_(payload, props);        // AFTER the lock is released (so a slow master sheet never holds up another opt-out), and again on a repeat so one that failed catches up
+  result.master = deferMaster === true ? 'deferred' : updateMasterSheet_(payload, props);        // AFTER the lock is released (so a slow master sheet never holds up another opt-out), and again on a repeat so one that failed catches up
   return result;
 }
 
@@ -334,6 +437,7 @@ function writeOptOut_(result, payload, source, reason, details, props) {
           sheet.getRange(row + 1, index.Reason + 1).setValue(cleanReason);
           if (cleanDetails) { sheet.getRange(row + 1, index.Details + 1).setValue(safeCell_(cleanDetails)); }
         }
+        setHint_(props, payload.e, payload.k);
         return;
       }
     }
@@ -349,6 +453,7 @@ function writeOptOut_(result, payload, source, reason, details, props) {
     line[index.Details] = safeCell_(cleanDetails);
     line[index.Source] = source;
     sheet.appendRow(line);
+    setHint_(props, payload.e, payload.k);
   } finally {
     lock.releaseLock();
   }
@@ -365,7 +470,7 @@ function info_(e) {
   if (!payload) { logDiag_('opened', 'invalid', null, e); return { ok: false, state: 'invalid' }; }
   var state = payload.t === 1 ? 'test' : 'valid';
   logDiag_('opened', state, payload, e);
-  var already = payload.t !== 1 && alreadyOptedOut_(props.sheetId, payload.e, payload.k);
+  var already = alreadyUnsubscribed_(props, payload);
   return { ok: true, state: state, brand: payload.b, masked: maskEmail_(payload.e), address: payload.a, reasons: REASONS.slice(), test: payload.t === 1, already: already };
 }
 
@@ -376,10 +481,28 @@ function confirmApi_(body) {
     if (!props.ok) { return { ok: false, error: 'not set up' }; }
     var payload = verifyToken_(body.t, props.secret);
     if (!payload) { return { ok: false, error: 'invalid' }; }
-    var result = record_(payload, 'page', body.reason, body.details, props);
+    var result = record_(payload, 'page', body.reason, body.details, props, body.defer === true);
     logDiag_('confirmed', result.test ? 'test' : 'valid', payload, null);
     if (result.master) { logDiag_('master', result.master, payload, null); }
     return result;
+  } catch (error) {
+    return { ok: false, error: 'failed' };
+  }
+}
+
+/** The second half of an unsubscribe from the page on GitHub Pages: marks the person's row in the campaign's master tab. It runs as its own request, AFTER the person has been told they are unsubscribed,
+ *  so they do not wait for it. It only acts for someone the Sheet really shows as unsubscribed (so a link alone can never mark a lead), and a test link does nothing. Never throws. */
+function syncApi_(body) {
+  try {
+    var props = readProps_();
+    if (!props.ok) { return { ok: false, error: 'not set up' }; }
+    var payload = verifyToken_(body.t, props.secret);
+    if (!payload) { return { ok: false, error: 'invalid' }; }
+    if (payload.t === 1) { return { ok: true, master: 'test' }; }
+    if (!alreadyOptedOut_(props.sheetId, payload.e, payload.k)) { return { ok: false, error: 'not unsubscribed' }; }
+    var outcome = updateMasterSheet_(payload, props);
+    logDiag_('master', outcome, payload, null);
+    return { ok: true, master: outcome };
   } catch (error) {
     return { ok: false, error: 'failed' };
   }
@@ -395,6 +518,12 @@ function parseBody_(e) {
   }
 }
 
+/** Adds how long this request took INSIDE the script (milliseconds) when the caller asks for it, so a slow page can be told apart from a slow script. Nothing else changes. */
+function timed_(object, started, wanted) {
+  if (wanted) { object.took = new Date().getTime() - started; }
+  return object;
+}
+
 function json_(object) {
   return ContentService.createTextOutput(JSON.stringify(object)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -402,23 +531,28 @@ function json_(object) {
 /** Opening the link: shows the page. Changes nothing. (With api=info it answers with data instead of a page: see info_.) */
 function doGet(e) {
   resetCaches_();
-  if (e && e.parameter && e.parameter.api === 'info') { return json_(info_(e)); }
+  var started = new Date().getTime();
+  var timing = !!(e && e.parameter && e.parameter.timing === '1');
+  if (e && e.parameter && e.parameter.api === 'ping') { return json_(timed_({ ok: true }, started, timing)); }          // answers at once and touches nothing: the floor of how fast this script can ever answer
+  if (e && e.parameter && e.parameter.api === 'info') { return json_(timed_(info_(e), started, timing)); }
   var props = readProps_();
   if (!props.ok) { logDiag_('opened', 'not set up', null, e); return page_(shell_('UNSUBSCRIBE', unavailableBody_(), '', 'not set up')); }
   var payload = verifyToken_(e && e.parameter ? e.parameter.t : '', props.secret);
   if (!payload) { logDiag_('opened', 'invalid', null, e); return page_(shell_('UNSUBSCRIBE', invalidBody_(), 'No information was recorded.', 'invalid')); }
   var state = payload.t === 1 ? 'test' : 'valid';
   logDiag_('opened', state, payload, e);
-  var already = payload.t !== 1 && alreadyOptedOut_(props.sheetId, payload.e, payload.k);
+  var already = alreadyUnsubscribed_(props, payload);
   return page_(shell_(payload.b ? payload.b.toUpperCase() : 'UNSUBSCRIBE', already ? alreadyBody_(payload) : confirmBody_(payload, e.parameter.t), footerLine_(payload), state));
 }
 
 /** A mail app's one-tap Unsubscribe (RFC 8058): a POST with List-Unsubscribe=One-Click to the link's own address. */
 function doPost(e) {
   resetCaches_();
+  var started = new Date().getTime();
   try {
     var body = parseBody_(e);
-    if (body && body.api === 'confirm') { return json_(confirmApi_(body)); }
+    if (body && body.api === 'confirm') { return json_(timed_(confirmApi_(body), started, body.timing === true)); }
+    if (body && body.api === 'sync') { return json_(timed_(syncApi_(body), started, body.timing === true)); }
     var params = (e && e.parameter) || {};
     var props = readProps_();
     if (!props.ok) { return text_('Not set up'); }
