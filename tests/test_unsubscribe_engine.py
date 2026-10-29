@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import html_campaign_logic as hc  # noqa: E402
 import outreach  # noqa: E402
 import unsubscribe_logic as ul  # noqa: E402
-from test_html_campaigns_engine import _Sent, _batch_cfg, _capture_smtp, _test_cfg  # noqa: E402
+from test_html_campaigns_engine import _Sent, _batch_cfg, _capture_smtp, _test_cfg, _write  # noqa: E402
 from test_outreach import ACCOUNTS, FakeSheets, make_lead  # noqa: E402
 
 SECRET = "test-secret-1234567890"
@@ -1533,3 +1533,73 @@ def test_an_address_that_has_not_opted_out_is_never_marked_whatever_its_status(t
     sheets = ListSheets(leads_with(("a@x.com", "Completed"), ("b@x.com", "Paused")), rows=[opted_out("someone@else.com")])
     send(html_cfg(tmp_path), sheets, monkeypatch)
     assert status_of(sheets, "a@x.com") == "Completed" and status_of(sheets, "b@x.com") == "Paused"
+
+
+
+# ================================================================ a follow-up is never sent to someone who unsubscribed
+
+def followup_cfg(tmp_path):
+    cfg = html_cfg(tmp_path)
+    _write(tmp_path, "followup1_A.txt", "Subject: Following up {{ FirstName }}\n\nHi {{ FirstName }}\n\n{{ footer }}\n")
+    _write(tmp_path, "followup1_A.html", "<p>Hi {{ FirstName }}</p>{{ footer }}")
+    return cfg
+
+
+def due_leads(*addresses, **extra):
+    leads = leads_of(*addresses)
+    for lead in leads:
+        lead.update({"IntroSentAt": "2026-10-01 10:00:00", "IntroVariant": "A", "Status": "", "ReplyStatus": "", **extra})
+    return leads
+
+
+def test_the_follow_up_fixture_really_is_due_for_everyone_so_the_tests_below_prove_something(tmp_path):
+    cfg = followup_cfg(tmp_path)
+    assert [lead["Email"] for lead in outreach.get_eligible_leads(due_leads("a@x.com", "b@x.com"), cfg["stages"], 1, ignore_wait_days=True)] == ["a@x.com", "b@x.com"]
+
+
+def test_a_follow_up_is_not_planned_for_someone_on_the_unsubscribes_list_and_the_others_are(tmp_path):
+    cfg = followup_cfg(tmp_path)
+    plan = outreach.build_batch(cfg, due_leads("a@x.com", "b@x.com", "c@x.com"), "followup1", 10, forced_variant="A", ignore_wait_days=True, suppressed_pairs=ul.load_pairs([opted_out("b@x.com")]))
+    assert [item["lead"]["Email"] if "lead" in item else item["to"] for item in plan] == ["a@x.com", "c@x.com"]
+
+
+def test_a_follow_up_is_not_planned_for_someone_the_script_already_marked_even_without_the_list(tmp_path):
+    cfg = followup_cfg(tmp_path)
+    leads = due_leads("a@x.com", "b@x.com", "c@x.com")
+    leads[1]["Status"] = "Stopped - Unsubscribed"                                    # what the Google script writes into the master tab straight away
+    plan = outreach.build_batch(cfg, leads, "followup1", 10, forced_variant="A", ignore_wait_days=True, suppressed_pairs=None)
+    assert [item["lead"]["Email"] if "lead" in item else item["to"] for item in plan] == ["a@x.com", "c@x.com"]
+
+
+def test_a_real_follow_up_run_emails_only_the_people_who_have_not_unsubscribed(tmp_path, monkeypatch):
+    sheets = ListSheets(due_leads("a@x.com", "b@x.com", "c@x.com"), rows=[opted_out("b@x.com")])
+    monkeypatch.setattr(outreach.time, "sleep", lambda seconds: None)
+    _capture_smtp(monkeypatch)
+    results = outreach.send_batch(followup_cfg(tmp_path), sheets, ACCOUNTS, "followup1", 10, forced_variant="A", ignore_wait_days=True)
+    assert sorted(sent_to(_Sent.calls)) == ["a@x.com", "c@x.com"] and [r["status"] for r in results] == ["sent", "sent"]
+    assert next(lead for lead in sheets._leads if lead["Email"] == "b@x.com")["Status"] == "Stopped - Unsubscribed"
+
+
+def test_an_unsubscribe_from_another_brand_does_not_stop_this_brands_follow_up(tmp_path, monkeypatch):
+    sheets = ListSheets(due_leads("a@x.com", "b@x.com"), rows=[opted_out("b@x.com", key="duberobe")])
+    monkeypatch.setattr(outreach.time, "sleep", lambda seconds: None)
+    _capture_smtp(monkeypatch)
+    outreach.send_batch(followup_cfg(tmp_path), sheets, ACCOUNTS, "followup1", 10, forced_variant="A", ignore_wait_days=True)
+    assert sorted(sent_to(_Sent.calls)) == ["a@x.com", "b@x.com"]
+
+
+def test_if_the_unsubscribes_list_cannot_be_read_no_follow_up_is_sent_at_all(tmp_path, monkeypatch):
+    sheets = ListSheets(due_leads("a@x.com", "b@x.com"), fail=RuntimeError("quota"))
+    monkeypatch.setattr(outreach.time, "sleep", lambda seconds: None)
+    _capture_smtp(monkeypatch)
+    with pytest.raises(outreach.UnsubscribeListUnreadableError):
+        outreach.send_batch(followup_cfg(tmp_path), sheets, ACCOUNTS, "followup1", 10, forced_variant="A", ignore_wait_days=True)
+    assert _Sent.calls == []
+
+
+def test_the_list_is_read_once_for_the_whole_follow_up_run(tmp_path, monkeypatch):
+    sheets = ListSheets(due_leads("a@x.com", "b@x.com", "c@x.com"), rows=[opted_out("b@x.com")])
+    monkeypatch.setattr(outreach.time, "sleep", lambda seconds: None)
+    _capture_smtp(monkeypatch)
+    outreach.send_batch(followup_cfg(tmp_path), sheets, ACCOUNTS, "followup1", 10, forced_variant="A", ignore_wait_days=True)
+    assert sheets.read_count == 1                      # so someone who unsubscribes DURING a run can still receive an email already planned in that run
