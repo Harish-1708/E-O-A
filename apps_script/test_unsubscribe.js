@@ -25,14 +25,23 @@ function makeToken(secret, fields) {
 // ---- simulated Google services
 function makeWorld(options) {
   options = options || {};
-  const world = { sheets: {}, opened: [], locks: { waited: 0, tried: 0, released: 0 }, logs: [], failWrite: false, lockBusy: false };
+  const world = { sheets: {}, opened: [], locks: { waited: 0, tried: 0, released: 0 }, logs: [], failWrite: false, lockBusy: false, stats: { tabReads: 0, cellsRead: 0 } };
   const signed = (buffer) => Array.from(buffer, (b) => (b > 127 ? b - 256 : b));
   const unsigned = (bytes) => Buffer.from(bytes.map((b) => b & 255));
   function makeSheet(rows) {
     const sheet = { rows, frozen: 0 };
     sheet.appendRow = (row) => { if (world.failWrite) { throw new Error('write failed'); } sheet.rows.push(row.slice()); };
-    sheet.getDataRange = () => ({ getValues: () => (sheet.rows.length ? sheet.rows.map((r) => r.slice()) : [['']]) });
-    sheet.getRange = (r, c) => ({ setValue: (v) => { sheet.rows[r - 1][c - 1] = v; } });
+    sheet.getDataRange = () => ({ getValues: () => { world.stats.tabReads++; world.stats.cellsRead += sheet.rows.length * (sheet.rows[0] ? sheet.rows[0].length : 0); return sheet.rows.length ? sheet.rows.map((r) => r.slice()) : [['']]; } });
+    sheet.getLastRow = () => sheet.rows.length;
+    sheet.getLastColumn = () => (sheet.rows[0] ? sheet.rows[0].length : 0);
+    sheet.getRange = (r, c, nr, nc) => ({
+      setValue: (v) => { sheet.rows[r - 1][c - 1] = v; },
+      getValues: () => {
+        const out = [];
+        for (let i = 0; i < (nr || 1); i++) { const line = []; for (let j = 0; j < (nc || 1); j++) { const v = (sheet.rows[r - 1 + i] || [])[c - 1 + j]; line.push(v === undefined ? '' : v); } out.push(line); }
+        world.stats.tabReads++; world.stats.cellsRead += out.length * (out[0] ? out[0].length : 0); return out;
+      },
+    });
     sheet.setFrozenRows = (n) => { sheet.frozen = n; };
     return sheet;
   }
@@ -671,18 +680,18 @@ test('a campaign with no master tab leaves the opt-out recorded and changes noth
   const w = makeWorld(); withTab(w); const j = recordFrom(w, PLAIN); assert.strictEqual(j.ok, true); assert.strictEqual(rowsOf(w).length, 1); assert.ok(!w.sheets[MASTER]);
 });
 test('a master tab that cannot be written never breaks the opt-out, and the lock is released', () => {
-  const w = makeWorld(); withTab(w); w.sheets[MASTER] = { getDataRange: () => ({ getValues: () => [MHEADER.slice(), lead('ann@example.com')] }), getRange: () => ({ setValue() { throw new Error('boom'); } }) };
+  const w = makeWorld(); withTab(w); const unwritable = withMaster(w, [lead('ann@example.com')]); const realRange = unwritable.getRange; unwritable.getRange = (r, c, nr, nc) => { const range = realRange(r, c, nr, nc); range.setValue = () => { throw new Error('boom'); }; return range; };
   const j = recordFrom(w, PLAIN); assert.strictEqual(j.ok, true); assert.strictEqual(rowsOf(w).length, 1); assert.deepStrictEqual(plain(w.locks), { waited: 1, tried: 0, released: 1 });
 });
 test('a master tab that cannot be read never breaks the opt-out', () => {
-  const w = makeWorld(); withTab(w); w.sheets[MASTER] = { getDataRange() { throw new Error('boom'); } }; assert.strictEqual(recordFrom(w, PLAIN).ok, true); assert.strictEqual(rowsOf(w).length, 1);
+  const w = makeWorld(); withTab(w); w.sheets[MASTER] = { getLastColumn() { throw new Error('boom'); }, getLastRow() { throw new Error('boom'); }, getDataRange() { throw new Error('boom'); } }; assert.strictEqual(recordFrom(w, PLAIN).ok, true); assert.strictEqual(rowsOf(w).length, 1);
 });
 test('repeating the opt-out catches up a master sheet that could not be updated the first time', () => {
   const w = makeWorld(); withTab(w); recordFrom(w, PLAIN); withMaster(w, [lead('ann@example.com')]);
   assert.strictEqual(masterOf(w)[0][4], ''); const again = recordFrom(w, PLAIN); assert.strictEqual(again.already, true); assert.strictEqual(masterOf(w)[0][4], 'Stopped - Unsubscribed'); assert.strictEqual(rowsOf(w).length, 1);
 });
 test('a test link never reads or writes the master sheet', () => {
-  const w = makeWorld(); let reads = 0; w.sheets[MASTER] = { getDataRange() { reads++; return { getValues: () => [MHEADER.slice()] }; }, getRange() { throw new Error('written'); } };
+  const w = makeWorld(); let reads = 0; w.sheets[MASTER] = { getDataRange() { reads++; return { getValues: () => [MHEADER.slice()] }; }, getLastRow() { reads++; return 1; }, getLastColumn() { reads++; return 7; }, getRange() { reads++; throw new Error('written'); } };
   recordFrom(w, makeToken(SECRET, { t: 1 })); submit(w, makeToken(SECRET, { t: 1 }), '', ''); post(w, makeToken(SECRET, { t: 1 })); assert.strictEqual(reads, 0);
 });
 test('what the visitor is told is exactly what it was: nothing about the master sheet reaches them', () => {
@@ -700,6 +709,59 @@ test('with diagnostics on, what happened in the master sheet is logged in a word
 });
 test('the master-sheet rule and the already-unsubscribed card are written into the script\'s own description', () => {
   assert.ok(CODE.includes("THE CAMPAIGN'S OWN SHEET:") && CODE.includes('Stopped - Unsubscribed') && CODE.includes('You are already unsubscribed'));
+});
+
+// ================================================================ speed: what one request costs (opening the spreadsheet is the slow part)
+function bigMaster(world, tab, leads) {
+  const header = Array.from({ length: 50 }, (_, i) => 'Col' + i); header[3] = 'Email'; header[20] = 'Status'; header[30] = 'LastActionAt';
+  const rows = [header]; for (let r = 0; r < leads; r++) { rows.push(header.map((h, c) => (c === 3 ? `p${r}@x.com` : ''))); }
+  rows[Math.floor(leads / 2)][3] = 'ann@example.com'; world.sheets[tab || MASTER] = world.makeSheet(rows); return world.sheets[tab || MASTER];
+}
+test('a request opens the spreadsheet once, however many tabs it uses and whether or not the log is on', () => {
+  [false, true].forEach((diag) => {
+    const make = () => { const w = diag ? diagWorld() : makeWorld(); withTab(w, [optedOutRow('someone@else.com', 'kelsonagency')]); withCodes(w, [[CCODE, 'Spring_Launch']]); withMaster(w, [lead('ann@example.com')]); return w; };
+    let w = make(); info(w, coded()); assert.strictEqual(w.opened.length, 1, 'open, diag ' + diag);
+    w = make(); get(w, coded()); assert.strictEqual(w.opened.length, 1, 'google page, diag ' + diag);
+    w = make(); recordFrom(w, coded()); assert.strictEqual(w.opened.length, 1, 'confirm, diag ' + diag);
+    w = make(); submit(w, coded(), 'Other', 'x'); assert.strictEqual(w.opened.length, 1, 'google confirm, diag ' + diag);
+    w = make(); post(w, coded()); assert.strictEqual(w.opened.length, 1, 'one-tap, diag ' + diag);
+    w = make(); recordFrom(w, coded()); w.opened.length = 0; recordFrom(w, coded()); assert.strictEqual(w.opened.length, 1, 'repeat, diag ' + diag);
+  });
+});
+test('the master update reads only the header and two columns, never the whole tab', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [[CCODE, 'Spring_Launch']]); const master = bigMaster(w, MASTER, 300);
+  master.getDataRange = () => { throw new Error('the whole tab was read'); };
+  w.stats.cellsRead = 0; const j = recordFrom(w, coded()); assert.strictEqual(j.ok, true);
+  assert.strictEqual(master.rows[150][20], 'Stopped - Unsubscribed'); assert.ok(/^\d{4}-/.test(master.rows[150][30])); assert.strictEqual(master.rows[149][20], '');
+  assert.ok(w.stats.cellsRead < 1000, 'cells read: ' + w.stats.cellsRead);                  // 50 header + 300 emails + 300 statuses + the small tabs: not 15,000
+});
+test('a person who is not in the master tab costs no status read and no write', () => {
+  const w = makeWorld(); withTab(w); withCodes(w, [[CCODE, 'Spring_Launch']]); const master = bigMaster(w, MASTER, 300);
+  const before = JSON.stringify(master.rows); w.stats.cellsRead = 0; recordFrom(w, coded({ e: 'nobody@else.com' })); assert.strictEqual(JSON.stringify(master.rows), before); assert.ok(w.stats.cellsRead < 500, 'cells read: ' + w.stats.cellsRead);
+});
+test('the lock is released before the master sheet is touched, so a slow master sheet never holds up another opt-out', () => {
+  const w = makeWorld(); withTab(w); const master = withMaster(w, [lead('ann@example.com')]); const seen = [];
+  const realRange = master.getRange; master.getRange = (r, c, nr, nc) => { seen.push(w.locks.released); return realRange(r, c, nr, nc); };
+  recordFrom(w, PLAIN); assert.ok(seen.length >= 3 && seen.every((released) => released === 1), JSON.stringify(seen)); assert.deepStrictEqual(plain(w.locks), { waited: 1, tried: 0, released: 1 });
+});
+test('the campaign name is looked up once per request', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, [lead('ann@example.com')]); let reads = 0;
+  const codes = w.makeSheet([['Code', 'Campaign'], [CCODE, 'Spring_Launch']]); const real = codes.getDataRange; codes.getDataRange = () => { reads++; return real(); }; w.sheets['Campaign codes'] = codes;
+  recordFrom(w, coded()); assert.strictEqual(reads, 1);
+});
+test('nothing is remembered from one request to the next: a code listed after a failed lookup is found', () => {
+  const w = makeWorld(); withTab(w); recordFrom(w, coded({ e: 'a@x.com' })); assert.strictEqual(rowsOf(w)[0][4], CCODE);
+  withCodes(w, [[CCODE, 'Spring_Launch']]); recordFrom(w, coded({ e: 'b@x.com' })); assert.strictEqual(rowsOf(w)[1][4], 'Spring_Launch');
+});
+test('a spreadsheet opened for one request is not reused by the next', () => {
+  const w = makeWorld(); withTab(w); info(w, PLAIN); info(w, PLAIN); assert.strictEqual(w.opened.length, 2);
+});
+test('a master tab that is only a header, or empty, is handled', () => {
+  const w = makeWorld(); withTab(w); withMaster(w, []); assert.strictEqual(recordFrom(w, PLAIN).ok, true);
+  const empty = makeWorld(); withTab(empty); empty.sheets[MASTER] = empty.makeSheet([]); assert.strictEqual(recordFrom(empty, PLAIN).ok, true); assert.strictEqual(rowsOf(empty).length, 1);
+});
+test('the speed advice is written into the script\'s own description', () => {
+  assert.ok(CODE.includes('SPEED: opening a spreadsheet is the slowest thing this script does') && CODE.includes('Turn the DIAGNOSTICS property off'));
 });
 
 let failed = 0;
