@@ -784,3 +784,131 @@ def test_two_html_campaigns_add_up_their_unsubscribes_and_their_contacted():
     b = html_perf([lead(1, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(2, IntroSentAt=SENT_AT, Status="Stopped - Unsubscribed"), lead(3, IntroSentAt=SENT_AT), lead(4, IntroSentAt=SENT_AT)])
     both = pl.combine_performance([a, b])
     assert both["unsubscribed"] == 3 and both["unsubscribe_rate"] == pytest.approx(3 / 6) and both["outcomes"]["Unsubscribed"] == 3
+
+
+
+# ================================================================ who unsubscribed, credited to a stage, a variant and a sender (HTML campaigns only)
+
+UN = "Stopped - Unsubscribed"
+
+
+def sent_leg(**kw):
+    """A lead emailed at intro on 10-20 (variant A) and follow-up 1 on 10-23 (variant B) by sales1."""
+    base = {"SenderAccount": "sales1", "IntroSentAt": "2026-10-20 10:00:00", "IntroVariant": "A", "FollowUp1SentAt": "2026-10-23 10:00:00", "FollowUp1Variant": "B"}
+    base.update(kw)
+    return base
+
+
+def credits(p):
+    return ({r["stage"]: r["unsubscribed"] for r in p["stages"]}, {r["variant"]: r["unsubscribed"] for r in p["variants"]})
+
+
+def test_an_unsubscribe_is_credited_to_the_latest_email_sent_before_it():
+    p = html_perf([lead(1, Status=UN, LastActionAt="2026-10-24 09:00:00", **sent_leg())])
+    assert credits(p) == ({"followup1": 1}, {"B": 1})                                    # the follow-up of 10-23, not the intro of 10-20
+
+
+def test_an_email_sent_after_the_unsubscribe_is_never_credited():
+    p = html_perf([lead(1, Status=UN, LastActionAt="2026-10-22 09:00:00", **sent_leg())])
+    assert credits(p) == ({"intro": 1}, {"A": 1})
+
+
+@pytest.mark.parametrize("stamp", ["", "not a time", None, "2026-13-45 99:99:99"])
+def test_with_no_usable_time_it_is_credited_to_the_last_email_the_person_was_sent(stamp):
+    p = html_perf([lead(1, Status=UN, LastActionAt=stamp, **sent_leg())])
+    stages, variants = credits(p)
+    assert stages.get("followup1") == 1 and variants.get("B") == 1 and p["unsubscribes_by_day"] == {} and p["unsubscribed"] == 1
+
+
+def test_a_time_before_any_email_falls_back_to_the_last_email_sent():
+    p = html_perf([lead(1, Status=UN, LastActionAt="2026-01-01 00:00:00", **sent_leg())])
+    assert credits(p)[0].get("followup1") == 1 and p["unsubscribes_by_day"] == {"2026-01-01": 1}
+
+
+def test_someone_never_emailed_is_counted_in_the_totals_but_credited_to_no_stage_variant_or_sender():
+    p = html_perf([lead(1, Status=UN, LastActionAt="2026-10-24 09:00:00", SenderAccount="sales1"), lead(2, **sent_leg())])
+    assert p["unsubscribed"] == 1 and p["outcomes"]["Unsubscribed"] == 1
+    assert all(r["unsubscribed"] == 0 for r in p["stages"] + p["variants"] + p["sender_rows"] + p["variant_stage_rows"])
+
+
+def test_the_stage_variant_and_sender_rows_carry_the_count_and_the_share_of_what_they_sent():
+    p = html_perf([lead(1, Status=UN, LastActionAt="2026-10-24 09:00:00", **sent_leg()), lead(2, **sent_leg()), lead(3, **sent_leg(SenderAccount="sales2"))])
+    log = [send(i, "intro", "A", "2026-10-20 10:00:00") for i in (1, 2, 3)] + [send(1, "followup1", "B", "2026-10-23 10:00:00")]
+    p = pl.build_campaign_performance({**cfg(), "format": "html"}, [lead(1, Status=UN, LastActionAt="2026-10-24 09:00:00", **sent_leg()), lead(2, **sent_leg()), lead(3, **sent_leg(SenderAccount="sales2"))], [], log)
+    follow = next(r for r in p["stages"] if r["stage"] == "followup1")
+    assert follow["unsubscribed"] == 1 and follow["unsubscribe_rate"] == 1.0 and next(r for r in p["stages"] if r["stage"] == "intro")["unsubscribe_rate"] == 0.0
+    assert next(r for r in p["variants"] if r["variant"] == "B")["unsubscribed"] == 1
+    vs = next(r for r in p["variant_stage_rows"] if (r["stage"], r["variant"]) == ("followup1", "B"))
+    assert vs["unsubscribed"] == 1 and vs["unsubscribe_rate"] == 1.0
+    sales1 = next(r for r in p["sender_rows"] if r["account"] == "sales1")
+    assert sales1["unsubscribed"] == 1 and sales1["unsubscribe_rate"] == pytest.approx(1 / 2) and next(r for r in p["sender_rows"] if r["account"] == "sales2")["unsubscribed"] == 0
+
+
+def test_a_group_with_no_emails_has_no_rate_not_a_zero():
+    p = html_perf([lead(1, Status=UN, LastActionAt="2026-10-24 09:00:00", **sent_leg())])           # no send log at all: nothing was logged as sent
+    assert all(r["unsubscribe_rate"] is None for r in p["stages"] if r["sent"] == 0)
+
+
+def test_a_plain_text_campaign_credits_nothing_even_if_a_lead_has_that_status():
+    p = perf([lead(1, Status=UN, LastActionAt="2026-10-24 09:00:00", **sent_leg())])
+    assert p["unsubscribes_by_day"] == {} and all(r["unsubscribed"] == 0 for r in p["stages"] + p["variants"] + p["sender_rows"] + p["variant_stage_rows"])
+
+
+def test_unsubscribes_are_counted_per_utc_day_from_the_time_the_sheet_recorded():
+    p = html_perf([lead(1, Status=UN, LastActionAt="2026-10-24 23:59:59", **sent_leg()), lead(2, Status=UN, LastActionAt="2026-10-24 00:00:01", **sent_leg()), lead(3, Status=UN, LastActionAt="2026-10-26 12:00:00", **sent_leg())])
+    assert p["unsubscribes_by_day"] == {"2026-10-24": 2, "2026-10-26": 1}
+
+
+def test_only_the_unsubscribed_status_counts_as_an_unsubscribe_in_every_breakdown():
+    p = html_perf([lead(1, Status="Stopped - Manual", LastActionAt="2026-10-24 09:00:00", **sent_leg()), lead(2, Status="Stopped - Replied", LastActionAt="2026-10-24 09:00:00", **sent_leg())])
+    assert p["unsubscribed"] == 0 and p["unsubscribes_by_day"] == {} and all(r["unsubscribed"] == 0 for r in p["stages"] + p["variants"])
+
+
+def test_the_daily_series_of_an_html_campaign_has_an_unsubscribes_value_every_day_and_a_text_campaign_does_not():
+    html = html_perf([lead(1, Status=UN, LastActionAt="2026-10-26 09:00:00", **sent_leg())])
+    series = pl.daily_series(html, 7, today=date(2026, 10, 28))
+    assert len(series) == 7 and all("Unsubscribes" in day for day in series) and {d["date"]: d["Unsubscribes"] for d in series}["2026-10-26"] == 1 and sum(d["Unsubscribes"] for d in series) == 1
+    text_report = pl.build_campaign_performance(cfg(), [lead(1, Status=UN, LastActionAt="2026-10-26 09:00:00", **sent_leg())], [], [send(1, "intro", "A", "2026-10-26 10:00:00")])
+    text = pl.daily_series(text_report, 7, today=date(2026, 10, 28))
+    assert len(text) == 7 and sum(day["Sent"] for day in text) == 1 and all("Unsubscribes" not in day for day in text) and text_report["unsubscribes_by_day"] == {}
+
+
+def test_an_all_time_series_starts_at_the_first_recorded_day_including_an_unsubscribe_day():
+    p = {**html_perf([]), "sent_by_day": {"2026-10-25": 2}, "replies_by_day": {}, "unsubscribes_by_day": {"2026-10-22": 1}, "is_html": True}
+    series = pl.daily_series(p, None, today=date(2026, 10, 27))
+    assert series[0]["date"] == "2026-10-22" and series[0]["Unsubscribes"] == 1 and series[-1]["date"] == "2026-10-27"
+
+
+def test_all_campaigns_add_up_the_unsubscribes_by_stage_variant_sender_and_day_with_rates_over_html_emails_only():
+    html = pl.build_campaign_performance({**cfg(), "format": "html"}, [lead(1, Status=UN, LastActionAt="2026-10-22 09:00:00", **sent_leg())], [], [send(1, "intro", "A", "2026-10-20 10:00:00")])
+    text = pl.build_campaign_performance(cfg(), [lead(2, **sent_leg())], [], [send(2, "intro", "A", "2026-10-20 10:00:00"), send(2, "intro", "A", "2026-10-20 11:00:00"), send(2, "intro", "A", "2026-10-20 12:00:00")])
+    both = pl.combine_performance([html, text])
+    intro = next(r for r in both["stages"] if r["stage"] == "intro")
+    assert (intro["sent"], intro["unsubscribed"], intro["unsubscribe_rate"]) == (4, 1, 1.0)               # 1 of the HTML campaign's 1 email: never 1 of all 4
+    variant = next(r for r in both["variants"] if r["variant"] == "A")
+    assert (variant["sent"], variant["unsubscribed"], variant["unsubscribe_rate"]) == (4, 1, 1.0)
+    assert both["unsubscribes_by_day"] == {"2026-10-22": 1} and [(r["account"], r["unsubscribed"], r["unsubscribe_rate"]) for r in both["sender_rows"]] == [("sales1", 1, 1.0)]                    # 1 of the 1 lead the HTML campaign contacted: the text campaign's lead is not in the denominator
+    vs = next(r for r in both["variant_stage_rows"] if (r["stage"], r["variant"]) == ("intro", "A"))
+    assert (vs["unsubscribed"], vs["unsubscribe_rate"]) == (1, 1.0)
+
+
+def test_two_html_campaigns_add_their_unsubscribes_and_their_emails():
+    only_intro = dict(FollowUp1SentAt="", FollowUp1Variant="")
+    a = pl.build_campaign_performance({**cfg(), "format": "html"}, [lead(1, Status=UN, LastActionAt="2026-10-22 09:00:00", **sent_leg(**only_intro)), lead(9, **sent_leg(**only_intro))], [],
+                                      [send(1, "intro", "A", "2026-10-20 10:00:00"), send(9, "intro", "A", "2026-10-20 10:00:00")])
+    b = pl.build_campaign_performance({**cfg(), "format": "html"}, [lead(1, Status=UN, LastActionAt="2026-10-22 10:00:00", **sent_leg(**only_intro)), lead(2, Status=UN, LastActionAt="2026-10-25 10:00:00", **sent_leg(**only_intro))], [],
+                                      [send(i, "intro", "A", "2026-10-20 10:00:00") for i in (1, 2, 3, 4)])
+    both = pl.combine_performance([a, b])
+    intro = next(r for r in both["stages"] if r["stage"] == "intro")
+    assert (intro["sent"], intro["unsubscribed"], intro["unsubscribe_rate"]) == (6, 3, 0.5)
+    assert both["unsubscribes_by_day"] == {"2026-10-22": 2, "2026-10-25": 1} and both["unsubscribed"] == 3 and both["is_html"] is True
+
+
+def test_combining_still_works_with_reports_made_before_unsubscribes_were_counted():
+    old = {key: value for key, value in html_perf([lead(1, **sent_leg())]).items() if key not in ("unsubscribes_by_day", "unsubscribed", "unsubscribe_rate", "is_html")}
+    old["stages"] = [{k: v for k, v in r.items() if k not in ("unsubscribed", "unsubscribe_rate")} for r in old["stages"]]
+    old["variants"] = [{k: v for k, v in r.items() if k not in ("unsubscribed", "unsubscribe_rate")} for r in old["variants"]]
+    old["variant_stage_rows"] = [{k: v for k, v in r.items() if k not in ("unsubscribed", "unsubscribe_rate")} for r in old["variant_stage_rows"]]
+    old["sender_rows"] = [{k: v for k, v in r.items() if k not in ("unsubscribed", "unsubscribe_rate")} for r in old["sender_rows"]]
+    both = pl.combine_performance([old])
+    assert both["unsubscribes_by_day"] == {} and all(r["unsubscribed"] == 0 for r in both["stages"])
