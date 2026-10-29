@@ -229,3 +229,14 @@ def test_the_each_variant_stage_by_stage_table_of_an_html_campaign_has_the_unsub
 
 def test_the_each_variant_stage_by_stage_table_of_a_plain_text_campaign_has_exactly_its_old_columns():
     assert list(_variant_stage_frame(_perf_page(False)).columns) == ["Stage", "Variant", "Emails sent", "Replies", "Reply rate", "Positive"]
+
+
+
+def test_an_html_campaigns_paired_table_cards_use_the_grid_that_stacks_sooner():
+    markup = _perf_markup(_perf_page(True))
+    assert markup.count('class="pf-grid pf-g2w"') == 2 and 'class="pf-grid pf-g2e"' not in markup
+
+
+def test_a_plain_text_campaigns_paired_cards_keep_the_grid_they_always_had():
+    markup = _perf_markup(_perf_page(False))
+    assert 'class="pf-grid pf-g2w"' not in markup and markup.count('class="pf-grid pf-g2e"') >= 2
