@@ -124,7 +124,7 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
                                         lambda value: f"{value}  ★ best" if best_variant is not None and str(value) == str(best_variant) else value, html=is_html)
                     if perf["variants"] else None)
     if stage_card and variant_card:
-        _show(H.grid_html("g2e", [stage_card, variant_card]))
+        _show(H.grid_html("g2w" if is_html else "g2e", [stage_card, variant_card]))                # an HTML campaign's tables are wider: its pair stacks sooner on a narrower screen
     else:
         left, right = st.columns(2)
         with left:
@@ -168,7 +168,7 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
         H.kpi_html("Failed sends", perf["send_failures"]),
     ]))
     if sender_card:
-        _show(H.grid_html("g2e", [sender_card, deliverability_card]))
+        _show(H.grid_html("g2w" if is_html else "g2e", [sender_card, deliverability_card]))
     else:
         left, right = st.columns(2)
         with left:
