@@ -40,7 +40,8 @@ def test_the_only_scripts_are_its_own_two_files_and_nothing_is_written_inline():
 
 
 def test_the_page_loads_nothing_from_anywhere_else_and_is_kept_out_of_search_and_referrers():
-    assert not re.search(r"<(link|img|iframe|object|embed|form)\b", HTML, re.I) and "@import" not in HTML and "url(" not in HTML
+    assert not re.search(r"<(img|iframe|object|embed|form)\b", HTML, re.I) and "@import" not in HTML and "url(" not in HTML
+    assert re.findall(r"<link\b[^>]*>", HTML) == ['<link rel="preconnect" href="https://script.google.com">', '<link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>']
     assert '<meta name="robots" content="noindex, nofollow">' in HTML and '<meta name="referrer" content="no-referrer">' in HTML and 'name="viewport"' in HTML and '<html lang="en">' in HTML
 
 
@@ -83,7 +84,7 @@ def test_it_will_only_talk_to_a_google_web_app_address_of_exactly_the_right_shap
 
 
 def test_the_link_is_sent_only_to_that_address_and_a_very_long_link_is_refused_before_any_request():
-    assert re.search(r"token\.length > 2000\)", SCRIPT) and "encodeURIComponent(token)" in SCRIPT and SCRIPT.count("request(") == 3
+    assert re.search(r"token\.length > 2000\)", SCRIPT) and "encodeURIComponent(token)" in SCRIPT and SCRIPT.count("request(") == 4
 
 
 # ================================================================ the address in config.js
@@ -170,3 +171,49 @@ def test_the_already_card_uses_the_same_footer_and_heading_as_the_questions_card
 
 def test_the_script_sends_the_already_flag_in_the_data_the_page_reads():
     assert "already: already" in CODE.split("function info_")[1].split("function confirmApi_")[0]
+
+
+
+# ================================================================ no waiting page: a skeleton, a head start on connecting, and a confirmation that does not wait for the master tab
+
+def test_the_page_shows_a_skeleton_of_the_card_while_it_waits_not_a_one_moment_message():
+    assert "One moment" not in HTML and "One moment" not in SCRIPT
+    found = re.search(r'<div class="bd" id="bd"([^>]*)>(.*?)</div><span class="sr">', HTML, re.S)
+    attributes, inner = found.group(1), found.group(2)
+    assert attributes == ' aria-busy="true"' and inner.startswith('<div class="sk" aria-hidden="true">') and inner.count("<i") == 6
+    assert re.sub(r"<[^>]*>", "", inner).strip() == ""                                # the skeleton holds no words, so nothing unverified can ever be shown in it
+
+
+def test_the_skeleton_is_still_announced_to_a_screen_reader_and_is_still_for_people_who_ask_for_less_motion():
+    assert '<span class="sr">Checking your link…</span>' in HTML and ".sr{position:absolute;left:-9999px" in HTML
+    assert "@media (prefers-reduced-motion:reduce){.sk i{animation:none}}" in HTML and "@keyframes sk{" in HTML
+
+
+def test_the_skeleton_is_marked_busy_until_the_page_replaces_it():
+    assert "function clear(node) { node.removeAttribute('aria-busy');" in SCRIPT and 'id="bd" aria-busy="true"' in HTML
+
+
+def test_the_page_starts_connecting_to_google_before_it_needs_to_and_to_nobody_else():
+    links = re.findall(r'<link rel="preconnect" href="([^"]+)"', HTML)
+    assert links == ["https://script.google.com", "https://script.googleusercontent.com"] and "dns-prefetch" not in HTML and "prefetch" not in HTML
+
+
+def test_the_confirmation_says_it_may_leave_the_master_tab_to_a_second_request():
+    assert "details: details.value, defer: true })" in SCRIPT and "defer: true" in SCRIPT and SCRIPT.count("defer") == 1
+
+
+def test_the_second_request_is_sent_once_after_the_person_is_told_and_only_for_a_real_unsubscribe():
+    after = SCRIPT.split("say('tick', 'You are unsubscribed', lines);")[1].split("\n      }).catch(function () {\n        go.disabled = false;")[0]
+    assert SCRIPT.count("api: 'sync'") == 1 and "if (result.test !== true) {" in after and "keepalive: true" in after and ".catch(function () {});" in after
+    assert "'Content-Type': 'text/plain;charset=utf-8'" in after and "t: token" in after
+
+
+def test_the_second_request_is_never_sent_when_the_person_stays_subscribed_or_the_confirmation_fails():
+    stay = SCRIPT.split("stay.onclick = function () {")[1].split("};")[0]
+    failure = SCRIPT.split("}).catch(function () {\n        go.disabled = false;")[1].split("};")[0]
+    assert "sync" not in stay and "request(" not in stay and "sync" not in failure and "request(" not in failure
+
+
+def test_the_page_and_the_script_agree_on_the_second_request():
+    assert "body.defer === true" in CODE and "body.api === 'sync'" in CODE and "function syncApi_" in CODE
+    assert "api: 'sync'" in SCRIPT and "api: 'confirm'" in SCRIPT
