@@ -100,12 +100,15 @@ def build_performance_csv(perf: Dict, title: str = "Performance") -> str:
     section("Where the leads are now", ["Where", "Leads", "Share of leads"],
             [[OUTCOME_NAMES.get(label, label), outcomes.get(label, 0), format_rate(outcomes.get(label, 0) / total_leads) if total_leads else _DASH] for label in outcome_order(perf)])
     section("What the replies say", ["Reading", "Creators"], [[label, perf["intents"][label]] for label in INTENT_ORDER] + [[INTENT_NOT_CLASSIFIED, perf["intents"][INTENT_NOT_CLASSIFIED]]])
-    rate_header = ["Emails sent", "Replies", "Reply rate", "Positive", "Positive rate"]
-    rate = lambda r: [r["sent"], r["replies"], format_rate(r["reply_rate"]), r["positive"], format_rate(r["positive_rate"])]      # noqa: E731
+    html = bool(perf.get("is_html"))
+    unsub_header = ["Unsubscribed", "Unsubscribe rate"] if html else []
+    unsub = lambda r: [int(r.get("unsubscribed") or 0), format_rate(r.get("unsubscribe_rate"))] if html else []      # noqa: E731
+    rate_header = ["Emails sent", "Replies", "Reply rate", "Positive", "Positive rate"] + unsub_header
+    rate = lambda r: [r["sent"], r["replies"], format_rate(r["reply_rate"]), r["positive"], format_rate(r["positive_rate"])] + unsub(r)      # noqa: E731
     section("Follow-up stage effectiveness", ["Stage"] + rate_header, [[humanize_stage(r["stage"])] + rate(r) for r in perf["stages"]])
     section("Template variants", ["Variant"] + rate_header, [[r["variant"]] + rate(r) for r in perf["variants"]])
-    section("By sender account", ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"],
-            [[r["account"], r["sent"], r["leads"], r["replies"], format_rate(r["reply_rate"])] for r in perf["sender_rows"]])
+    section("By sender account", ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"] + unsub_header,
+            [[r["account"], r["sent"], r["leads"], r["replies"], format_rate(r["reply_rate"])] + unsub(r) for r in perf["sender_rows"]])
     section("Deliverability", ["Figure", "Value"], [["Hard bounces", perf["bounced_hard"]], ["Soft bounces", perf["bounced_soft"]], ["Failed sends", perf["send_failures"]]]
             + ([["Unsubscribed", int(perf.get("unsubscribed") or 0)]] if perf.get("is_html") else []))
     section("Errors (all time)", ["Error type", "Count"], [[r["error_type"], r["count"]] for r in perf["error_rows"]])
