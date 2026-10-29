@@ -26,10 +26,18 @@ def _show(markup: str) -> None:
     st.markdown(markup, unsafe_allow_html=True)
 
 
-def _effectiveness_card(title: str, hint: str, first_header: str, key: str, rows: List[Dict], label=lambda value: value) -> str:
-    table = H.table_html([first_header] + _RATE_HEADERS, [
-        [label(r[key]), r["sent"], r["replies"], format_rate(r["reply_rate"]), r["positive"], format_rate(r["positive_rate"])] for r in rows])
-    return H.card_html(title, hint, table)
+_UNSUB_HEADERS = ["Unsubscribed", "Unsubscribe rate"]
+_UNSUB_HINT = " Unsubscribed is credited to the latest email sent to that person before they unsubscribed."
+
+
+def _unsub_cells(row: Dict) -> List:
+    return [int(row.get("unsubscribed") or 0), format_rate(row.get("unsubscribe_rate"))]
+
+
+def _effectiveness_card(title: str, hint: str, first_header: str, key: str, rows: List[Dict], label=lambda value: value, html: bool = False) -> str:
+    table = H.table_html([first_header] + _RATE_HEADERS + (_UNSUB_HEADERS if html else []), [
+        [label(r[key]), r["sent"], r["replies"], format_rate(r["reply_rate"]), r["positive"], format_rate(r["positive_rate"])] + (_unsub_cells(r) if html else []) for r in rows])
+    return H.card_html(title, hint + (_UNSUB_HINT if html else ""), table)
 
 
 def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = None,
@@ -50,11 +58,12 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
     _show(H.grid_html("g5" if len(cards) > 10 else "g4", cards[6:]))                # five cards on the second row for an HTML campaign (the Unsubscribed card)
 
     # ---- where every lead is right now (each lead is in exactly one place, so these add up to the leads)
+    is_html = bool(perf.get("is_html"))                      # only an HTML campaign has an unsubscribe page, so only it shows unsubscribes anywhere below
     outcomes = perf.get("outcomes") or {}
     outcome_rows = [(OUTCOME_NAMES.get(label, label), int(outcomes.get(label, 0))) for label in outcome_order(perf) if int(outcomes.get(label, 0)) > 0]
     if outcome_rows:
-        _show(H.card_html("Where your leads are now", f"Every lead is in exactly one place, so these add up to your {perf['total_leads']} leads. "
-                          "A lead that finished the sequence moves to Replied if it answers later.", H.bars_html(outcome_rows, H.OUTCOME_COLOURS)))
+        _show(H.spaced_html(H.card_html("Where your leads are now", f"Every lead is in exactly one place, so these add up to your {perf['total_leads']} leads. "
+                                        "A lead that finished the sequence moves to Replied if it answers later.", H.bars_html(outcome_rows, H.OUTCOME_COLOURS))))
 
     # ---- activity over time, and what the replies say
     with st.container(key=f"pf_toolbar_{key_prefix}"):
@@ -68,8 +77,9 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
     left, right = st.columns([1.6, 1])
     with left:
         if series:
-            _show(H.card_html("Activity", "Days are UTC days (the Sheet's own clock). Replies are counted on the day they were logged.",
-                              H.area_chart_svg(series), [("Sent", "sent"), ("Replies", "replies")]))
+            _show(H.card_html("Activity", "Days are UTC days (the Sheet's own clock). Replies are counted on the day they were logged."
+                              + (" Unsubscribes are counted on the day they were recorded in the Sheet." if is_html else ""),
+                              H.area_chart_svg(series), [("Sent", "sent"), ("Replies", "replies")] + ([("Unsubscribes", "unsubs")] if is_html else [])))
         else:
             st.subheader("Activity")
             st.info("Nothing has been sent or replied to yet.")
@@ -107,11 +117,11 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
                              "latest email sent before it was logged."))
 
     # ---- follow-up stage and variant effectiveness (two cards side by side, the same height)
-    stage_card = (_effectiveness_card("Follow-up stage effectiveness", "Positive = replies the AI read as interested.", "Stage", "stage", perf["stages"], humanize_stage)
+    stage_card = (_effectiveness_card("Follow-up stage effectiveness", "Positive = replies the AI read as interested.", "Stage", "stage", perf["stages"], humanize_stage, html=is_html)
                   if perf["stages"] else None)
     best_variant = ((best or {}).get("variant") or {}).get("label")                                   # the variant the "what worked best" box names
     variant_card = (_effectiveness_card("Template variants", "Each reply is credited to the exact email it answered.", "Variant", "variant", perf["variants"],
-                                        lambda value: f"{value}  ★ best" if best_variant is not None and str(value) == str(best_variant) else value)
+                                        lambda value: f"{value}  ★ best" if best_variant is not None and str(value) == str(best_variant) else value, html=is_html)
                     if perf["variants"] else None)
     if stage_card and variant_card:
         _show(H.grid_html("g2e", [stage_card, variant_card]))
@@ -139,6 +149,8 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
                     "Replies": [r["replies"] for r in perf["variant_stage_rows"]],
                     "Reply rate": [format_rate(r["reply_rate"]) for r in perf["variant_stage_rows"]],
                     "Positive": [r["positive"] for r in perf["variant_stage_rows"]],
+                    **({"Unsubscribed": [int(r.get("unsubscribed") or 0) for r in perf["variant_stage_rows"]],
+                        "Unsubscribe rate": [format_rate(r.get("unsubscribe_rate")) for r in perf["variant_stage_rows"]]} if is_html else {}),
                 },
                 width="stretch",
                 hide_index=True,
@@ -147,8 +159,8 @@ def render_performance(perf: Dict, *, key_prefix: str, best: Optional[Dict] = No
     # ---- by sender account, and deliverability (again the same height)
     top_rate = max([r["reply_rate"] or 0 for r in perf["sender_rows"]] + [0])
     sender_card = (H.card_html("By sender account", "", H.table_html(
-        ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"],
-        [[r["account"], r["sent"], r["leads"], r["replies"], H.bar_cell((r["reply_rate"] or 0) / top_rate if top_rate else 0, format_rate(r["reply_rate"]))]
+        ["Account", "Emails sent", "Leads contacted", "Replies", "Reply rate"] + (_UNSUB_HEADERS if is_html else []),
+        [[r["account"], r["sent"], r["leads"], r["replies"], H.bar_cell((r["reply_rate"] or 0) / top_rate if top_rate else 0, format_rate(r["reply_rate"]))] + (_unsub_cells(r) if is_html else [])
          for r in perf["sender_rows"]])) if perf["sender_rows"] else None)
     deliverability_card = H.card_html("Deliverability", "Hard bounces stop a lead; soft bounces are retried.", H.grid_html("g3", [
         H.kpi_html("Hard bounces", perf["bounced_hard"], format_rate(perf["bounce_rate_hard"])),
