@@ -1,14 +1,21 @@
-"""Initial E-O-A API service. This deliberately exposes health only for now.
-Operational endpoints will be added after authentication and engine integration
-are designed and tested; do not put email credentials in this file.
-"""
-import os
-from fastapi import FastAPI
+
+"""Read-only API for the E-O-A outreach application."""
+
+from pathlib import Path
+
+import yaml
+from fastapi import FastAPI, HTTPException
 
 app = FastAPI(
     title="E-O-A Backend API",
-    version="0.1.0",
-    description="Backend API for the E-O-A outreach application.",
+    version="0.2.0",
+    description="Read-only campaign information for E-O-A.",
+)
+
+CAMPAIGNS_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "config"
+    / "campaigns"
 )
 
 
@@ -17,11 +24,40 @@ def health():
     return {"status": "ok", "service": "eoa-backend-api"}
 
 
-if __name__ == "__main__":
-    import uvicorn
+@app.get("/campaigns")
+def get_campaigns():
+    """Return safe campaign summaries without exposing sending settings."""
 
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", "8080")),
-    )
+    if not CAMPAIGNS_DIR.is_dir():
+        raise HTTPException(
+            status_code=500,
+            detail="Campaign configuration directory not found.",
+        )
+
+    campaigns = []
+
+    try:
+        for file_path in sorted(CAMPAIGNS_DIR.glob("*.yaml")):
+            with file_path.open("r", encoding="utf-8") as file:
+                config = yaml.safe_load(file) or {}
+
+            if not isinstance(config, dict):
+                continue
+
+            campaigns.append({
+                "id": file_path.stem,
+                "name": file_path.stem.replace("_", " "),
+                "status": config.get("status", "unspecified"),
+                "format": config.get("format", "unspecified"),
+            })
+
+    except (OSError, yaml.YAMLError):
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to read campaign configurations.",
+        )
+
+    return {
+        "count": len(campaigns),
+        "campaigns": campaigns,
+    }
