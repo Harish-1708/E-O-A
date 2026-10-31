@@ -1,4 +1,3 @@
-
 """Read-only API for the E-O-A outreach application."""
 
 from pathlib import Path
