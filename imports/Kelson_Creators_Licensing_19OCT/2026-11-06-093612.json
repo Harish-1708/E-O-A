@@ -1,0 +1,53 @@
+{
+  "leads": [
+    {
+      "FirstName": "Kristina",
+      "LastName": "Corti",
+      "Name": "Kristina Corti",
+      "Email": "krissy@krissythedigitalmom.com",
+      "Client": "DudeRobe",
+      "Product": "DudeRobe",
+      "Creator": "@krissycorti",
+      "Content Score": "5",
+      "Video File": "https://www.tiktok.com/@krissycorti/video/7704487766276558094",
+      "Refunnel Link": "https://collections.refunnel.com/public-media?shop_id=813299&media_id=tk_7704487766276558094",
+      "Usage Rights": "",
+      "Rights Expiration": "",
+      "Ad Ready": "",
+      "Last Contact Date": ""
+    },
+    {
+      "FirstName": "Sarah",
+      "LastName": "",
+      "Name": "Sarah",
+      "Email": "mrssmithgetsreal@yahoo.com",
+      "Client": "DudeRobe",
+      "Product": "DudeRobe",
+      "Creator": "@mrs_smith_gets_real",
+      "Content Score": "5",
+      "Video File": "https://www.tiktok.com/@mrs_smith_gets_real/video/7704300803875441950",
+      "Refunnel Link": "https://collections.refunnel.com/public-media?shop_id=813299&media_id=tk_7704300803875441950",
+      "Usage Rights": "",
+      "Rights Expiration": "",
+      "Ad Ready": "",
+      "Last Contact Date": ""
+    },
+    {
+      "FirstName": "Sheriece",
+      "LastName": "",
+      "Name": "Sheriece",
+      "Email": "sheriecewebbcampb@gmail0.com",
+      "Client": "DudeRobe",
+      "Product": "DudeRobe",
+      "Creator": "@sheriecewebbcampb",
+      "Content Score": "4",
+      "Video File": "https://www.tiktok.com/@sheriecewebbcampb/video/7702956283082640653",
+      "Refunnel Link": "https://collections.refunnel.com/public-media?shop_id=813299&media_id=tk_7702956283082640653",
+      "Usage Rights": "",
+      "Rights Expiration": "",
+      "Ad Ready": "",
+      "Last Contact Date": ""
+    }
+  ],
+  "allow_duplicate_emails": true
+}
