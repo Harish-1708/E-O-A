@@ -6,7 +6,6 @@ schedule:
   - mon
   - tue
   - wed
-  - thu
 sending:
   daily_limit: 200
   sender_rotation: true
